@@ -1,0 +1,12 @@
+node_modules/
+.next/
+target/
+out/
+cache/
+broadcast/
+generated/
+bun.lock
+.env
+.env.*
+!.env.example
+*.log

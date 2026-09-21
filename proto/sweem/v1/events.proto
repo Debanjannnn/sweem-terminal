@@ -1,0 +1,87 @@
+syntax = "proto3";
+
+package sweem.v1;
+
+import "sweem/v1/domain.proto";
+
+// stream SWEEM, subjects execution.> risk.> oracle.> schedule.>
+enum Subject {
+  SUBJECT_UNSPECIFIED = 0;
+  SUBJECT_EXECUTION_PENDING_V1 = 1; // execution.pending.v1
+  SUBJECT_EXECUTION_SETTLED_V1 = 2; // execution.settled.v1
+  SUBJECT_EXECUTION_FAILED_V1 = 3; // execution.failed.v1
+  SUBJECT_ORACLE_INDEX_PUBLISHED_V1 = 4; // oracle.index_published.v1
+  SUBJECT_RISK_LIQUIDATION_CANDIDATE_V1 = 5; // risk.liquidation_candidate.v1
+  SUBJECT_RISK_BREAKER_TRIPPED_V1 = 6; // risk.breaker_tripped.v1
+  SUBJECT_SCHEDULE_SLICE_DUE_V1 = 7; // schedule.slice_due.v1
+}
+
+enum FailureReason {
+  FAILURE_REASON_UNSPECIFIED = 0;
+  FAILURE_REASON_POLICY_REJECTED = 1;
+  FAILURE_REASON_DELEGATION_REVOKED = 2;
+  FAILURE_REASON_INSUFFICIENT_BALANCE = 3;
+  FAILURE_REASON_REVERTED = 4;
+  FAILURE_REASON_VENUE_ERROR = 5;
+  FAILURE_REASON_EXPIRED = 6;
+}
+
+message ExecutionPending {
+  string idempotency_key = 1; // nats msgId dedup
+  int64 emitted_at = 2;
+  string intent_key = 3;
+  string tx_hash = 4;
+  string market_id = 5;
+  int64 chain_id = 6;
+}
+
+message ExecutionSettled {
+  string idempotency_key = 1;
+  int64 emitted_at = 2;
+  string intent_key = 3;
+  string tx_hash = 4;
+  Confirmation confirmation = 5;
+  uint64 block_number = 6;
+}
+
+message ExecutionFailed {
+  string idempotency_key = 1;
+  int64 emitted_at = 2;
+  string intent_key = 3;
+  FailureReason reason = 4;
+  string detail = 5;
+}
+
+message IndexPublished {
+  string idempotency_key = 1;
+  int64 emitted_at = 2;
+  string market_id = 3;
+  string value = 4;
+  uint64 round_id = 5;
+  int64 published_at = 6;
+}
+
+message LiquidationCandidate {
+  string idempotency_key = 1;
+  int64 emitted_at = 2;
+  string market_id = 3;
+  string owner = 4;
+  string margin_ratio = 5;
+  uint64 observed_at_block = 6;
+}
+
+message BreakerTripped {
+  string idempotency_key = 1;
+  int64 emitted_at = 2;
+  string feed_id = 3;
+  string deviation = 4;
+  int64 tripped_at = 5;
+}
+
+message SliceDue {
+  string idempotency_key = 1;
+  int64 emitted_at = 2;
+  string schedule_id = 3;
+  uint32 slice_index = 4;
+  string intent_key = 5;
+}

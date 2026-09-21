@@ -1,0 +1,57 @@
+syntax = "proto3";
+
+package sweem.v1;
+
+enum ServiceOwner {
+  SERVICE_OWNER_UNSPECIFIED = 0;
+  SERVICE_OWNER_WALLET = 1;
+  SERVICE_OWNER_MARKET_DATA = 2;
+  SERVICE_OWNER_EXECUTOR = 3;
+  SERVICE_OWNER_SCHEDULER = 4;
+  SERVICE_OWNER_RECONCILER = 5;
+}
+
+// canonical table asserted by scripts/route-contract-test.go
+enum RouteName {
+  ROUTE_NAME_UNSPECIFIED = 0;
+
+  ROUTE_NAME_WALLET_HEALTH = 1; // GET /health, public
+  ROUTE_NAME_GET_ME = 2; // GET /v1/me
+  ROUTE_NAME_UPDATE_ME = 3; // POST /v1/me
+  ROUTE_NAME_GET_DELEGATION = 4; // GET /v1/delegation
+  ROUTE_NAME_SET_DELEGATION = 5; // PUT /v1/delegation
+  ROUTE_NAME_REVOKE_DELEGATION = 6; // DELETE /v1/delegation
+  ROUTE_NAME_CREATE_ORDER = 7; // POST /v1/orders
+  ROUTE_NAME_LIST_ORDERS = 8; // GET /v1/orders
+  ROUTE_NAME_GET_PORTFOLIO = 9; // GET /v1/portfolio
+  ROUTE_NAME_LIST_EXECUTIONS = 10; // GET /v1/executions
+  ROUTE_NAME_LIST_SCHEDULES = 11; // GET /v1/schedules
+  ROUTE_NAME_CREATE_SCHEDULE = 12; // POST /v1/schedules
+  ROUTE_NAME_GET_SCHEDULE = 13; // GET /v1/schedules/{id}
+  ROUTE_NAME_CANCEL_SCHEDULE = 14; // DELETE /v1/schedules/{id}
+
+  ROUTE_NAME_MARKET_DATA_HEALTH = 20; // GET /health
+  ROUTE_NAME_LIST_MARKETS = 21; // GET /v1/markets
+  ROUTE_NAME_GET_MARKET = 22; // GET /v1/markets/{id}
+  ROUTE_NAME_GET_BOOK = 23; // GET /v1/book/{market_id}
+  ROUTE_NAME_GET_CANDLES = 24; // GET /v1/candles/{market_id}
+  ROUTE_NAME_GET_QUOTE = 25; // POST /v1/quote
+
+  ROUTE_NAME_EXECUTOR_HEALTH = 30; // GET /health
+  ROUTE_NAME_EXECUTOR_ROUTE = 31; // POST /route, internal only
+
+  ROUTE_NAME_SCHEDULER_HEALTH = 40; // GET /health
+  ROUTE_NAME_RECONCILER_HEALTH = 50; // GET /health
+}
+
+message Route {
+  RouteName name = 1;
+  string method = 2;
+  string path = 3;
+  ServiceOwner owner = 4;
+  bool authenticated = 5;
+}
+
+message RouteTable {
+  repeated Route routes = 1;
+}

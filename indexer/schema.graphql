@@ -1,0 +1,378 @@
+# SCALE CONTRACT — read before adding a field.
+#   every monetary / rate / size field is 18-decimal WAD BigInt.
+#   USDC is 6dp at the contract boundary; widened once in src/scale.ts.
+#   *RateApr = per-second WAD * 365d, so 1e18 == 100% APR.
+#   size and skew are SIGNED WAD, longs positive.
+#   kuru price/size are RAW venue ticks, not WAD — see KuruTrade.
+# Everything here is finalized history. Nothing live, nothing speculative.
+
+enum VaultEventKind {
+  DEPOSIT
+  WITHDRAW
+  BORROW_ACCRUAL
+  FUNDING_ACCRUAL
+  LIQUIDATION_FEE
+  TRADING_FEE
+  TRADER_PNL
+  BAD_DEBT
+}
+
+"singleton, id = \"SweemVault\""
+type Vault {
+  id: ID!
+  totalAssets: BigInt!
+  totalShares: BigInt!
+  "totalAssets * WAD / totalShares. 1e18 at genesis."
+  sharePrice: BigInt!
+
+  "these six decompose (totalAssets - cumDeposited + cumWithdrawn), i.e. LP APY"
+  cumBorrowIncome: BigInt!
+  cumFundingIncome: BigInt!
+  cumLiquidationFeeIncome: BigInt!
+  cumTradingFeeIncome: BigInt!
+  "positive means the vault paid traders, a loss to LPs"
+  cumTraderPnlPaid: BigInt!
+  "trader losses the vault could not collect"
+  cumBadDebt: BigInt!
+
+  cumDeposited: BigInt!
+  cumWithdrawn: BigInt!
+  lpCount: Int!
+  updatedAtTimestamp: BigInt!
+  updatedAtBlock: BigInt!
+}
+
+type LpAccount {
+  id: ID!
+  vault: Vault!
+  shares: BigInt!
+  "assets paid in for the shares still held"
+  costBasis: BigInt!
+  cumDeposited: BigInt!
+  cumWithdrawn: BigInt!
+  "assetsOut - costBasis consumed, booked on withdrawal"
+  realizedPnl: BigInt!
+  "shares * Vault.sharePrice - costBasis, revalued on every share-price move"
+  unrealizedPnl: BigInt!
+  firstDepositTimestamp: BigInt!
+  updatedAtTimestamp: BigInt!
+  flows: [VaultFlow!]! @derivedFrom(field: "account")
+}
+
+type VaultFlow {
+  id: ID!
+  account: LpAccount!
+  kind: VaultEventKind!
+  assets: BigInt!
+  shares: BigInt!
+  sharePrice: BigInt!
+  "zero for deposits"
+  realizedPnl: BigInt!
+  caller: String!
+  counterparty: String!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  txHash: String!
+}
+
+"id is the on-chain bytes32 marketId. the registry stores no symbol, so neither does this."
+type Market {
+  id: ID!
+  indexOracle: IndexFeed!
+  "annualized sigma feed. null disables the power-funding term."
+  volOracle: IndexFeed
+  "power exponent, signed WAD. 0 plain, 2e18 square."
+  k: BigInt!
+
+  maxLeverage: BigInt!
+  maxOiPerSide: BigInt!
+  minPositionSize: BigInt!
+  maintenanceMarginBps: BigInt!
+  openFeeBps: BigInt!
+  closeFeeBps: BigInt!
+  liquidationFeeBps: BigInt!
+  skewScale: BigInt!
+  fundingK: BigInt!
+  fundingCapPerSec: BigInt!
+  "governance switch (MarketEnabled)"
+  enabled: Boolean!
+  "guardian kill switch (MarketHalted)"
+  halted: Boolean!
+
+  longOI: BigInt!
+  shortOI: BigInt!
+  skew: BigInt!
+
+  cumulativeFundingPerNotional: BigInt!
+  cumulativeBorrowPerNotional: BigInt!
+  lastFundingRate: BigInt!
+  lastBorrowRate: BigInt!
+  lastUtilization: BigInt!
+  lastIndexPrice: BigInt!
+  lastMarkPrice: BigInt!
+
+  cumVolume: BigInt!
+  cumFees: BigInt!
+  cumFundingToVault: BigInt!
+  cumBorrowToVault: BigInt!
+  tradeCount: Int!
+  openPositionCount: Int!
+  liquidationCount: Int!
+
+  createdAtTimestamp: BigInt!
+  createdAtBlock: BigInt!
+  updatedAtTimestamp: BigInt!
+
+  positions: [Position!]! @derivedFrom(field: "market")
+  fundingPoints: [FundingRatePoint!]! @derivedFrom(field: "market")
+  borrowPoints: [BorrowRatePoint!]! @derivedFrom(field: "market")
+  liquidations: [Liquidation!]! @derivedFrom(field: "market")
+}
+
+type FundingRatePoint {
+  id: ID!
+  market: Market!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  "seconds covered by this accrual"
+  dt: BigInt!
+  "per-second WAD, positive means longs pay. skew term plus power term, clamped."
+  fundingRate: BigInt!
+  "k(k-1)/2 * sigma^2 per second. subtract for the pure skew component."
+  powerFundingRate: BigInt!
+  fundingRateApr: BigInt!
+  cumulativeFundingPerNotional: BigInt!
+  longOI: BigInt!
+  shortOI: BigInt!
+  skew: BigInt!
+  markPrice: BigInt!
+  indexPrice: BigInt!
+}
+
+type BorrowRatePoint {
+  id: ID!
+  market: Market!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  dt: BigInt!
+  borrowRate: BigInt!
+  borrowRateApr: BigInt!
+  cumulativeBorrowPerNotional: BigInt!
+  utilization: BigInt!
+}
+
+enum PositionAction {
+  OPEN
+  MODIFY
+  CLOSE
+  LIQUIDATE
+}
+
+type Trader {
+  id: ID!
+  realizedPnl: BigInt!
+  cumVolume: BigInt!
+  cumFeesPaid: BigInt!
+  cumBorrowPaid: BigInt!
+  cumFundingPaid: BigInt!
+  tradeCount: Int!
+  liquidationCount: Int!
+  openPositionCount: Int!
+  firstTradeTimestamp: BigInt!
+  updatedAtTimestamp: BigInt!
+  positions: [Position!]! @derivedFrom(field: "trader")
+}
+
+"one row per (market, trader). closed positions are kept, not deleted."
+type Position {
+  id: ID!
+  market: Market!
+  trader: Trader!
+  "signed WAD, zero once closed"
+  size: BigInt!
+  collateral: BigInt!
+  entryIndex: BigInt!
+  notional: BigInt!
+  isOpen: Boolean!
+  liquidated: Boolean!
+
+  realizedPnl: BigInt!
+  borrowPaid: BigInt!
+  fundingPaid: BigInt!
+  feesPaid: BigInt!
+  badDebt: BigInt!
+
+  openedAtTimestamp: BigInt!
+  openedAtBlock: BigInt!
+  closedAtTimestamp: BigInt
+  closedAtBlock: BigInt
+
+  events: [PositionEvent!]! @derivedFrom(field: "position")
+}
+
+"append-only position history"
+type PositionEvent {
+  id: ID!
+  position: Position!
+  market: Market!
+  trader: Trader!
+  action: PositionAction!
+
+  sizeDelta: BigInt!
+  collateralDelta: BigInt!
+  sizeAfter: BigInt!
+  collateralAfter: BigInt!
+  indexPrice: BigInt!
+  notional: BigInt!
+  "this action only, not cumulative"
+  realizedPnl: BigInt!
+  borrowPaid: BigInt!
+  fundingPaid: BigInt!
+  fee: BigInt!
+
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  logIndex: Int!
+  txHash: String!
+}
+
+type Liquidation {
+  id: ID!
+  position: Position!
+  market: Market!
+  trader: Trader!
+  liquidator: String!
+  size: BigInt!
+  indexPrice: BigInt!
+  notional: BigInt!
+  penalty: BigInt!
+  liquidatorReward: BigInt!
+  "penalty - liquidatorReward, feeds cumLiquidationFeeIncome"
+  vaultFee: BigInt!
+  "collateral returned to the trader, WAD (the contract emits 6dp)"
+  traderRefund: BigInt!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  txHash: String!
+}
+
+"one IndexOracle contract. id is its address."
+type IndexFeed {
+  id: ID!
+  latestValue: BigInt!
+  latestRoundId: BigInt!
+  "oracle-reported observation time of the latest accepted value"
+  latestTimestamp: BigInt!
+  "true while the deviation breaker is tripped and the feed refuses reads"
+  halted: Boolean!
+  publicationCount: Int!
+  breakerTripCount: Int!
+  publications: [IndexPublication!]! @derivedFrom(field: "feed")
+  breakerEvents: [OracleBreakerEvent!]! @derivedFrom(field: "feed")
+}
+
+type IndexPublication {
+  id: ID!
+  feed: IndexFeed!
+  roundId: BigInt!
+  value: BigInt!
+  writer: String!
+  "oracle-reported observation time, not block time"
+  publishedAt: BigInt!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  txHash: String!
+}
+
+enum BreakerAction {
+  TRIPPED
+  RESET
+}
+
+type OracleBreakerEvent {
+  id: ID!
+  feed: IndexFeed!
+  action: BreakerAction!
+  roundId: BigInt!
+  lastValue: BigInt!
+  "value that breached max deviation (TRIPPED) or the reseed value (RESET)"
+  newValue: BigInt!
+  deviationBps: BigInt!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  txHash: String!
+}
+
+"singleton, id = \"Sweem\""
+type Protocol {
+  id: ID!
+  tvl: BigInt!
+  sharePrice: BigInt!
+  openInterestLong: BigInt!
+  openInterestShort: BigInt!
+  "total open notional / TVL, WAD"
+  utilization: BigInt!
+  cumVolume: BigInt!
+  cumFees: BigInt!
+  cumLiquidationVolume: BigInt!
+  cumBadDebt: BigInt!
+  tradeCount: Int!
+  liquidationCount: Int!
+  lpCount: Int!
+  traderCount: Int!
+  marketCount: Int!
+  updatedAtTimestamp: BigInt!
+  updatedAtBlock: BigInt!
+}
+
+enum KuruOrderStatus {
+  OPEN
+  FILLED
+  CANCELED
+}
+
+# kuru is the only source of spot fill history: there is no fills API.
+# price and size stay in the market's own uint32/uint96 tick units — the
+# per-market pricePrecision/sizePrecision is not in any event, so converting
+# here would be a guess. consumers scale by the market's precision.
+
+"id = <orderbook>-<orderId>"
+type KuruOrder {
+  id: ID!
+  "orderbook address, one contract per market"
+  market: String!
+  orderId: BigInt!
+  owner: String!
+  price: BigInt!
+  size: BigInt!
+  "size still resting, from the last Trade's updatedSize"
+  remainingSize: BigInt!
+  isBuy: Boolean!
+  status: KuruOrderStatus!
+  createdAtTimestamp: BigInt!
+  createdAtBlock: BigInt!
+  updatedAtTimestamp: BigInt!
+  txHash: String!
+  trades: [KuruTrade!]! @derivedFrom(field: "order")
+}
+
+"one fill. the maker side is the resting order; taker is whoever crossed."
+type KuruTrade {
+  id: ID!
+  market: String!
+  "null when the resting order predates the indexer's start block"
+  order: KuruOrder
+  orderId: BigInt!
+  maker: String!
+  taker: String!
+  txOrigin: String!
+  "true when the resting maker order was a bid"
+  isBuy: Boolean!
+  price: BigInt!
+  filledSize: BigInt!
+  updatedSize: BigInt!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  logIndex: Int!
+  txHash: String!
+}

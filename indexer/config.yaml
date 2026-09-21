@@ -1,0 +1,102 @@
+# yaml-language-server: $schema=./node_modules/envio/evm.schema.json
+name: sweem-indexer
+description: >-
+  sweem-terminal finalized-history indexer. Monad testnet (10143). Indexes only
+  finalized blocks, which is why it carries no reorg/rollback machinery.
+
+# block_lag holds this indexer FINALITY_DEPTH blocks behind the head, so every
+# block it processes is already final and nothing speculative is ever read.
+# There is therefore nothing to roll back; turning this on would be dead code,
+# not extra safety.
+rollback_on_reorg: false
+
+field_selection:
+  transaction_fields:
+    - hash
+
+contracts:
+  # `envio codegen` validates that these strings PARSE, never that they still
+  # describe the deployed contract — a wrong signature changes topic0 and the
+  # indexer silently matches nothing. src/abi-drift.test.ts diffs every line
+  # below against the `event` declarations in ../contracts/src/*.sol.
+  - name: SweemVault
+    events:
+      # OpenZeppelin ERC-4626, inherited: SweemVault declares no deposit/withdraw
+      # events of its own, so the param is `sender`, not `caller`.
+      # _decimalsOffset() == 12, so `assets` is 6dp USDC while `shares` is 18.
+      - event: "Deposit(address indexed sender, address indexed owner, uint256 assets, uint256 shares)"
+      - event: "Withdraw(address indexed sender, address indexed receiver, address indexed owner, uint256 assets, uint256 shares)"
+
+  - name: MarketRegistry
+    events:
+      - event: "MarketAdded(bytes32 indexed marketId, address indexed indexOracle, address indexed volOracle, int256 k)"
+      - event: "MarketParamsUpdated(bytes32 indexed marketId, (address indexOracle, address volOracle, int256 k, uint256 maxOiPerSide, uint256 maxLeverage, uint256 minPositionSize, uint256 maintenanceMarginBps, uint256 openFeeBps, uint256 closeFeeBps, uint256 liquidationFeeBps, uint256 fundingK, uint256 fundingCapPerSec, uint256 skewScale, bool enabled) params)"
+      - event: "MarketEnabled(bytes32 indexed marketId, bool enabled)"
+
+  - name: IndexOracle
+    # One contract per feed, so instances are registered dynamically from
+    # MarketAdded (src/handlers/MarketRegistry.ts) rather than pinned by address.
+    events:
+      - event: "IndexPublished(uint64 indexed roundId, uint256 value, uint256 timestamp, address indexed writer)"
+      - event: "BreakerTripped(uint64 indexed roundId, uint256 lastValue, uint256 rejectedValue, uint256 deviationBps)"
+      - event: "BreakerReset(address indexed admin, uint256 value, uint256 timestamp)"
+
+  - name: IndexPerpEngine
+    events:
+      # `collateralDelta`, `payout` and `traderRefund` are 6dp asset units;
+      # everything else on this contract is WAD.
+      - event: "PositionOpened(bytes32 indexed marketId, address indexed trader, int256 size, uint256 collateral, uint256 entryIndex, uint256 notional, uint256 fee)"
+      - event: "PositionModified(bytes32 indexed marketId, address indexed trader, int256 sizeDelta, int256 newSize, int256 collateralDelta, uint256 newCollateral, uint256 entryIndex, uint256 notional, uint256 fee)"
+      - event: "PositionClosed(bytes32 indexed marketId, address indexed trader, int256 size, uint256 exitIndex, int256 realizedPnl, uint256 payout, uint256 fee)"
+      - event: "PositionLiquidated(bytes32 indexed marketId, address indexed trader, address indexed liquidator, int256 size, uint256 exitIndex, uint256 penalty, uint256 liquidatorReward, uint256 traderRefund)"
+      # Every LP income stream except trading fees and the liquidation share is
+      # settled here, so this is the single source for the return decomposition.
+      - event: "PositionSettled(bytes32 indexed marketId, address indexed trader, int256 pnl, uint256 borrowPaid, int256 fundingPaid, uint256 badDebt, uint256 newCollateral)"
+      - event: "AccrualUpdated(bytes32 indexed marketId, uint256 dt, uint256 borrowRatePerSec, int256 fundingRatePerSec, int256 powerFundingPerSec, uint256 borrowCum, int256 fundingCum, uint256 markPrice, uint256 indexPrice)"
+      - event: "OpenInterestChanged(bytes32 indexed marketId, uint256 longOI, uint256 shortOI, uint256 totalOpenNotional)"
+      - event: "MarketHalted(bytes32 indexed marketId, address indexed guardian, bool halted)"
+
+  - name: KuruOrderBook
+    # Kuru has no fills API, so these logs are the only spot trade history there
+    # is. Signatures are from Kuru-Labs/kuru-sdk abi/OrderBook.json (the markets
+    # are ERC-1967 proxies; the ABI is the implementation's). abi-drift.test.ts
+    # cannot check these — there is no Solidity source in this repo. SETUP.md §6
+    # has the one-liner that re-verifies them against a live log.
+    # Cancel is plural and takes an array: `OrdersCanceled`, not `OrderCanceled`.
+    events:
+      - event: "OrderCreated(uint40 orderId, address owner, uint96 size, uint32 price, bool isBuy)"
+      - event: "Trade(uint40 orderId, address makerAddress, bool isBuy, uint256 price, uint96 updatedSize, address takerAddress, address txOrigin, uint96 filledSize)"
+      - event: "OrdersCanceled(uint40[] orderId, address owner)"
+
+chains:
+  - id: 10143 # Monad testnet. Mainnet (143) is a config swap, not a code change.
+    start_block: ${ENVIO_START_BLOCK:-0}
+    # The env var exists for exactly one reason: the test framework's synthetic
+    # block source never advances past the last simulated block, so a non-zero
+    # lag hangs the tests forever. `bun run test` sets it to 0. Nothing else may.
+    # Production is 5 = FINALITY_DEPTH (STATE_ROOT_LAG 3 + 2).
+    block_lag: ${ENVIO_BLOCK_LAG:-5}
+    # No block this indexer sees can reorg. Envio's generic 200-block default
+    # would only be dead state.
+    max_reorg_depth: 0
+    # Data source is HyperSync, which REQUIRES ENVIO_API_TOKEN: envio aborts at
+    # startup without one and monad-testnet.hypersync.xyz/query answers
+    # unauthenticated calls with 401. There is no degraded mode.
+    #
+    # An `rpc:` block here would fall back to plain RPC when HyperSync is down.
+    # It is deliberately absent: one wired path beats two half-wired ones.
+    # SETUP.md §1 carries the tested block to paste in, with the eth_getLogs
+    # range cap each provider needs.
+    contracts:
+      - name: SweemVault
+        address: "${SWEEM_VAULT:-0x0000000000000000000000000000000000000000}"
+      - name: MarketRegistry
+        address: "${MARKET_REGISTRY:-0x0000000000000000000000000000000000000000}"
+      - name: IndexPerpEngine
+        address: "${INDEX_PERP_ENGINE:-0x0000000000000000000000000000000000000000}"
+      # No address: every feed is discovered from MarketAdded.
+      - name: IndexOracle
+      # One OrderBook per market, seeded from env. Format is a YAML flow list
+      # because this is a textual substitution: KURU_MARKETS=["0x..","0x.."].
+      - name: KuruOrderBook
+        address: ${KURU_MARKETS:-[]}

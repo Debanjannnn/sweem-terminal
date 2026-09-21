@@ -1,0 +1,470 @@
+package api
+
+import (
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/json"
+	"encoding/pem"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"sort"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/sweem-terminal/sweem-terminal/internal/shared/privyauth"
+	"github.com/sweem-terminal/sweem-terminal/services/wallet/internal/executor"
+	"github.com/sweem-terminal/sweem-terminal/services/wallet/internal/policy"
+	"github.com/sweem-terminal/sweem-terminal/services/wallet/internal/store"
+)
+
+const (
+	appID          = "app-1"
+	did            = "did:privy:alice"
+	internalSecret = "internal-secret-value"
+)
+
+// fakeStore is the whole Store interface in memory. Hand-rolled on purpose:
+// the handlers are what is under test, not a driver.
+type fakeStore struct {
+	users       map[string]store.User
+	delegations map[string]policy.Delegation
+	intents     map[string]store.Intent
+	execs       map[string]store.Execution
+	schedules   map[string]store.Schedule
+	slices      map[string]store.Slice
+
+	insertAttempts int
+	pingErr        error
+}
+
+func newFakeStore() *fakeStore {
+	return &fakeStore{
+		users:       map[string]store.User{},
+		delegations: map[string]policy.Delegation{},
+		intents:     map[string]store.Intent{},
+		execs:       map[string]store.Execution{},
+		schedules:   map[string]store.Schedule{},
+		slices:      map[string]store.Slice{},
+	}
+}
+
+func sliceKey(id string, i int) string { return id + ":" + strconv.Itoa(i) }
+
+func (f *fakeStore) Ping(context.Context) error { return f.pingErr }
+
+func (f *fakeStore) UpsertUser(_ context.Context, id, wallet, walletID string) (store.User, error) {
+	u := store.User{ID: id, WalletAddress: wallet, PrivyWalletID: walletID, CreatedAt: time.Now()}
+	f.users[id] = u
+	return u, nil
+}
+
+func (f *fakeStore) User(_ context.Context, id string) (store.User, error) {
+	u, ok := f.users[id]
+	if !ok {
+		return store.User{}, store.ErrNotFound
+	}
+	return u, nil
+}
+
+func (f *fakeStore) PutDelegation(_ context.Context, d policy.Delegation) (policy.Delegation, error) {
+	f.delegations[d.UserID] = d
+	return d, nil
+}
+
+func (f *fakeStore) Delegation(_ context.Context, userID string) (policy.Delegation, error) {
+	d, ok := f.delegations[userID]
+	if !ok {
+		return policy.Delegation{}, store.ErrNotFound
+	}
+	return d, nil
+}
+
+func (f *fakeStore) RevokeDelegation(_ context.Context, userID string) error {
+	d, ok := f.delegations[userID]
+	if !ok || d.RevokedAt != nil {
+		return store.ErrNotFound
+	}
+	now := time.Now()
+	d.RevokedAt = &now
+	f.delegations[userID] = d
+	return nil
+}
+
+func (f *fakeStore) SpentTotal(_ context.Context, userID string) (string, error) {
+	total := 0
+	for _, in := range f.intents {
+		if in.UserID == userID && in.State != "failed" {
+			n, _ := strconv.Atoi(in.Size)
+			total += n
+		}
+	}
+	return strconv.Itoa(total), nil
+}
+
+func (f *fakeStore) InsertIntent(_ context.Context, in store.Intent) (bool, error) {
+	f.insertAttempts++
+	if _, ok := f.intents[in.Key]; ok {
+		return false, nil
+	}
+	in.CreatedAt = time.Now()
+	f.intents[in.Key] = in
+	return true, nil
+}
+
+func (f *fakeStore) Intent(_ context.Context, key string) (store.Intent, error) {
+	in, ok := f.intents[key]
+	if !ok {
+		return store.Intent{}, store.ErrNotFound
+	}
+	return in, nil
+}
+
+func (f *fakeStore) Intents(_ context.Context, userID string, _ int) ([]store.Intent, error) {
+	out := []store.Intent{}
+	for _, in := range f.intents {
+		if in.UserID == userID {
+			out = append(out, in)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	return out, nil
+}
+
+func (f *fakeStore) SetIntentState(_ context.Context, key, state string) error {
+	in, ok := f.intents[key]
+	if !ok {
+		return store.ErrNotFound
+	}
+	in.State = state
+	f.intents[key] = in
+	return nil
+}
+
+func (f *fakeStore) RecordExecution(_ context.Context, e store.Execution) error {
+	e.SubmittedAt = time.Now()
+	f.execs[e.IntentKey] = e
+	return nil
+}
+
+func (f *fakeStore) Execution(_ context.Context, key string) (store.Execution, error) {
+	e, ok := f.execs[key]
+	if !ok {
+		return store.Execution{}, store.ErrNotFound
+	}
+	return e, nil
+}
+
+func (f *fakeStore) Executions(_ context.Context, userID string, _ int) ([]store.Execution, error) {
+	out := []store.Execution{}
+	for key, e := range f.execs {
+		if f.intents[key].UserID == userID {
+			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeStore) CreateSchedule(_ context.Context, sc store.Schedule, slices []store.Slice) (store.Schedule, error) {
+	for _, existing := range f.schedules {
+		if existing.UserID == sc.UserID && existing.IdempotencyKey == sc.IdempotencyKey {
+			return existing, nil
+		}
+	}
+	sc.ID = fmt.Sprintf("00000000-0000-4000-8000-%012d", len(f.schedules)+1)
+	sc.State, sc.CreatedAt = "active", time.Now()
+	for _, sl := range slices {
+		sl.ScheduleID, sl.State = sc.ID, "pending"
+		f.slices[sliceKey(sc.ID, sl.Index)] = sl
+		sc.Slices = append(sc.Slices, sl)
+	}
+	f.schedules[sc.ID] = sc
+	return sc, nil
+}
+
+func (f *fakeStore) Schedule(_ context.Context, id, userID string) (store.Schedule, error) {
+	sc, ok := f.schedules[id]
+	if !ok || sc.UserID != userID {
+		return store.Schedule{}, store.ErrNotFound
+	}
+	return sc, nil
+}
+
+func (f *fakeStore) Schedules(_ context.Context, userID string) ([]store.Schedule, error) {
+	out := []store.Schedule{}
+	for _, sc := range f.schedules {
+		if sc.UserID == userID {
+			out = append(out, sc)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeStore) CancelSchedule(_ context.Context, id, userID string) error {
+	sc, ok := f.schedules[id]
+	if !ok || sc.UserID != userID || sc.State == "cancelled" {
+		return store.ErrNotFound
+	}
+	sc.State = "cancelled"
+	f.schedules[id] = sc
+	return nil
+}
+
+func (f *fakeStore) PauseScheduleRevoked(_ context.Context, id string) error {
+	sc, ok := f.schedules[id]
+	if !ok {
+		return store.ErrNotFound
+	}
+	sc.State = "paused_revoked"
+	f.schedules[id] = sc
+	return nil
+}
+
+func (f *fakeStore) DispatchTarget(_ context.Context, id string, index int, userID string) (store.Schedule, store.Slice, error) {
+	sc, ok := f.schedules[id]
+	sl, hasSlice := f.slices[sliceKey(id, index)]
+	if !ok || !hasSlice || sc.UserID != userID {
+		return store.Schedule{}, store.Slice{}, store.ErrNotFound
+	}
+	return sc, sl, nil
+}
+
+func (f *fakeStore) MarkSlice(_ context.Context, id string, index int, state, intentKey, skipReason string) error {
+	sl, ok := f.slices[sliceKey(id, index)]
+	if !ok {
+		return store.ErrNotFound
+	}
+	sl.State, sl.IntentKey, sl.SkipReason = state, intentKey, skipReason
+	f.slices[sliceKey(id, index)] = sl
+	return nil
+}
+
+// fakeExecutor records every /route call so a test can prove a retry did not
+// place a second order.
+type fakeExecutor struct {
+	srv    *httptest.Server
+	calls  int
+	status string
+	errMsg string
+}
+
+func newFakeExecutor(t *testing.T) *fakeExecutor {
+	t.Helper()
+	f := &fakeExecutor{status: "submitted"}
+	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req executor.RouteRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		f.calls++
+		_ = json.NewEncoder(w).Encode(executor.RouteResponse{
+			IntentKey: req.IntentKey,
+			TxHash:    "0xtx" + req.IntentKey[:4],
+			Status:    f.status,
+			Error:     f.errMsg,
+		})
+	}))
+	t.Cleanup(f.srv.Close)
+	return f
+}
+
+type harness struct {
+	handler http.Handler
+	store   *fakeStore
+	exec    *fakeExecutor
+	key     *ecdsa.PrivateKey
+}
+
+func newHarness(t *testing.T) *harness {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier, err := privyauth.NewVerifier(appID, string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs, fe := newFakeStore(), newFakeExecutor(t)
+	s := &Server{
+		Store:              fs,
+		Executor:           executor.New(fe.srv.URL),
+		Auth:               verifier,
+		Internal:           privyauth.InternalAuth{Secret: internalSecret},
+		Log:                slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ChainID:            10143,
+		DefaultSlippageBps: 50,
+	}
+	return &harness{handler: s.Routes(), store: fs, exec: fe, key: key}
+}
+
+func (h *harness) token(t *testing.T, subject string) string {
+	t.Helper()
+	tok := jwt.NewWithClaims(jwt.SigningMethodES256, jwt.RegisteredClaims{
+		Issuer:    "privy.io",
+		Subject:   subject,
+		Audience:  jwt.ClaimStrings{appID},
+		ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+	})
+	signed, err := tok.SignedString(h.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return signed
+}
+
+func (h *harness) do(t *testing.T, method, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	return h.send(t, method, path, body, map[string]string{"Authorization": "Bearer " + h.token(t, did)})
+}
+
+func (h *harness) send(t *testing.T, method, path, body string, headers map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
+	var r io.Reader
+	if body != "" {
+		r = strings.NewReader(body)
+	}
+	req := httptest.NewRequest(method, path, r)
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	rec := httptest.NewRecorder()
+	h.handler.ServeHTTP(rec, req)
+	return rec
+}
+
+func (h *harness) registered(t *testing.T) {
+	t.Helper()
+	if _, err := h.store.UpsertUser(context.Background(), did, "0x1111111111111111111111111111111111111111", "pw-1"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (h *harness) delegated(t *testing.T, perSlice, total string) {
+	t.Helper()
+	if _, err := h.store.PutDelegation(context.Background(), policy.Delegation{
+		UserID:              did,
+		SignerID:            "signer-1",
+		Venues:              []string{"kuru"},
+		Markets:             []string{"MON-USDC"},
+		MaxNotionalPerSlice: perSlice,
+		MaxNotionalTotal:    total,
+		ExpiresAt:           time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func body(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
+	t.Helper()
+	var env struct {
+		Data  map[string]any `json:"data"`
+		Error map[string]any `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("response %q is not JSON: %v", rec.Body.String(), err)
+	}
+	if env.Error != nil {
+		return env.Error
+	}
+	return env.Data
+}
+
+// Every /v1 route must refuse an unauthenticated caller. Handlers would
+// nil-panic on a missing user, so a 401 proves the middleware stopped it.
+func TestRoutesRequireAuth(t *testing.T) {
+	h := newHarness(t)
+	routes := []struct{ method, path string }{
+		{http.MethodGet, "/v1/me"},
+		{http.MethodPost, "/v1/me"},
+		{http.MethodGet, "/v1/delegation"},
+		{http.MethodPut, "/v1/delegation"},
+		{http.MethodDelete, "/v1/delegation"},
+		{http.MethodPost, "/v1/orders"},
+		{http.MethodGet, "/v1/orders"},
+		{http.MethodGet, "/v1/portfolio"},
+		{http.MethodGet, "/v1/executions"},
+		{http.MethodGet, "/v1/schedules"},
+		{http.MethodPost, "/v1/schedules"},
+		{http.MethodGet, "/v1/schedules/00000000-0000-4000-8000-000000000001"},
+		{http.MethodDelete, "/v1/schedules/00000000-0000-4000-8000-000000000001"},
+		{http.MethodPost, "/v1/internal/slices/00000000-0000-4000-8000-000000000001/0/dispatch"},
+	}
+	for _, rt := range routes {
+		t.Run(rt.method+" "+rt.path, func(t *testing.T) {
+			if rec := h.send(t, rt.method, rt.path, "{}", nil); rec.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401", rec.Code)
+			}
+		})
+	}
+}
+
+func TestHealthIsPublic(t *testing.T) {
+	h := newHarness(t)
+	if rec := h.send(t, http.MethodGet, "/health", "", nil); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+}
+
+// The internal secret opens exactly two doors; it must not stand in for a
+// token anywhere else.
+func TestInternalSecretOpensOnlyItsOwnRoutes(t *testing.T) {
+	h := newHarness(t)
+	headers := map[string]string{
+		privyauth.HeaderInternalSecret: internalSecret,
+		privyauth.HeaderActingUser:     did,
+	}
+	closed := []struct{ method, path string }{
+		{http.MethodPost, "/v1/orders"},
+		{http.MethodGet, "/v1/me"},
+		{http.MethodPut, "/v1/delegation"},
+		{http.MethodPost, "/v1/schedules"},
+		{http.MethodGet, "/v1/portfolio"},
+	}
+	for _, rt := range closed {
+		t.Run(rt.method+" "+rt.path, func(t *testing.T) {
+			if rec := h.send(t, rt.method, rt.path, "{}", headers); rec.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401: the internal secret must not reach this route", rec.Code)
+			}
+		})
+	}
+
+	t.Run("GET /v1/delegation is open to it", func(t *testing.T) {
+		rec := h.send(t, http.MethodGet, "/v1/delegation?user="+did, "", headers)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404 (authenticated, no delegation yet)", rec.Code)
+		}
+	})
+
+	t.Run("a wrong secret is refused", func(t *testing.T) {
+		rec := h.send(t, http.MethodGet, "/v1/delegation", "", map[string]string{
+			privyauth.HeaderInternalSecret: "wrong",
+			privyauth.HeaderActingUser:     did,
+		})
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401", rec.Code)
+		}
+	})
+}
+
+// Reading another user's delegation is an internal-only power.
+func TestDelegationUserParamNeedsInternalSecret(t *testing.T) {
+	h := newHarness(t)
+	h.registered(t)
+	h.delegated(t, "100", "1000")
+	rec := h.do(t, http.MethodGet, "/v1/delegation?user=did:privy:bob", "")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+}

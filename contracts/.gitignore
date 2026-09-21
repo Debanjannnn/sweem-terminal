@@ -1,0 +1,7 @@
+cache/
+out/
+broadcast/
+deployments/*.json
+!deployments/10143.json
+!deployments/143.json
+.env

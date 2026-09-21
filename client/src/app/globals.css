@@ -1,0 +1,182 @@
+@import "tailwindcss";
+
+@theme inline {
+  --font-sans: var(--font-poppins);
+  --font-mono: var(--font-poppins);
+  --font-heading: var(--font-poppins);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-positive: var(--positive);
+  --color-warning: var(--warning);
+  --color-long: var(--long);
+  --color-long-foreground: var(--long-foreground);
+  --color-short: var(--short);
+  --color-short-foreground: var(--short-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+:root {
+  color-scheme: dark;
+  --background: #101010;
+  --foreground: oklch(0.97 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.97 0 0);
+  --popover: oklch(0.225 0 0);
+  --popover-foreground: oklch(0.97 0 0);
+  --primary: #c4f56a;
+  --primary-foreground: #101010;
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.97 0 0);
+  --muted: oklch(0.245 0 0);
+  --muted-foreground: oklch(0.66 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.97 0 0);
+  --destructive: oklch(0.63 0.15 25);
+  --positive: oklch(0.76 0.1 190);
+  --warning: oklch(0.76 0.1 80);
+  --border: oklch(1 0 0 / 6%);
+  --input: oklch(1 0 0 / 10%);
+  --ring: #c4f56a;
+  --scrollbar: oklch(1 0 0 / 14%);
+  --scrollbar-hover: oklch(1 0 0 / 26%);
+  --chart-1: oklch(0.76 0.1 190);
+  --chart-2: oklch(0.66 0 0);
+  --chart-3: oklch(0.5 0 0);
+  --chart-4: oklch(0.38 0 0);
+  --chart-5: oklch(0.28 0 0);
+  --radius: 0.75rem;
+
+  --long: var(--primary);
+  --long-foreground: var(--primary-foreground);
+  --short: oklch(0.63 0.15 25);
+  --short-foreground: oklch(0.97 0 0);
+  --rail-width: 72px;
+  --ticket-width: 360px;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html {
+    @apply font-sans;
+    color-scheme: dark;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background: var(--scrollbar);
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-hover);
+  background-clip: content-box;
+}
+
+.range {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 18px;
+  cursor: pointer;
+  background: transparent;
+}
+
+.range::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--primary) var(--pct),
+    var(--secondary) var(--pct)
+  );
+}
+
+.range::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--primary) var(--pct),
+    var(--secondary) var(--pct)
+  );
+}
+
+.range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  margin-top: -5px;
+  height: 14px;
+  width: 14px;
+  border: none;
+  border-radius: 999px;
+  background: var(--primary);
+}
+
+.range::-moz-range-thumb {
+  height: 14px;
+  width: 14px;
+  border: none;
+  border-radius: 999px;
+  background: var(--primary);
+}
+
+.no-scrollbar {
+  scrollbar-width: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+.tnum {
+  font-variant-numeric: tabular-nums;
+}

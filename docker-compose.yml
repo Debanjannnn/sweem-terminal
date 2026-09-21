@@ -1,0 +1,219 @@
+name: sweem-terminal
+
+# chain + venue config every chain-aware service needs
+x-chain-env: &chain-env
+  CHAIN_ID: ${CHAIN_ID:-10143}
+  MONAD_RPC_URL_143: ${MONAD_RPC_URL_143:-https://rpc.monad.xyz}
+  MONAD_RPC_URL_10143: ${MONAD_RPC_URL_10143:-https://testnet-rpc.monad.xyz}
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+
+x-go-build: &go-build
+  build:
+    context: .
+    dockerfile: Dockerfile.golang
+
+x-health: &health
+  interval: 10s
+  timeout: 3s
+  retries: 10
+  start_period: 15s
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: sweem
+      POSTGRES_PASSWORD: sweem
+      POSTGRES_DB: sweem
+    ports: ["${POSTGRES_HOST_PORT:-5433}:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sweem"]
+      <<: *health
+    networks: [backend]
+
+  redis:
+    image: redis:7-alpine
+    ports: ["${REDIS_HOST_PORT:-6380}:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      <<: *health
+    networks: [backend]
+
+  nats:
+    image: nats:2.11-alpine
+    command: ["-js", "-m", "8222"]
+    ports: ["4222:4222", "8222:8222"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz"]
+      <<: *health
+    networks: [backend]
+
+  # applies every services/*/migrations/*.sql in filename order, then exits
+  migrate:
+    image: postgres:17-alpine
+    depends_on:
+      postgres: {condition: service_healthy}
+    environment:
+      PGPASSWORD: sweem
+    volumes: ["./services:/services:ro"]
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -e
+        for f in $$(ls /services/*/migrations/*.sql | sort); do
+          echo "applying $$f"
+          psql -h postgres -U sweem -d sweem -v ON_ERROR_STOP=1 -f "$$f"
+        done
+    networks: [backend]
+
+  market-data:
+    <<: *go-build
+    build:
+      context: .
+      dockerfile: Dockerfile.golang
+      args: {CMD_PATH: services/market-data/cmd/api}
+    environment:
+      <<: *chain-env
+      DATABASE_URL: postgres://sweem:sweem@postgres:5432/sweem?sslmode=disable
+      REDIS_URL: redis://redis:6379
+      NATS_URL: nats://nats:4222
+      INDEXER_URL: ${INDEXER_URL:-http://host.docker.internal:8090/v1/graphql}
+      KURU_API_URL: ${KURU_API_URL}
+      PERPL_API_URL: ${PERPL_API_URL}
+      PERPL_WS_URL: ${PERPL_WS_URL}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+    ports: ["8081:8081", "8082:8082"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8081/health"]
+      <<: *health
+    networks: [edge, backend]
+
+  market-data-ingest:
+    build:
+      context: .
+      dockerfile: Dockerfile.golang
+      args: {CMD_PATH: services/market-data/cmd/ingest}
+    environment:
+      <<: *chain-env
+      DATABASE_URL: postgres://sweem:sweem@postgres:5432/sweem?sslmode=disable
+      REDIS_URL: redis://redis:6379
+      NATS_URL: nats://nats:4222
+      KURU_API_URL: ${KURU_API_URL}
+      PERPL_API_URL: ${PERPL_API_URL}
+      PERPL_WS_URL: ${PERPL_WS_URL}
+    depends_on:
+      redis: {condition: service_healthy}
+      nats: {condition: service_healthy}
+    networks: [backend]
+
+  wallet:
+    build:
+      context: .
+      dockerfile: Dockerfile.golang
+      args: {CMD_PATH: services/wallet/cmd/api}
+    environment:
+      <<: *chain-env
+      DATABASE_URL: postgres://sweem:sweem@postgres:5432/sweem?sslmode=disable
+      NATS_URL: nats://nats:4222
+      INDEXER_URL: ${INDEXER_URL:-http://host.docker.internal:8090/v1/graphql}
+      MARKET_DATA_URL: http://market-data:8081
+      EXECUTOR_URL: http://executor:8083
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      # deliberately NOT given PRIVY_APP_SECRET — wallet refuses to boot with it
+      PRIVY_APP_ID: ${PRIVY_APP_ID:?set PRIVY_APP_ID}
+      PRIVY_VERIFICATION_KEY: ${PRIVY_VERIFICATION_KEY:-}
+      INTERNAL_SECRET: ${INTERNAL_SECRET:?set INTERNAL_SECRET}
+    ports: ["8080:8080"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+      market-data: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      <<: *health
+    networks: [edge, backend]
+
+  # NO host port, ever. the only process that signs.
+  executor:
+    build:
+      context: ./executor
+    env_file: [.env.executor]
+    environment:
+      <<: *chain-env
+      EXECUTOR_PORT: 8083
+    expose: ["8083"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8083/health"]
+      <<: *health
+    networks: [backend]
+
+  scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile.golang
+      args: {CMD_PATH: services/scheduler/cmd/scheduler}
+    environment:
+      <<: *chain-env
+      DATABASE_URL: postgres://sweem:sweem@postgres:5432/sweem?sslmode=disable
+      NATS_URL: nats://nats:4222
+      WALLET_URL: http://wallet:8080
+      MARKET_DATA_URL: http://market-data:8081
+      INTERNAL_SECRET: ${INTERNAL_SECRET:?set INTERNAL_SECRET}
+      PRIVY_APP_ID: ${PRIVY_APP_ID:?set PRIVY_APP_ID}
+    depends_on:
+      wallet: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8084/health"]
+      <<: *health
+    networks: [backend]
+
+  reconciler:
+    build:
+      context: .
+      dockerfile: Dockerfile.golang
+      args: {CMD_PATH: services/reconciler/cmd/reconciler}
+    environment:
+      <<: *chain-env
+      DATABASE_URL: postgres://sweem:sweem@postgres:5432/sweem?sslmode=disable
+      REDIS_URL: redis://redis:6379
+      NATS_URL: nats://nats:4222
+      INDEXER_URL: ${INDEXER_URL:-http://host.docker.internal:8090/v1/graphql}
+      MARKET_IDS: ${MARKET_IDS:-}
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+      nats: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8085/health"]
+      <<: *health
+    networks: [backend]
+
+  oracle:
+    build:
+      context: ./oracle
+    env_file: [.env.oracle]
+    environment:
+      <<: *chain-env
+      DATABASE_URL: postgres://sweem:sweem@postgres:5432/sweem?sslmode=disable
+      NATS_URL: nats://nats:4222
+    depends_on:
+      postgres: {condition: service_healthy}
+      nats: {condition: service_healthy}
+    networks: [backend]
+
+# client runs outside compose on purpose: NEXT_PUBLIC_* bakes at build time,
+# so `cd client && bun dev` beats rebuilding an image per change.
+# indexer runs outside compose too — `cd indexer && bunx envio dev`.
+
+volumes:
+  pgdata:
+
+networks:
+  edge:
+  backend:

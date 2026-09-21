@@ -1,0 +1,14 @@
+# one image for every go binary. pick with --build-arg CMD_PATH=services/wallet/cmd/api
+FROM golang:1.25-alpine AS build
+ARG CMD_PATH
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
+COPY . .
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -trimpath -o /out/app ./${CMD_PATH}
+
+FROM alpine:3.21
+RUN apk add --no-cache ca-certificates wget
+COPY --from=build /out/app /app
+ENTRYPOINT ["/app"]

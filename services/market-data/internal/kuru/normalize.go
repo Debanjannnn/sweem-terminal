@@ -84,6 +84,18 @@ func normalizeMainnet(m mainnetMarket) (store.Market, error) {
 	}, nil
 }
 
+// BaseSizeMultiplier turns a book quantity into raw token atoms:
+// rawBaseAtoms = bookQuantity * baseSizeMultiplier. Every Kuru market holds
+// baseSizeMultiplier == 10^baseDecimals / sizePrecision, which is why scaling a
+// book size by SizeDecimals lands on the same WAD as scaling raw atoms by the
+// token's decimals. Get it wrong and WETH is off by 1e8, MON by 1e10.
+func BaseSizeMultiplier(m store.Market) (*big.Int, error) {
+	if m.BaseDecimals < m.SizeDecimals {
+		return nil, fmt.Errorf("%s has sizePrecision 1e%d above base decimals %d, so the multiplier is fractional", m.Symbol, m.SizeDecimals, m.BaseDecimals)
+	}
+	return new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(m.BaseDecimals-m.SizeDecimals)), nil), nil
+}
+
 // precisionDecimals turns a per-market scaled-integer precision into a decimal
 // exponent. These are NOT token decimals, and a wrong one is a wrong order size.
 func precisionDecimals(field, raw string) (int, error) {

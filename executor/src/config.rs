@@ -3,8 +3,18 @@ use std::{collections::HashMap, env, time::Duration};
 use alloy_primitives::{address, Address};
 
 pub const CHAIN_IDS: [u64; 2] = [143, 10143];
-// kuru router proxy. verified live on testnet.
-pub const KURU_ROUTER: Address = address!("7EFbE105Ca7415dE98F96622173458ac1c054630");
+pub const DEFAULT_CHAIN_ID: u64 = 10143;
+// AccountCore proxy: custodian, account registry and signer authority. there is
+// no router in spot v2 - orders go straight to the market proxy.
+pub const ACCOUNT_CORE: Address = address!("6384e9b2Bf3b65e1535403a0A543b5FDA905eE22");
+
+/// the backend key holding TRADE on the user's account. unset means the user's
+/// own privy wallet signs for its own account.
+#[derive(Clone, Debug)]
+pub struct Signer {
+    pub wallet_id: String,
+    pub address: Address,
+}
 
 pub struct Config {
     pub addr: String,
@@ -12,7 +22,8 @@ pub struct Config {
     pub privy_app_secret: String,
     pub privy_authorization_key: Option<String>,
     pub markets_path: String,
-    pub kuru_router: Address,
+    pub account_core: Address,
+    pub signer: Option<Signer>,
     pub rpc_urls: HashMap<u64, String>,
     pub receipt_timeout: Duration,
 }
@@ -32,9 +43,17 @@ impl Config {
             privy_app_secret: require("PRIVY_APP_SECRET")?,
             privy_authorization_key: opt("PRIVY_AUTHORIZATION_PRIVATE_KEY"),
             markets_path: env::var("KURU_MARKETS_PATH").unwrap_or_else(|_| "kuru-markets.json".into()),
-            kuru_router: match opt("KURU_ROUTER") {
-                Some(v) => v.parse().map_err(|_| format!("KURU_ROUTER is not an address: {v}"))?,
-                None => KURU_ROUTER,
+            account_core: match opt("KURU_ACCOUNT_CORE") {
+                Some(v) => v.parse().map_err(|_| format!("KURU_ACCOUNT_CORE is not an address: {v}"))?,
+                None => ACCOUNT_CORE,
+            },
+            signer: match (opt("KURU_SIGNER_WALLET_ID"), opt("KURU_SIGNER_ADDRESS")) {
+                (Some(wallet_id), Some(a)) => Some(Signer {
+                    wallet_id,
+                    address: a.parse().map_err(|_| format!("KURU_SIGNER_ADDRESS is not an address: {a}"))?,
+                }),
+                (None, None) => None,
+                _ => return Err("KURU_SIGNER_WALLET_ID and KURU_SIGNER_ADDRESS must be set together".into()),
             },
             rpc_urls: CHAIN_IDS.iter().map(|&id| (id, rpc_url(id))).collect(),
             receipt_timeout: Duration::from_secs(

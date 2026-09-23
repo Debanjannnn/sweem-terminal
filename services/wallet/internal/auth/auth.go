@@ -3,6 +3,7 @@
 package auth
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -30,14 +31,19 @@ func GuardNoSigningSecrets(look func(string) string) error {
 		strings.Join(found, " and "))
 }
 
-// NewVerifier refuses to boot before it builds anything.
-func NewVerifier() (*privyauth.Verifier, error) {
+// NewVerifier refuses to boot before it builds anything. the key comes from
+// privy's public jwks, so no app secret is ever needed here.
+func NewVerifier(ctx context.Context) (*privyauth.Verifier, error) {
 	if err := GuardNoSigningSecrets(os.Getenv); err != nil {
 		return nil, err
 	}
-	key := config.GetEnv("PRIVY_VERIFICATION_KEY", "")
-	if key == "" {
-		return nil, fmt.Errorf("PRIVY_VERIFICATION_KEY is not set, and this process may not hold the app secret to fetch it")
+	appID := config.GetEnv("PRIVY_APP_ID", "")
+	if appID == "" {
+		return nil, fmt.Errorf("PRIVY_APP_ID is not set, so access tokens cannot be verified")
 	}
-	return privyauth.NewVerifier(config.GetEnv("PRIVY_APP_ID", ""), key)
+	key, err := privyauth.FetchVerificationKey(ctx, appID, "")
+	if err != nil {
+		return nil, err
+	}
+	return privyauth.NewVerifier(appID, key)
 }

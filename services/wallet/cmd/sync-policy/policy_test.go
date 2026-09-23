@@ -8,7 +8,7 @@ import (
 	walletpolicy "github.com/sweem-terminal/sweem-terminal/services/wallet/internal/policy"
 )
 
-const router = "0x7EFbE105Ca7415dE98F96622173458ac1c054630"
+const accountCore = "0x6384e9b2Bf3b65e1535403a0A543b5FDA905eE22"
 
 // fixture mirrors executor/kuru-markets.json: one native-base market and one
 // ERC-20 base market, deliberately mixed case so normalization shows.
@@ -27,7 +27,7 @@ func fixture() []walletpolicy.Market {
 
 func build(t *testing.T) Policy {
 	t.Helper()
-	p, err := Build("test policy", "quorum-1", router, fixture())
+	p, err := Build("test policy", "quorum-1", accountCore, fixture())
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -83,21 +83,27 @@ func TestBuildRefusals(t *testing.T) {
 	tests := []struct {
 		name    string
 		markets []walletpolicy.Market
-		router  string
+		core    string
 		says    string
 	}{
-		{name: "no markets", router: router, says: "allows nothing"},
-		{name: "bad router", markets: fixture(), router: "0xdead", says: "20 byte address"},
+		{name: "no markets", core: accountCore, says: "allows nothing"},
+		{name: "bad account core", markets: fixture(), core: "0xdead", says: "20 byte address"},
 		{
 			name:    "market on an unsupported chain",
-			markets: []walletpolicy.Market{{ID: "X", ChainID: 1, BaseToken: router, QuoteToken: router}},
-			router:  router,
+			markets: []walletpolicy.Market{{ID: "X", ChainID: 1, MarketAddress: accountCore, BaseToken: accountCore, QuoteToken: accountCore}},
+			core:    accountCore,
 			says:    "does not trade on",
+		},
+		{
+			name:    "market with no orderbook address",
+			markets: []walletpolicy.Market{{ID: "X", ChainID: 10143, BaseToken: accountCore, QuoteToken: accountCore}},
+			core:    accountCore,
+			says:    "orderbook cannot be allowlisted",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := Build("n", "", tt.router, tt.markets)
+			_, err := Build("n", "", tt.core, tt.markets)
 			if err == nil {
 				t.Fatal("Build accepted an unusable input")
 			}
@@ -192,7 +198,7 @@ const golden = `{
   "chain_type": "ethereum",
   "rules": [
     {
-      "name": "Kuru router swap (send)",
+      "name": "Kuru orderbook batch and swap (send)",
       "method": "eth_sendTransaction",
       "conditions": [
         {
@@ -209,14 +215,15 @@ const golden = `{
           "field": "to",
           "operator": "in",
           "value": [
-            "0x7efbe105ca7415de98f96622173458ac1c054630"
+            "0x5bdea6f9f9aba34f4ecb9b865646a792b835ef7f",
+            "0xfdbe356828c8f5a5d5ed4f69dde0816f4058ef61"
           ]
         }
       ],
       "action": "ALLOW"
     },
     {
-      "name": "Kuru router swap (sign)",
+      "name": "Kuru orderbook batch and swap (sign)",
       "method": "eth_signTransaction",
       "conditions": [
         {
@@ -233,14 +240,63 @@ const golden = `{
           "field": "to",
           "operator": "in",
           "value": [
-            "0x7efbe105ca7415de98f96622173458ac1c054630"
+            "0x5bdea6f9f9aba34f4ecb9b865646a792b835ef7f",
+            "0xfdbe356828c8f5a5d5ed4f69dde0816f4058ef61"
           ]
         }
       ],
       "action": "ALLOW"
     },
     {
-      "name": "ERC-20 approve to the Kuru router (send)",
+      "name": "Kuru account core deposit and signer authorization (send)",
+      "method": "eth_sendTransaction",
+      "conditions": [
+        {
+          "field_source": "ethereum_transaction",
+          "field": "chain_id",
+          "operator": "in",
+          "value": [
+            "10143",
+            "143"
+          ]
+        },
+        {
+          "field_source": "ethereum_transaction",
+          "field": "to",
+          "operator": "in",
+          "value": [
+            "0x6384e9b2bf3b65e1535403a0a543b5fda905ee22"
+          ]
+        }
+      ],
+      "action": "ALLOW"
+    },
+    {
+      "name": "Kuru account core deposit and signer authorization (sign)",
+      "method": "eth_signTransaction",
+      "conditions": [
+        {
+          "field_source": "ethereum_transaction",
+          "field": "chain_id",
+          "operator": "in",
+          "value": [
+            "10143",
+            "143"
+          ]
+        },
+        {
+          "field_source": "ethereum_transaction",
+          "field": "to",
+          "operator": "in",
+          "value": [
+            "0x6384e9b2bf3b65e1535403a0a543b5fda905ee22"
+          ]
+        }
+      ],
+      "action": "ALLOW"
+    },
+    {
+      "name": "ERC-20 approve to AccountCore (send)",
       "method": "eth_sendTransaction",
       "conditions": [
         {
@@ -308,14 +364,14 @@ const golden = `{
           ],
           "operator": "in",
           "value": [
-            "0x7efbe105ca7415de98f96622173458ac1c054630"
+            "0x6384e9b2bf3b65e1535403a0a543b5fda905ee22"
           ]
         }
       ],
       "action": "ALLOW"
     },
     {
-      "name": "ERC-20 approve to the Kuru router (sign)",
+      "name": "ERC-20 approve to AccountCore (sign)",
       "method": "eth_signTransaction",
       "conditions": [
         {
@@ -383,7 +439,7 @@ const golden = `{
           ],
           "operator": "in",
           "value": [
-            "0x7efbe105ca7415de98f96622173458ac1c054630"
+            "0x6384e9b2bf3b65e1535403a0a543b5fda905ee22"
           ]
         }
       ],

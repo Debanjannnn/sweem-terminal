@@ -243,6 +243,8 @@ func (c *Conn) readFrame() (fin bool, op byte, payload []byte, err error) {
 
 func (c *Conn) WriteText(b []byte) error { return c.write(OpText, b) }
 
+func (c *Conn) WriteBinary(b []byte) error { return c.write(OpBinary, b) }
+
 func (c *Conn) WriteClose(code int, reason string) error {
 	body := make([]byte, 2+len(reason))
 	binary.BigEndian.PutUint16(body, uint16(code))

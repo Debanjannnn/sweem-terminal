@@ -6,7 +6,9 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -223,8 +225,11 @@ func (f *fakeDoer) Do(r *http.Request) (*http.Response, error) {
 }
 
 func TestFetchVerificationKey(t *testing.T) {
-	_, pub := newKey(t)
-	oneLine := strings.ReplaceAll(strings.TrimSpace(pub), "\n", "")
+	key, pub := newKey(t)
+	// jwks built from this test's own key, so the round trip is what is asserted
+	jwks := fmt.Sprintf(`{"keys":[{"kty":"EC","crv":"P-256","alg":"ES256","x":%q,"y":%q}]}`,
+		base64.RawURLEncoding.EncodeToString(key.PublicKey.X.Bytes()),
+		base64.RawURLEncoding.EncodeToString(key.PublicKey.Y.Bytes()))
 
 	tests := []struct {
 		name    string
@@ -233,28 +238,30 @@ func TestFetchVerificationKey(t *testing.T) {
 		wantErr bool
 		wantAPI bool
 	}{
-		{"env wins and skips the endpoint", pub, &fakeDoer{status: 200, body: `{"verification_key":"x"}`}, false, false},
-		{"api fallback", "", &fakeDoer{status: 200, body: `{"verification_key":"` + oneLine + `"}`}, false, true},
-		{"api 404", "", &fakeDoer{status: 404, body: `{}`}, true, true},
-		{"api transport error", "", &fakeDoer{err: http.ErrHandlerTimeout}, true, true},
-		{"api empty key", "", &fakeDoer{status: 200, body: `{}`}, true, true},
-		{"api bad json", "", &fakeDoer{status: 200, body: `nope`}, true, true},
+		{"env wins and skips the endpoint", pub, &fakeDoer{status: 200, body: jwks}, false, false},
+		{"jwks fetch", "", &fakeDoer{status: 200, body: jwks}, false, true},
+		{"jwks 404", "", &fakeDoer{status: 404, body: `{}`}, true, true},
+		{"jwks transport error", "", &fakeDoer{err: http.ErrHandlerTimeout}, true, true},
+		{"jwks carries no ec key", "", &fakeDoer{status: 200, body: `{"keys":[]}`}, true, true},
+		{"jwks bad json", "", &fakeDoer{status: 200, body: `nope`}, true, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("PRIVY_VERIFICATION_KEY", tt.env)
-			got, err := fetchVerificationKey(context.Background(), tt.doer, appID, "secret")
+			got, err := fetchVerificationKey(context.Background(), tt.doer, appID)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("err = %v", err)
 			}
 			if called := tt.doer.gotURL != ""; called != tt.wantAPI {
 				t.Fatalf("endpoint called = %v, want %v", called, tt.wantAPI)
 			}
-			if tt.wantAPI && tt.doer.gotURL != "https://api.privy.io/v1/apps/"+appID {
-				t.Fatalf("url %q", tt.doer.gotURL)
+			want := "https://auth.privy.io/api/v1/apps/" + appID + "/jwks.json"
+			if tt.wantAPI && tt.doer.gotURL != want {
+				t.Fatalf("url %q, want %q", tt.doer.gotURL, want)
 			}
-			if tt.wantAPI && tt.doer.gotAut == "" {
-				t.Fatal("app credentials were not sent")
+			// the jwks endpoint is public; sending app credentials to it would be a leak
+			if tt.wantAPI && tt.doer.gotAut != "" {
+				t.Fatal("app credentials must not be sent to the public jwks endpoint")
 			}
 			if err == nil {
 				if _, err := NewVerifier(appID, got); err != nil {
@@ -268,10 +275,10 @@ func TestFetchVerificationKey(t *testing.T) {
 func TestFetchWithoutCredentialsOrEnv(t *testing.T) {
 	t.Setenv("PRIVY_VERIFICATION_KEY", "")
 	d := &fakeDoer{}
-	if _, err := fetchVerificationKey(context.Background(), d, "", ""); err == nil {
+	if _, err := fetchVerificationKey(context.Background(), d, ""); err == nil {
 		t.Fatal("want error")
 	}
 	if d.gotURL != "" {
-		t.Fatal("must not call the endpoint without credentials")
+		t.Fatal("must not call the endpoint without an app id")
 	}
 }

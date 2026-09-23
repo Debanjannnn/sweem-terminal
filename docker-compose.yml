@@ -126,7 +126,6 @@ services:
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
       # deliberately NOT given PRIVY_APP_SECRET — wallet refuses to boot with it
       PRIVY_APP_ID: ${PRIVY_APP_ID:?set PRIVY_APP_ID}
-      PRIVY_VERIFICATION_KEY: ${PRIVY_VERIFICATION_KEY:-}
       INTERNAL_SECRET: ${INTERNAL_SECRET:?set INTERNAL_SECRET}
     ports: ["8080:8080"]
     depends_on:

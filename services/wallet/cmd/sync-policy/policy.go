@@ -49,20 +49,28 @@ var approveABI = json.RawMessage(`[{"name":"approve","type":"function","inputs":
 
 // Build derives the policy from the same market allowlist the API validates
 // delegations against, so the two guards cannot name different markets.
-func Build(name, ownerID, router string, markets []policy.Market) (Policy, error) {
+// spot v2 has no trading router. orders and swaps go to each market's own
+// OrderBook, funds live in AccountCore, and AccountCore is the approve spender.
+func Build(name, ownerID, accountCore string, markets []policy.Market) (Policy, error) {
 	if len(markets) == 0 {
 		return Policy{}, fmt.Errorf("no markets: refusing to build a policy that allows nothing")
 	}
-	router = strings.ToLower(strings.TrimSpace(router))
-	if len(router) != 42 || !strings.HasPrefix(router, "0x") {
-		return Policy{}, fmt.Errorf("router %q is not a 20 byte address", router)
+	accountCore = strings.ToLower(strings.TrimSpace(accountCore))
+	if len(accountCore) != 42 || !strings.HasPrefix(accountCore, "0x") {
+		return Policy{}, fmt.Errorf("account core %q is not a 20 byte address", accountCore)
 	}
 
 	tokens := &set{}
+	books := &set{}
 	for _, m := range markets {
 		if !chains.IsSupported(int(m.ChainID)) {
 			return Policy{}, fmt.Errorf("market %s is on chain %d, which this terminal does not trade on", m.ID, m.ChainID)
 		}
+		a := strings.ToLower(strings.TrimSpace(m.MarketAddress))
+		if len(a) != 42 || !strings.HasPrefix(a, "0x") {
+			return Policy{}, fmt.Errorf("market %s has no usable market_address, so its orderbook cannot be allowlisted", m.ID)
+		}
+		books.add(a)
 		// native MON is spent as value, never approved
 		if !strings.EqualFold(m.BaseToken, zeroAddress) {
 			tokens.add(m.BaseToken)
@@ -89,15 +97,19 @@ func Build(name, ownerID, router string, markets []policy.Market) (Policy, error
 		}
 	}
 
-	add("Kuru router swap",
+	add("Kuru orderbook batch and swap",
 		chainCond,
-		Condition{FieldSource: "ethereum_transaction", Field: "to", Operator: "in", Value: []string{router}},
+		Condition{FieldSource: "ethereum_transaction", Field: "to", Operator: "in", Value: books.list()},
 	)
-	add("ERC-20 approve to the Kuru router",
+	add("Kuru account core deposit and signer authorization",
+		chainCond,
+		Condition{FieldSource: "ethereum_transaction", Field: "to", Operator: "in", Value: []string{accountCore}},
+	)
+	add("ERC-20 approve to AccountCore",
 		chainCond,
 		Condition{FieldSource: "ethereum_transaction", Field: "to", Operator: "in", Value: tokens.list()},
 		Condition{FieldSource: "ethereum_calldata", Field: "function_name", ABI: approveABI, Operator: "eq", Value: "approve"},
-		Condition{FieldSource: "ethereum_calldata", Field: "approve.spender", ABI: approveABI, Operator: "in", Value: []string{router}},
+		Condition{FieldSource: "ethereum_calldata", Field: "approve.spender", ABI: approveABI, Operator: "in", Value: []string{accountCore}},
 	)
 
 	return Policy{Version: "1.0", Name: name, ChainType: "ethereum", Rules: rules, OwnerID: ownerID}, nil

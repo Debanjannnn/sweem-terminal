@@ -10,6 +10,7 @@ import (
 
 	"github.com/sweem-terminal/sweem-terminal/internal/shared/chains"
 	"github.com/sweem-terminal/sweem-terminal/internal/shared/config"
+	"github.com/sweem-terminal/sweem-terminal/internal/shared/finality"
 )
 
 // Live, pinned. Kuru upgrades behind an ERC-1967 proxy, and an upgrade changes
@@ -64,17 +65,16 @@ func TestLiveImplementationPin(t *testing.T) {
 		t.Skipf("monad testnet rpc unreachable: %v", err)
 	}
 	if got != liveOrderBookImpl {
-		t.Fatalf("OrderBook implementation moved to %s (was %s): re-verify the getL2Book ABI before shipping", got, liveOrderBookImpl)
+		t.Fatalf("OrderBook implementation moved to %s (was %s): re-verify every selector we call before shipping", got, liveOrderBookImpl)
 	}
 }
 
-// getL2Book(uint256) is the one selector that survived the brute force. If it
-// stops answering, the book is gone and the fallback will not save us.
-func TestLiveGetL2BookAnswers(t *testing.T) {
+// The depth snapshot comes from the gateway now, not an eth_call. /l2Book and
+// /bbo are NotFound; only /api/depth and /api/bbo answer.
+func TestLiveGatewayDepthAnswers(t *testing.T) {
 	t.Setenv("KURU_API_URL_10143", "")
 	t.Setenv("KURU_API_URL", "")
 	c := New(chains.MonadTestnet)
-	c.rpcURL = config.GetEnv("MONAD_RPC_URL_10143", "https://testnet-rpc.monad.xyz")
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
 	if _, err := c.Markets(ctx); err != nil {
@@ -82,9 +82,15 @@ func TestLiveGetL2BookAnswers(t *testing.T) {
 	}
 	b, err := c.Book(ctx, liveOrderBookProxy, 10)
 	if err != nil {
-		t.Skipf("monad testnet rpc unreachable: %v", err)
+		t.Skipf("kuru gateway unreachable: %v", err)
 	}
 	if b.MarketID != liveOrderBookProxy {
 		t.Fatalf("book market = %s", b.MarketID)
+	}
+	if len(b.Bids)+len(b.Asks) == 0 {
+		t.Error("cbBTC/USDC answered with an empty book, which no longer matches the chain")
+	}
+	if _, err := c.BBO(ctx, liveOrderBookProxy, finality.Final); err != nil {
+		t.Errorf("gateway /api/bbo: %v", err)
 	}
 }

@@ -1,4 +1,4 @@
-// market-data ingest: the write side. Polls Kuru, streams Perpl, derives ticks
+// market-data ingest: the write side. Streams Kuru and Perpl, derives ticks
 // and candles, and fans everything out through redis for the api to serve.
 package main
 
@@ -29,7 +29,6 @@ const (
 	tickFlushEvery   = time.Second
 	tickFlushAt      = 500
 	candleFlushEvery = time.Second
-	kuruBookEvery    = time.Second
 	kuruMarketsEvery = 30 * time.Second
 	pruneEvery       = time.Hour
 	perplCtxEvery    = 5 * time.Minute
@@ -80,7 +79,7 @@ func main() {
 	defer stop()
 
 	go g.kuruMarketsLoop(ctx)
-	go g.kuruBookLoop(ctx)
+	go g.kuruStreamLoop(ctx)
 	go g.tickFlushLoop(ctx)
 	go g.candleFlushLoop(ctx)
 	go g.pruneLoop(ctx)
@@ -138,24 +137,16 @@ func (g *ingest) kuruMarketsLoop(ctx context.Context) {
 	})
 }
 
-// Kuru has no websocket on testnet and no trades endpoint, so the book is an
-// eth_call poll and the tick is the book's mid. Real prints come from the
-// indexer's Trade events.
-// ponytail: mid-price ticks, replace with indexer Trade streaming if fill-accurate candles matter
-func (g *ingest) kuruBookLoop(ctx context.Context) {
-	every(ctx, kuruBookEvery, func(ctx context.Context) {
-		for _, m := range g.kuru.Cached() {
-			b, err := g.kuru.Book(ctx, m.ID, kuru.DefaultDepth)
-			if err != nil {
-				slog.Warn("kuru book", "market", m.ID, "err", err)
-				continue
-			}
-			g.onBook(ctx, b)
-			if mid := b.Mid(); mid != "" {
-				g.onTick(ctx, candle.Tick{MarketID: m.ID, Venue: m.Venue, Price: mid, Size: "0", Ts: b.Ts}, true)
-			}
-		}
+// The Kuru book arrives on the gateway websocket at Monad's proposed tier and
+// the trades at finalized, so ticks are real prints and never a book mid.
+func (g *ingest) kuruStreamLoop(ctx context.Context) {
+	err := g.kuru.Stream(ctx, kuru.Handlers{
+		Book: func(b book.Book) { g.onBook(ctx, b) },
+		Tick: func(t candle.Tick) { g.onTick(ctx, t, true) },
 	})
+	if err != nil && ctx.Err() == nil {
+		slog.Error("kuru gateway stream stopped", "err", err)
+	}
 }
 
 func (g *ingest) onBook(ctx context.Context, b book.Book) {

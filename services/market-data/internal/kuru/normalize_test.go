@@ -32,7 +32,7 @@ const mainnetPayload = `{"success":true,"data":{"data":[{
 func serve(t *testing.T, chainID int, body string) *Client {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/markets" {
+		if r.URL.Path != "/api/v1/markets" { // the client pins the version prefix
 			http.NotFound(w, r)
 			return
 		}
@@ -173,5 +173,65 @@ func TestLivePrecisionIsNotTokenDecimals(t *testing.T) {
 	}
 	if !differs {
 		t.Error("every live market had precision equal to its token decimals, which would let the token-decimals bug pass unnoticed")
+	}
+}
+
+// baseSizeMultiplier is not in the market list, so it is derived. These are the
+// values read off each OrderBook on chain; the live arm re-derives the identity
+// from whatever the API is serving today.
+func TestBaseSizeMultiplier(t *testing.T) {
+	tests := []struct {
+		symbol                      string
+		baseDecimals, sizePrecision string
+		want                        string
+	}{
+		{"CBBTCUSDC", "8", "100000000", "1"},
+		{"WETHUSDC", "18", "10000000000", "100000000"},
+		{"MONUSDC", "18", "100000000", "10000000000"},
+		{"XAUT0USDC", "6", "1000000", "1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.symbol, func(t *testing.T) {
+			m, err := normalizeTestnet(testnetMarket{
+				MarketAddress: "0xfdbe356828c8f5a5d5ed4f69dde0816f4058ef61", Symbol: tt.symbol,
+				PricePrecision: "100", SizePrecision: tt.sizePrecision,
+				BaseToken:  testnetToken{Symbol: "BASE", Decimals: atoi(tt.baseDecimals)},
+				QuoteToken: testnetToken{Symbol: "USDC", Decimals: 6},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := BaseSizeMultiplier(m)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.String() != tt.want {
+				t.Fatalf("baseSizeMultiplier = %s, want %s", got, tt.want)
+			}
+			// 10^baseDecimals / sizePrecision, spelled out
+			pow := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(atoi(tt.baseDecimals))), nil)
+			size, _ := new(big.Int).SetString(tt.sizePrecision, 10)
+			if q, r := new(big.Int).QuoRem(pow, size, new(big.Int)); r.Sign() != 0 || q.Cmp(got) != 0 {
+				t.Fatalf("10^%s / %s = %s rem %s, want %s exactly", tt.baseDecimals, tt.sizePrecision, q, r, got)
+			}
+		})
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	ms, err := New(chains.MonadTestnet).Markets(ctx)
+	if err != nil {
+		t.Skipf("kuru testnet api unreachable: %v", err)
+	}
+	for _, m := range ms {
+		mult, err := BaseSizeMultiplier(m)
+		if err != nil {
+			t.Fatalf("%s: %v", m.Symbol, err)
+		}
+		pow := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(m.BaseDecimals)), nil)
+		size := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(m.SizeDecimals)), nil)
+		if q, r := new(big.Int).QuoRem(pow, size, new(big.Int)); r.Sign() != 0 || q.Cmp(mult) != 0 {
+			t.Errorf("%s: 10^%d / 1e%d = %s rem %s, want %s", m.Symbol, m.BaseDecimals, m.SizeDecimals, q, r, mult)
+		}
 	}
 }

@@ -34,7 +34,7 @@ func marksAPI(t *testing.T, marks map[string]string) http.Handler {
 	t.Helper()
 	venue := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/markets":
+		case "/api/v1/markets": // the kuru client pins the version prefix
 			w.Write([]byte(kuruMarkets))
 		case "/v1/pub/context":
 			w.Write([]byte(perplContext))

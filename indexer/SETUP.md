@@ -76,7 +76,8 @@ cd main/indexer && ln -s ../.env .env
 | `SWEEM_VAULT` | zero address; no LP curve, no share price. |
 | `MARKET_REGISTRY` | zero address; no markets — **and no oracles**, since feeds are discovered from `MarketAdded`. |
 | `INDEX_PERP_ENGINE` | zero address; no positions, no funding/borrow. |
-| `KURU_MARKETS` | no spot fills. Format is a YAML flow list: `["0xaa..","0xbb.."]`. A bare comma list fails codegen with `invalid address`. |
+| `KURU_MARKETS` | falls back to the four live testnet markets. Format is a YAML flow list: `["0xaa..","0xbb.."]`. A bare comma list fails codegen with `invalid address`. |
+| `KURU_ACCOUNT_CORE` | falls back to `0x6384e9b2Bf3b65e1535403a0A543b5FDA905eE22`. Absent from `.env` is the normal case. |
 | `HASURA_EXTERNAL_PORT` | GraphQL lands on 8080 and collides with `wallet`. Set `8090`. |
 | `ENVIO_BLOCK_LAG` | **do not set.** Config default `5` = FINALITY_DEPTH. Only blocks ≥5 behind head are indexed, which is what makes `rollback_on_reorg: false` correct rather than reckless. `bun run test` sets `0` because the test framework's synthetic block source never advances past the last simulated block and a non-zero lag hangs forever. Nothing else may lower it. |
 
@@ -110,7 +111,9 @@ docker exec envio-postgres psql -U postgres -d envio-dev \
   -c 'select kind,assets from public."VaultFlow";' \
   -c 'select count(*) from public."Market";' \
   -c 'select id,"publicationCount" from public."IndexFeed" order by id;' \
-  -c 'select count(*) from public."KuruTrade";'
+  -c 'select count(*) from public."KuruFill";' \
+  -c 'select count(*) from public."KuruSlot";' \
+  -c 'select id,free,reserved from public."KuruBalance" limit 5;'
 ```
 
 Everything stored is WAD, widened once in `src/scale.ts`: a 250,000 USDC seed
@@ -147,21 +150,52 @@ bunx vitest run src/abi-drift.test.ts
 If a contract starts emitting an event declared somewhere new, add that file to
 the `SOURCES` map at the top of the test.
 
-## 6. Kuru signatures
+## 6. Kuru Spot V2
 
-The OrderBook has no Solidity source in this repo, so the drift test cannot
-check it — `UNCHECKED` in the test names it explicitly so a second unguarded
-contract fails the suite. Signatures come from the published implementation ABI
-and are re-verified with:
+There is no Solidity for Kuru in this repo, so `abi-drift.test.ts` pins the
+**topic0 the deployed contracts actually emit** instead. Re-read them from the
+chain with:
 
 ```sh
-curl -s https://raw.githubusercontent.com/Kuru-Labs/kuru-sdk/main/abi/OrderBook.json \
- | python3 -c 'import json,sys;[print(e["name"]+"("+", ".join(i["type"]+(" indexed" if i.get("indexed") else "")+" "+i["name"] for i in e["inputs"])+")") for e in json.load(sys.stdin)["abi"] if e["type"]=="event"]'
+curl -s -X POST https://monad-testnet.hypersync.xyz/query \
+  -H "authorization: Bearer $ENVIO_API_TOKEN" -H 'content-type: application/json' \
+  -d '{"from_block":64699420,"to_block":64699422,
+       "logs":[{"address":["0xa9C2936656a7D2143720BcD91Ba8506200B7CbE7"]}],
+       "field_selection":{"log":["block_number","log_index","topic0","topic1","topic2","data"]}}'
 ```
 
-Three of them are indexed: `OrderCreated`, `Trade`, `OrdersCanceled` (plural,
-takes `uint40[]`). Markets are ERC-1967 proxies — the events are the
-implementation's, the address is the proxy's, which is what `KURU_MARKETS`
-holds. Price and size stay in the market's raw `uint32`/`uint96` tick units:
-per-market `pricePrecision`/`sizePrecision` appears in no event, so scaling in
-the indexer would be a guess. Consumers scale.
+Only two topic0s come back, and that is the whole point: **Spot V2 emits no
+`OrderCreated`, `Trade` or `OrdersCanceled`.** Those are V1. 100 000 blocks of
+WETH/USDC contain exactly `BookUpdatesPacked` (943) and `TradesPacked` (90).
+`accountId` and `executor` are indexed; the `bytes` payload carries everything
+else, 39 bytes per book record and 64 per trade record. `src/kuru-packed.ts`
+decodes them and fails closed on a bad length, a reserved bit or an unknown
+flag — one bad record makes every later byte offset a guess.
+`src/kuru-packed.test.ts` decodes real logs and asserts the Data Source API's
+own numbers for the same trade.
+
+Ordering is `(blockNumber, txIndex, logIndex, byteOffset)`. `logIndex` is
+block-scoped so it subsumes `txIndex`, and `recordIdx` is the byte offset
+ordinal, so `(blockNumber, logIndex, recordIdx)` is that same total order and is
+what the rows carry.
+
+Balances come from **AccountCore**, not the orderbooks — orderbooks never hold
+tokens. `SpotReserveUpdated` is a post-state snapshot of `(free, reserved)` and
+is the only writer. `Deposit` / `Withdrawal` / `InternalAccountTransfer` are
+history for the same movements and are deliberately not bound: applying both
+double-counts.
+
+Not indexed, on purpose:
+
+| | Why |
+|---|---|
+| SpotRouter `0xba24a1042701f06e8F7edCF04389260D1Fa4c697` | registry only. Market discovery duplicates `KURU_MARKETS`, and §10.3 of the spec says not to trust router registration without AccountCore confirming it anyway. |
+| KuruTradingWallet `0xc7f2a9761276F7050D6561d2FDC51abC993F45E9` | the log address is the **delegated EOA**, never this implementation, so an address filter matches nothing; catching `IntentExecuted` needs a wildcard scan and nothing here reads it. |
+| Passive bands, hooks, triggers, L2 levels | no consumer. The gateway serves L2; `getL2Book` serves depth. |
+| Executable-depth (RAB) model | `minSizeAfterBlock` is stored per slot, but no event fires at threshold+1, so a depth model would have to schedule its own derived transition per order and unschedule it on reorg. `KuruSlot` is the **stored** book; derive executable depth at read time. |
+
+Price and size stay in the market's own `uint32`/`uint96` tick units.
+`pricePrecision`, `sizePrecision` and `baseSizeMultiplier` appear in no event —
+`rawBaseAtoms = size * baseSizeMultiplier` needs a contract read, so the
+consumer scales. Storing a value we cannot verify as if it were scaled would be
+worse than storing it raw.

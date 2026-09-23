@@ -1,6 +1,8 @@
-// Package kuru reads Kuru's spot markets. Two sources on purpose: REST for the
-// market list, an eth_call for the book. Kuru's testnet REST surface is only
-// /markets and /markets/:addr -- there is no book, trade or candle route.
+// Package kuru reads Kuru Spot V2. The live feed is the gateway websocket:
+// binary KXMD frames whose per-kind layout lives in frame.go. REST serves the
+// market catalog and a depth snapshot. Nothing here reads the book by eth_call
+// -- getL2Book reports stored depth, which overstates what is executable once
+// a resting order's minSizeAfterBlock has passed.
 package kuru
 
 import (
@@ -10,7 +12,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math/big"
 	"net/http"
 	"strings"
 	"sync"
@@ -18,15 +19,16 @@ import (
 
 	"github.com/sweem-terminal/sweem-terminal/internal/shared/chains"
 	"github.com/sweem-terminal/sweem-terminal/internal/shared/config"
-	"github.com/sweem-terminal/sweem-terminal/internal/shared/finality"
 	"github.com/sweem-terminal/sweem-terminal/services/market-data/internal/store"
 )
 
 type Client struct {
-	chainID int
-	api     string
-	rpcURL  string
-	http    *http.Client
+	chainID   int
+	api       string
+	gateway   string
+	gatewayWS string
+	rpcURL    string
+	http      *http.Client
 
 	mu      sync.RWMutex
 	markets map[string]store.Market
@@ -42,12 +44,31 @@ func New(chainID int) *Client {
 		api = defaultAPI(chainID)
 	}
 	return &Client{
-		chainID: chainID,
-		api:     strings.TrimRight(api, "/"),
-		rpcURL:  config.GetEnv(fmt.Sprintf("MONAD_RPC_URL_%d", chainID), ""),
-		http:    &http.Client{Timeout: 15 * time.Second},
-		markets: map[string]store.Market{},
+		chainID:   chainID,
+		api:       withAPIVersion(api),
+		gateway:   strings.TrimRight(config.GetEnv("KURU_GATEWAY_URL", gatewayHost), "/"),
+		gatewayWS: config.GetEnv("KURU_GATEWAY_WS_URL", gatewayWSURL),
+		rpcURL:    config.GetEnv(fmt.Sprintf("MONAD_RPC_URL_%d", chainID), ""),
+		http:      &http.Client{Timeout: 15 * time.Second},
+		markets:   map[string]store.Market{},
 	}
+}
+
+// Spot V2 is testnet-only: mainnet has no deployment, so there is one gateway
+// host and an env override for the day there are two.
+const (
+	gatewayHost  = "https://gateway.testnet.kuru.io"
+	gatewayWSURL = "wss://gateway.testnet.kuru.io/ws"
+)
+
+// Every data-source route lives under /api/v1 and the bare host answers 404,
+// but deployed env values point at the host.
+func withAPIVersion(base string) string {
+	base = strings.TrimRight(base, "/")
+	if strings.HasSuffix(base, "/api/v1") {
+		return base
+	}
+	return base + "/api/v1"
 }
 
 func defaultAPI(chainID int) string {
@@ -58,13 +79,17 @@ func defaultAPI(chainID int) string {
 }
 
 func (c *Client) get(ctx context.Context, path string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.api+path, nil)
+	return c.getURL(ctx, c.api+path, out)
+}
+
+func (c *Client) getURL(ctx context.Context, url string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("kuru %s is unreachable: %w", path, err)
+		return fmt.Errorf("kuru %s is unreachable: %w", url, err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
@@ -72,7 +97,7 @@ func (c *Client) get(ctx context.Context, path string, out any) error {
 		return err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("kuru %s returned HTTP %d: %s", path, resp.StatusCode, truncate(body))
+		return fmt.Errorf("kuru %s returned HTTP %d: %s", url, resp.StatusCode, truncate(body))
 	}
 	return json.Unmarshal(body, out)
 }
@@ -123,21 +148,6 @@ func (c *Client) rpc(ctx context.Context, method string, params ...any) ([]byte,
 		return nil, fmt.Errorf("%s reverted: %s (code %d)", method, out.Error.Message, out.Error.Code)
 	}
 	return hex.DecodeString(strings.TrimPrefix(out.Result, "0x"))
-}
-
-// ethCall reads at `latest`, which on Monad is Proposed and therefore
-// speculative. That is the right tier for a live book and the wrong one for
-// anything settled.
-func (c *Client) ethCall(ctx context.Context, to string, data []byte) ([]byte, error) {
-	return c.rpc(ctx, "eth_call",
-		map[string]string{"to": to, "data": "0x" + hex.EncodeToString(data)},
-		finality.Seen.BlockTag())
-}
-
-func word(n *big.Int) []byte {
-	b := make([]byte, 32)
-	n.FillBytes(b)
-	return b
 }
 
 func truncate(b []byte) string {

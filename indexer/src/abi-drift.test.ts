@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { toEventSelector } from "viem";
 import { describe, expect, it } from "vitest";
 
 // config.yaml carries hand-written ABI signatures. `envio codegen` validates
@@ -7,7 +8,8 @@ import { describe, expect, it } from "vitest";
 // renamed event or a widened integer changes topic0 and the indexer silently
 // matches nothing, with no error. This test is the missing half of codegen:
 // every event in config.yaml must be declared, byte for byte after
-// normalisation, by the Solidity that emits it.
+// normalisation, by the Solidity that emits it — and where there is no Solidity
+// in this repo (Kuru), must still keccak to the topic0 the chain emits.
 
 const root = (p: string) => fileURLToPath(new URL(`../../contracts/${p}`, import.meta.url));
 
@@ -20,9 +22,21 @@ const SOURCES: Record<string, string[]> = {
   IndexPerpEngine: ["src/IndexPerpEngine.sol"],
 };
 
-// third-party contracts with no source in this repo. anything new landing here
-// is unguarded, so the list is asserted exactly rather than skipped silently.
-const UNCHECKED = ["KuruOrderBook"];
+// Kuru has no Solidity in this repo, so its ground truth is the topic0 the
+// deployed contracts actually emit, read off HyperSync on Monad testnet
+// (orderbook logs at block 64699421, AccountCore at 58777830 / 64699xxx).
+// keccak over the canonical signature catches exactly what Solidity diffing
+// catches — a rename or a widened integer moves the hash.
+const KURU_TOPIC0: Record<string, Record<string, `0x${string}`>> = {
+  KuruOrderBook: {
+    BookUpdatesPacked: "0x6e2244ce87961f72e8c2ee9b591b21e76de1f24c3bea5f2a46f4220b0b33b696",
+    TradesPacked: "0xd126230928993abffb76b037ac3715a8c9048d698c12fc0b17b0bc7647c81b79",
+  },
+  KuruAccountCore: {
+    AccountRegistered: "0x759b1e4acfbea2431a43ca23f4a69b24f65550192ff6bb0f3104eeb55f093691",
+    SpotReserveUpdated: "0xa5403119331d53ce4c33f2b1e9effc275ad5f07217cb470fd3daea5670a6085e",
+  },
+};
 
 const TYPE_SOURCES = [...new Set(Object.values(SOURCES).flat())];
 
@@ -178,7 +192,9 @@ const config = configEvents();
 
 describe("config.yaml ABI does not drift from contracts/src", () => {
   it("parses every contract block out of config.yaml", () => {
-    expect([...config.keys()].sort()).toEqual([...Object.keys(SOURCES), ...UNCHECKED].sort());
+    expect([...config.keys()].sort()).toEqual(
+      [...Object.keys(SOURCES), ...Object.keys(KURU_TOPIC0)].sort(),
+    );
     for (const [name, events] of config) expect(events.length, name).toBeGreaterThan(0);
   });
 
@@ -198,6 +214,26 @@ describe("config.yaml ABI does not drift from contracts/src", () => {
               `${files.join(", ")}. Declared: ${[...declared.keys()].join(", ")}`,
           ).toBeDefined();
           expect(candidates).toContain(canonSignature(name!, params!, universe));
+        });
+      }
+    });
+  }
+});
+
+describe("config.yaml Kuru signatures still hash to the topic0 on chain", () => {
+  for (const [contract, pinned] of Object.entries(KURU_TOPIC0)) {
+    describe(contract, () => {
+      const events = config.get(contract) ?? [];
+
+      it("binds exactly the pinned events", () => {
+        const names = events.map((e) => /^(\w+)\(/.exec(e)?.[1]);
+        expect(names.sort()).toEqual(Object.keys(pinned).sort());
+      });
+
+      for (const raw of events) {
+        const name = /^(\w+)\(/.exec(raw)?.[1] ?? raw;
+        it(`${name} hashes to its on-chain topic0`, () => {
+          expect(toEventSelector(`event ${raw}`)).toBe(pinned[name]);
         });
       }
     });

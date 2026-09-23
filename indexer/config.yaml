@@ -56,21 +56,33 @@ contracts:
       - event: "OpenInterestChanged(bytes32 indexed marketId, uint256 longOI, uint256 shortOI, uint256 totalOpenNotional)"
       - event: "MarketHalted(bytes32 indexed marketId, address indexed guardian, bool halted)"
 
+  # Kuru Spot V2. Every logical event is packed into one of two logs: 100 000
+  # blocks of WETH/USDC contain exactly these two topic0s and nothing else.
+  # OrderCreated / Trade / OrdersCanceled are V1 and never fire.
+  # `accountId` and `executor` are indexed (topic1/topic2) — the Kuru indexing
+  # docs' tables omit that. The `bytes` payload is the whole reducer; layouts
+  # and the fail-closed checks live in src/kuru-packed.ts.
+  # There is no Solidity in this repo for these, so abi-drift.test.ts guards
+  # them against on-chain topic0 instead of against source.
   - name: KuruOrderBook
-    # Kuru has no fills API, so these logs are the only spot trade history there
-    # is. Signatures are from Kuru-Labs/kuru-sdk abi/OrderBook.json (the markets
-    # are ERC-1967 proxies; the ABI is the implementation's). abi-drift.test.ts
-    # cannot check these — there is no Solidity source in this repo. SETUP.md §6
-    # has the one-liner that re-verifies them against a live log.
-    # Cancel is plural and takes an array: `OrdersCanceled`, not `OrderCanceled`.
     events:
-      - event: "OrderCreated(uint40 orderId, address owner, uint96 size, uint32 price, bool isBuy)"
-      - event: "Trade(uint40 orderId, address makerAddress, bool isBuy, uint256 price, uint96 updatedSize, address takerAddress, address txOrigin, uint96 filledSize)"
-      - event: "OrdersCanceled(uint40[] orderId, address owner)"
+      - event: "BookUpdatesPacked(uint40 indexed accountId, address indexed executor, bytes32 clientOrderId, bytes packedUpdates)"
+      - event: "TradesPacked(uint40 indexed accountId, address indexed executor, bytes32 clientOrderId, uint24 effectiveTakerFeePps, address builder, uint24 builderFeePps, bytes packedTrades)"
+
+  - name: KuruAccountCore
+    # AccountCore holds every balance; orderbooks never hold tokens.
+    # SpotReserveUpdated is a post-state snapshot of (free, reserved) and is the
+    # ONLY balance writer. Deposit / Withdrawal / InternalAccountTransfer are
+    # history and are deliberately unbound: applying both double-counts.
+    events:
+      - event: "AccountRegistered(address indexed account, uint40 indexed accountId, uint40 indexed rootId, address owner, uint16 tier)"
+      - event: "SpotReserveUpdated(uint40 indexed accountId, address indexed token, uint256 free, uint256 reserved)"
 
 chains:
   - id: 10143 # Monad testnet. Mainnet (143) is a config swap, not a code change.
-    start_block: ${ENVIO_START_BLOCK:-0}
+    # Kuru AccountCore deployment (58 777 816 … 58 780 715). Our own contracts
+    # deploy later, so one start covers everything.
+    start_block: ${ENVIO_START_BLOCK:-58777816}
     # The env var exists for exactly one reason: the test framework's synthetic
     # block source never advances past the last simulated block, so a non-zero
     # lag hangs the tests forever. `bun run test` sets it to 0. Nothing else may.
@@ -96,7 +108,10 @@ chains:
         address: "${INDEX_PERP_ENGINE:-0x0000000000000000000000000000000000000000}"
       # No address: every feed is discovered from MarketAdded.
       - name: IndexOracle
-      # One OrderBook per market, seeded from env. Format is a YAML flow list
-      # because this is a textual substitution: KURU_MARKETS=["0x..","0x.."].
+      - name: KuruAccountCore
+        address: "${KURU_ACCOUNT_CORE:-0x6384e9b2Bf3b65e1535403a0A543b5FDA905eE22}"
+      # One OrderBook proxy per market. Format is a YAML flow list because this
+      # is a textual substitution: KURU_MARKETS=["0x..","0x.."]. A bare comma
+      # list fails codegen with "invalid address".
       - name: KuruOrderBook
-        address: ${KURU_MARKETS:-[]}
+        address: ${KURU_MARKETS:-["0x5BDEA6F9F9abA34F4EcB9B865646A792b835ef7f","0xa9C2936656a7D2143720BcD91Ba8506200B7CbE7","0xfdbE356828c8f5A5d5ed4f69ddE0816f4058Ef61","0x0B4dD2A7b09d5c5401149fFe51301Cc589017343"]}

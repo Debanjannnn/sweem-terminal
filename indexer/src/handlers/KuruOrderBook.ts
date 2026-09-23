@@ -1,81 +1,98 @@
-import { indexer, type KuruOrder, type KuruTrade } from "envio";
-import { eventId, kuruOrderId } from "../ids.js";
+import { indexer, type KuruSlot } from "envio";
+import { kuruFillId, kuruSlotId } from "../ids.js";
+import { decodeBookUpdates, decodeTrades } from "../kuru-packed.js";
 
-// kuru has no fills API — these logs are the only spot trade history there is.
 // one OrderBook proxy per market, so srcAddress IS the market.
-// price/size stay in raw venue ticks: the per-market precision is not in any
-// event, so scaling here would be a guess.
-
-indexer.onEvent({ contract: "KuruOrderBook", event: "OrderCreated" }, async ({ event, context }) => {
-  const ts = BigInt(event.block.timestamp);
-  const order: KuruOrder = {
-    id: kuruOrderId(event.srcAddress, event.params.orderId),
-    market: event.srcAddress,
-    orderId: event.params.orderId,
-    owner: event.params.owner,
-    price: event.params.price,
-    size: event.params.size,
-    remainingSize: event.params.size,
-    isBuy: event.params.isBuy,
-    status: "OPEN",
-    createdAtTimestamp: ts,
-    createdAtBlock: BigInt(event.block.number),
-    updatedAtTimestamp: ts,
-    txHash: event.transaction.hash,
-  };
-  context.KuruOrder.set(order);
-});
-
-indexer.onEvent({ contract: "KuruOrderBook", event: "Trade" }, async ({ event, context }) => {
-  const ts = BigInt(event.block.timestamp);
-  const oid = kuruOrderId(event.srcAddress, event.params.orderId);
-  // undefined when the resting order was created before start_block
-  const order: KuruOrder | undefined = await context.KuruOrder.get(oid);
-
-  if (order) {
-    context.KuruOrder.set({
-      ...order,
-      remainingSize: event.params.updatedSize,
-      status: event.params.updatedSize === 0n ? "FILLED" : "OPEN",
-      updatedAtTimestamp: ts,
-    });
-  }
-
-  const trade: KuruTrade = {
-    id: eventId(event.block.number, event.logIndex),
-    market: event.srcAddress,
-    order_id: order ? oid : undefined,
-    orderId: event.params.orderId,
-    maker: event.params.makerAddress,
-    taker: event.params.takerAddress,
-    txOrigin: event.params.txOrigin,
-    isBuy: event.params.isBuy,
-    price: event.params.price,
-    filledSize: event.params.filledSize,
-    updatedSize: event.params.updatedSize,
-    timestamp: ts,
-    blockNumber: BigInt(event.block.number),
-    logIndex: event.logIndex,
-    txHash: event.transaction.hash,
-  };
-  context.KuruTrade.set(trade);
-});
+// ponytail: stored book only — no executable-depth model and no L2 level
+// aggregation. add the depth model when something needs stale-RAB-adjusted
+// depth, and it will need a per-order derived transition at minSizeAfterBlock+1
+// that can be unscheduled.
+// records are applied in byte order within a log, which is the tail of the
+// canonical order (blockNumber, txIndex, logIndex, byteOffset). logIndex is
+// block-scoped, so (blockNumber, logIndex, recordIdx) is the same total order
+// with one fewer column to store.
 
 indexer.onEvent(
-  { contract: "KuruOrderBook", event: "OrdersCanceled" },
+  { contract: "KuruOrderBook", event: "BookUpdatesPacked" },
   async ({ event, context }) => {
-    const ts = BigInt(event.block.timestamp);
-    for (const id of event.params.orderId) {
-      const order: KuruOrder | undefined = await context.KuruOrder.get(
-        kuruOrderId(event.srcAddress, id),
-      );
-      if (!order) continue;
-      context.KuruOrder.set({
-        ...order,
-        status: "CANCELED",
-        remainingSize: 0n,
-        updatedAtTimestamp: ts,
-      });
+    for (const r of decodeBookUpdates(event.params.packedUpdates)) {
+      const id = kuruSlotId(event.srcAddress, r.userId, r.slotIdx);
+      if (!r.live) {
+        // cancel or replacement removal. it must match what we think is resting;
+        // absent is fine (the slot predates start_block), contradicting is not.
+        const slot = await context.KuruSlot.get(id);
+        if (slot && (slot.orderId !== r.orderId || slot.price !== r.price || slot.isBuy !== r.isBuy))
+          throw new Error(`kuru: delete of ${id} does not match the resting order ${slot.orderId}`);
+        context.KuruSlot.deleteUnsafe(id);
+        continue;
+      }
+      // a live record is a complete slot snapshot, not a delta
+      const slot: KuruSlot = {
+        id,
+        market: event.srcAddress,
+        userId: r.userId,
+        slotIdx: r.slotIdx,
+        orderId: r.orderId,
+        price: r.price,
+        size: r.size,
+        isBuy: r.isBuy,
+        minSizeAfterBlock: r.minSizeAfterBlock,
+        makerFeePps: r.makerFeePps,
+        updatedAtBlock: BigInt(event.block.number),
+        updatedAtTimestamp: BigInt(event.block.timestamp),
+      };
+      context.KuruSlot.set(slot);
     }
   },
 );
+
+indexer.onEvent({ contract: "KuruOrderBook", event: "TradesPacked" }, async ({ event, context }) => {
+  const records = decodeTrades(event.params.packedTrades);
+  for (let i = 0; i < records.length; i++) {
+    const r = records[i]!;
+    context.KuruFill.set({
+      id: kuruFillId(event.srcAddress, r.tradeId, i),
+      market: event.srcAddress,
+      tradeId: r.tradeId,
+      recordIdx: i,
+      takerId: event.params.accountId,
+      executor: event.params.executor,
+      makerId: r.makerId,
+      slotIdx: r.slotIdx,
+      orderId: r.orderId,
+      makerIsBuy: r.makerIsBuy,
+      passive: r.passive,
+      matchEnd: r.matchEnd,
+      price: r.price,
+      filledSize: r.filledSize,
+      updatedSize: r.updatedSize,
+      makerFeePps: r.makerFeePps,
+      takerFeePps: Number(event.params.effectiveTakerFeePps),
+      clientOrderId: event.params.clientOrderId,
+      timestamp: BigInt(event.block.timestamp),
+      blockNumber: BigInt(event.block.number),
+      logIndex: event.logIndex,
+      txHash: event.transaction.hash,
+    });
+
+    // a passive fill has no slot: orderId carries the band's lowPrice
+    if (r.passive) continue;
+
+    // a pure fill emits no BookUpdatesPacked deletion, so the slot is settled
+    // here. updatedSize is the post-state, not a delta: a stale-RAB touch or
+    // dust cleanup releases unfilled size in the same match.
+    const id = kuruSlotId(event.srcAddress, r.makerId, r.slotIdx);
+    const slot = await context.KuruSlot.get(id);
+    if (!slot) continue;
+    if (slot.orderId !== r.orderId)
+      throw new Error(`kuru: fill on ${id} names order ${r.orderId}, slot holds ${slot.orderId}`);
+    if (r.updatedSize === 0n) context.KuruSlot.deleteUnsafe(id);
+    else
+      context.KuruSlot.set({
+        ...slot,
+        size: r.updatedSize,
+        updatedAtBlock: BigInt(event.block.number),
+        updatedAtTimestamp: BigInt(event.block.timestamp),
+      });
+  }
+});

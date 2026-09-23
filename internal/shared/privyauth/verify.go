@@ -3,9 +3,14 @@ package privyauth
 import (
 	"context"
 	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/subtle"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
+	"math/big"
 	"net/http"
 	"regexp"
 	"strings"
@@ -131,41 +136,74 @@ type Doer interface {
 
 // FetchVerificationKey prefers PRIVY_VERIFICATION_KEY and only then asks the API.
 // ponytail: undocumented endpoint, env fallback is the supported path
-func FetchVerificationKey(ctx context.Context, appID, appSecret string) (string, error) {
-	return fetchVerificationKey(ctx, &http.Client{Timeout: 10 * time.Second}, appID, appSecret)
+// FetchVerificationKey resolves the ES256 public key from Privy's public JWKS.
+// No app secret is involved, which is what lets wallet verify tokens while
+// being forbidden to hold signing credentials.
+func FetchVerificationKey(ctx context.Context, appID, _ string) (string, error) {
+	return fetchVerificationKey(ctx, &http.Client{Timeout: 10 * time.Second}, appID)
 }
 
-func fetchVerificationKey(ctx context.Context, d Doer, appID, appSecret string) (string, error) {
+func fetchVerificationKey(ctx context.Context, d Doer, appID string) (string, error) {
 	if k := config.GetEnv("PRIVY_VERIFICATION_KEY", ""); k != "" {
 		return normalizePEM(k), nil
 	}
-	if appID == "" || appSecret == "" {
-		return "", fmt.Errorf("no PRIVY_VERIFICATION_KEY is set and app credentials are missing, so the key cannot be resolved")
+	if appID == "" {
+		return "", fmt.Errorf("PRIVY_APP_ID is not set, so the token verification key cannot be resolved")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.privy.io/v1/apps/"+appID, nil)
+	url := "https://auth.privy.io/api/v1/apps/" + appID + "/jwks.json"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", err
 	}
-	req.SetBasicAuth(appID, appSecret)
-	req.Header.Set("privy-app-id", appID)
 	resp, err := d.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("call privy app endpoint: %w", err)
+		return "", fmt.Errorf("fetch privy jwks: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("privy app endpoint returned %d; set PRIVY_VERIFICATION_KEY instead", resp.StatusCode)
+		return "", fmt.Errorf("privy jwks endpoint returned %d for app %s", resp.StatusCode, appID)
 	}
-	var body struct {
-		VerificationKey string `json:"verification_key"`
+	var jwks struct {
+		Keys []struct {
+			Kty string `json:"kty"`
+			Crv string `json:"crv"`
+			X   string `json:"x"`
+			Y   string `json:"y"`
+			Alg string `json:"alg"`
+		} `json:"keys"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return "", fmt.Errorf("decode privy app response: %w", err)
+	if err := json.NewDecoder(resp.Body).Decode(&jwks); err != nil {
+		return "", fmt.Errorf("decode privy jwks: %w", err)
 	}
-	if body.VerificationKey == "" {
-		return "", fmt.Errorf("privy app response carried no verification_key; set PRIVY_VERIFICATION_KEY instead")
+	for _, k := range jwks.Keys {
+		if k.Kty != "EC" || (k.Alg != "" && k.Alg != "ES256") {
+			continue
+		}
+		pem, err := p256PEM(k.X, k.Y)
+		if err != nil {
+			return "", err
+		}
+		return pem, nil
 	}
-	return normalizePEM(body.VerificationKey), nil
+	return "", fmt.Errorf("privy jwks for app %s carried no ES256 key", appID)
+}
+
+// jwk x/y are base64url big-endian coordinates; marshal them back to SPKI PEM
+func p256PEM(x64, y64 string) (string, error) {
+	x, err := base64.RawURLEncoding.DecodeString(x64)
+	if err != nil {
+		return "", fmt.Errorf("decode jwks x: %w", err)
+	}
+	y, err := base64.RawURLEncoding.DecodeString(y64)
+	if err != nil {
+		return "", fmt.Errorf("decode jwks y: %w", err)
+	}
+	pub := &ecdsa.PublicKey{Curve: elliptic.P256(), X: new(big.Int).SetBytes(x), Y: new(big.Int).SetBytes(y)}
+	der, err := x509.MarshalPKIXPublicKey(pub)
+	if err != nil {
+		return "", err
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})), nil
 }
 
 var pemLabel = regexp.MustCompile(`-----BEGIN ([A-Z0-9 ]+)-----`)

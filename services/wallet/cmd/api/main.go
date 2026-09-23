@@ -38,7 +38,7 @@ func run(log *slog.Logger) error {
 	defer stop()
 
 	// refuses to boot if this process can see a signing secret
-	verifier, err := auth.NewVerifier()
+	verifier, err := auth.NewVerifier(ctx)
 	if err != nil {
 		return err
 	}

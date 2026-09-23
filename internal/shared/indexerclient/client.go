@@ -78,9 +78,13 @@ type KuruTrade struct {
 	MarketID string `json:"marketId"`
 	Price    string `json:"price"`
 	Size     string `json:"size"`
-	IsBuy    bool   `json:"isBuy"`
 	TxHash   string `json:"txHash"`
 	Ts       int64  `json:"timestamp"`
+
+	// the event carries the MAKER side; a resting bid means the taker sold
+	MakerIsBuy bool `json:"makerIsBuy"`
+	// taker side, which is the direction a tape prints
+	IsBuy bool `json:"-"`
 }
 
 const positionsDoc = `query Positions($owner: String!, $limit: Int!) {
@@ -139,19 +143,30 @@ func (c *Client) VaultFlows(ctx context.Context, owner string) ([]VaultFlow, err
 	return out.VaultFlow, err
 }
 
-const kuruTradesDoc = `query KuruTrades($marketId: String!, $fromTs: numeric!, $toTs: numeric!, $limit: Int!) {
-  KuruTrade(where: {marketId: {_eq: $marketId}, timestamp: {_gte: $fromTs, _lte: $toTs}}, order_by: {timestamp: asc}, limit: $limit) {
-    id marketId price size isBuy txHash timestamp
+// spot v2 emits packed TradesPacked logs, which the indexer decodes into
+// KuruFill. prices and sizes are raw book units; the caller scales them.
+const kuruTradesDoc = `query KuruTrades($market: String!, $fromTs: numeric!, $toTs: numeric!, $limit: Int!) {
+  KuruFill(where: {market: {_eq: $market}, timestamp: {_gte: $fromTs, _lte: $toTs}}, order_by: {timestamp: asc, recordIdx: asc}, limit: $limit) {
+    id
+    marketId: market
+    price
+    size: filledSize
+    makerIsBuy
+    txHash
+    timestamp
   }
 }`
 
 // candle backfill source
 func (c *Client) KuruTrades(ctx context.Context, marketID string, fromTs, toTs int64) ([]KuruTrade, error) {
 	var out struct {
-		KuruTrade []KuruTrade `json:"KuruTrade"`
+		KuruFill []KuruTrade `json:"KuruFill"`
 	}
-	err := c.query(ctx, kuruTradesDoc, map[string]any{"marketId": marketID, "fromTs": fromTs, "toTs": toTs, "limit": pageLimit}, &out)
-	return out.KuruTrade, err
+	err := c.query(ctx, kuruTradesDoc, map[string]any{"market": strings.ToLower(marketID), "fromTs": fromTs, "toTs": toTs, "limit": pageLimit}, &out)
+	for i := range out.KuruFill {
+		out.KuruFill[i].IsBuy = !out.KuruFill[i].MakerIsBuy
+	}
+	return out.KuruFill, err
 }
 
 func (c *Client) query(ctx context.Context, doc string, vars map[string]any, out any) error {

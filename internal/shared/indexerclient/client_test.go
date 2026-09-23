@@ -3,6 +3,7 @@ package indexerclient
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -89,12 +90,15 @@ func TestTypedQueries(t *testing.T) {
 		},
 		{
 			name: "kuru trades",
-			body: `{"data":{"KuruTrade":[{"id":"t1","marketId":"eth","price":"2500","size":"1","isBuy":true,"timestamp":1}]}}`,
+			body: `{"data":{"KuruFill":[{"id":"t1","marketId":"0xeth","price":"274884","size":"330000000","makerIsBuy":true,"timestamp":1}]}}`,
 			call: func(c *Client) (int, error) {
-				tr, err := c.KuruTrades(context.Background(), "eth", 1, 2)
+				tr, err := c.KuruTrades(context.Background(), "0xETH", 1, 2)
+				if err == nil && len(tr) == 1 && tr[0].IsBuy {
+					return 0, fmt.Errorf("maker bid means the taker SOLD; IsBuy must be false")
+				}
 				return len(tr), err
 			},
-			wantVars: map[string]any{"marketId": "eth", "fromTs": float64(1), "toTs": float64(2)},
+			wantVars: map[string]any{"market": "0xeth", "fromTs": float64(1), "toTs": float64(2)},
 			wantRows: 1,
 		},
 		{

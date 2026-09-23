@@ -19,7 +19,12 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::info;
 
 use crate::{
-    auth::Authorizer, config::Config, idem::Idem, nonce::Nonces, privy::Privy, rpc::Rpc,
+    auth::Authorizer,
+    config::{Config, Signer},
+    idem::Idem,
+    nonce::Nonces,
+    privy::Privy,
+    rpc::Rpc,
     venues::Registry,
 };
 
@@ -30,7 +35,8 @@ pub struct AppState {
     pub rpc: Arc<HashMap<u64, Rpc>>,
     pub nonces: Arc<Nonces>,
     pub idem: Arc<Idem>,
-    pub router: Address,
+    pub account_core: Address,
+    pub signer: Option<Arc<Signer>>,
     pub receipt_timeout: Duration,
 }
 
@@ -68,19 +74,26 @@ async fn run() -> Result<(), String> {
         rpc: Arc::new(cfg.rpc_urls.into_iter().map(|(id, url)| (id, Rpc::new(url))).collect()),
         nonces: Arc::default(),
         idem: Arc::default(),
-        router: cfg.kuru_router,
+        account_core: cfg.account_core,
+        signer: cfg.signer.clone().map(Arc::new),
         receipt_timeout: cfg.receipt_timeout,
     };
 
     let app = Router::new()
         .route("/health", get(health))
         .route("/markets", get(markets_list))
+        .route("/account/ensure", post(route::account_ensure))
+        .route("/account/deposit", post(route::account_deposit))
+        .route("/account/authorize", post(route::account_authorize))
+        .route("/account/revoke", post(route::account_revoke))
         .route("/route", post(route::route))
+        .route("/order", post(route::order))
+        .route("/order/cancel", post(route::cancel))
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&cfg.addr).await.map_err(|e| format!("bind {}: {e}", cfg.addr))?;
-    info!(addr = %cfg.addr, router = %cfg.kuru_router, "executor listening");
+    info!(addr = %cfg.addr, account_core = %cfg.account_core, signer = ?cfg.signer.as_ref().map(|s| s.address), "executor listening");
 
     axum::serve(listener, app).with_graceful_shutdown(shutdown()).await.map_err(|e| e.to_string())
 }
@@ -90,12 +103,14 @@ async fn health(State(st): State<AppState>) -> Json<serde_json::Value> {
         "status": "ok",
         "markets": st.markets.len(),
         "chains": st.rpc.keys().copied().collect::<Vec<_>>(),
+        "account_core": st.account_core,
+        "signer": st.signer.as_ref().map(|s| s.address),
     }))
 }
 
 async fn markets_list(State(st): State<AppState>) -> Json<serde_json::Value> {
     let markets = st.markets.all();
-    Json(json!({ "count": markets.len(), "router": st.router, "markets": markets }))
+    Json(json!({ "count": markets.len(), "account_core": st.account_core, "markets": markets }))
 }
 
 async fn shutdown() {

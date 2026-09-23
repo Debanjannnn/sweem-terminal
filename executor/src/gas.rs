@@ -7,6 +7,9 @@ use crate::rpc::Rpc;
 
 pub const APPROVE: u64 = 80_000;
 pub const SWAP: u64 = 900_000;
+pub const DEPOSIT: u64 = 250_000;
+pub const BATCH: u64 = 1_200_000;
+pub const AUTHORIZE: u64 = 150_000;
 
 const GWEI: u128 = 1_000_000_000;
 // only used when the node will not answer; monad's base fee sits near 100 gwei

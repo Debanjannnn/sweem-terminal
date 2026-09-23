@@ -28,7 +28,7 @@ import (
 const privyAPI = "https://api.privy.io"
 
 // the kuru router proxy, mirroring executor/src/config.rs
-const defaultRouter = "0x7EFbE105Ca7415dE98F96622173458ac1c054630"
+const defaultAccountCore = "0x6384e9b2Bf3b65e1535403a0A543b5FDA905eE22"
 
 func main() {
 	if err := run(); err != nil {
@@ -42,7 +42,7 @@ func run() error {
 		marketsPath = flag.String("markets", "executor/kuru-markets.json", "path to the executor market allowlist")
 		envPath     = flag.String("env", ".env", "dotenv file to read credentials from if they are not already in the environment")
 		name        = flag.String("name", "sweem terminal executor allowlist", "policy name")
-		router      = flag.String("router", "", "kuru router address; defaults to KURU_ROUTER or the committed proxy")
+		accountCore = flag.String("account-core", "", "kuru AccountCore address; defaults to KURU_ACCOUNT_CORE")
 		policyID    = flag.String("policy-id", "", "existing policy to reconcile; defaults to PRIVY_POLICY_ID")
 		out         = flag.String("out", "", "optional file to write the resulting policy id to")
 		apply       = flag.Bool("apply", false, "write the spec to Privy; without it the tool only reports drift")
@@ -55,8 +55,8 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	if *router == "" {
-		*router = config.GetEnv("KURU_ROUTER", defaultRouter)
+	if *accountCore == "" {
+		*accountCore = config.GetEnv("KURU_ACCOUNT_CORE", defaultAccountCore)
 	}
 	if *policyID == "" {
 		*policyID = config.GetEnv("PRIVY_POLICY_ID", "")
@@ -68,7 +68,7 @@ func run() error {
 		}
 	}
 
-	spec, err := Build(*name, ownerID, *router, markets)
+	spec, err := Build(*name, ownerID, *accountCore, markets)
 	if err != nil {
 		return err
 	}

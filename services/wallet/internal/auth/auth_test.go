@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -40,7 +41,7 @@ func TestNewVerifierRefusesWithSecret(t *testing.T) {
 	t.Setenv("PRIVY_APP_ID", "app1")
 	t.Setenv("PRIVY_VERIFICATION_KEY", "-----BEGIN PUBLIC KEY-----\nnope\n-----END PUBLIC KEY-----")
 	t.Setenv("PRIVY_APP_SECRET", "shh")
-	if _, err := NewVerifier(); err == nil || !strings.Contains(err.Error(), "refusing to boot") {
+	if _, err := NewVerifier(context.Background()); err == nil || !strings.Contains(err.Error(), "refusing to boot") {
 		t.Fatalf("err = %v, want a refusal to boot", err)
 	}
 }

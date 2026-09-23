@@ -3,7 +3,7 @@
 #   USDC is 6dp at the contract boundary; widened once in src/scale.ts.
 #   *RateApr = per-second WAD * 365d, so 1e18 == 100% APR.
 #   size and skew are SIGNED WAD, longs positive.
-#   kuru price/size are RAW venue ticks, not WAD — see KuruTrade.
+#   kuru price/size/balances are RAW venue units, not WAD — see KuruSlot.
 # Everything here is finalized history. Nothing live, nothing speculative.
 
 enum VaultEventKind {
@@ -325,54 +325,106 @@ type Protocol {
   updatedAtBlock: BigInt!
 }
 
-enum KuruOrderStatus {
-  OPEN
-  FILLED
-  CANCELED
-}
+# kuru spot v2. two packed logs carry everything: BookUpdatesPacked is maker-slot
+# state, TradesPacked is fills. OrderCreated/Trade/OrdersCanceled do not exist on
+# v2 and never fired.
+#
+# canonical order is (blockNumber, logIndex, recordIdx). logIndex is block-scoped
+# so it already subsumes transactionIndex; recordIdx is the ordinal of the record
+# inside the packed payload, because several fills share one log.
+#
+# price/size stay in the market's own tick units. pricePrecision, sizePrecision
+# and baseSizeMultiplier appear in NO event, so rawBaseAtoms = size *
+# baseSizeMultiplier is the consumer's call — scaling a value we cannot verify
+# would be worse than storing it unscaled.
 
-# kuru is the only source of spot fill history: there is no fills API.
-# price and size stay in the market's own uint32/uint96 tick units — the
-# per-market pricePrecision/sizePrecision is not in any event, so converting
-# here would be a guess. consumers scale by the market's precision.
-
-"id = <orderbook>-<orderId>"
-type KuruOrder {
+"a live maker slot. id = <market>-<userId>-<slotIdx>. 62 slots per account, reused, so the row is deleted when the slot empties; history lives in KuruFill."
+type KuruSlot {
   id: ID!
-  "orderbook address, one contract per market"
+  "orderbook address, one proxy per market"
   market: String!
+  "AccountCore id of the maker"
+  userId: BigInt!
+  slotIdx: Int!
+  "changes on every replace; a slot id is not an order id"
   orderId: BigInt!
-  owner: String!
+  "raw uint32 tick, displayPrice = price / pricePrecision"
   price: BigInt!
+  "resting size in sizePrecision units"
   size: BigInt!
-  "size still resting, from the last Trade's updatedSize"
-  remainingSize: BigInt!
   isBuy: Boolean!
-  status: KuruOrderStatus!
-  createdAtTimestamp: BigInt!
-  createdAtBlock: BigInt!
+  """
+  RAB threshold block, 0 disables. no event fires at threshold+1 and no storage
+  changes, so executable depth past it is min(size, minNotionalSizeAtPrice) and
+  must be derived at read time — this column is the stored book, not that.
+  """
+  minSizeAfterBlock: BigInt!
+  makerFeePps: Int!
+  updatedAtBlock: BigInt!
   updatedAtTimestamp: BigInt!
-  txHash: String!
-  trades: [KuruTrade!]! @derivedFrom(field: "order")
 }
 
-"one fill. the maker side is the resting order; taker is whoever crossed."
-type KuruTrade {
+"one maker-leg fill. id = <market>-<tradeId>-<recordIdx>, the venue's stable fill identity."
+type KuruFill {
   id: ID!
   market: String!
-  "null when the resting order predates the indexer's start block"
-  order: KuruOrder
+  tradeId: BigInt!
+  "ordinal inside the packed payload"
+  recordIdx: Int!
+  "AccountCore id of the taker (topic1)"
+  takerId: BigInt!
+  "submitter; a delegated signer, not necessarily the account address"
+  executor: String!
+  "AccountCore id of the maker. 0 on a passive-band fill."
+  makerId: BigInt!
+  slotIdx: Int!
+  "on a passive fill this carries the band lowPrice, not an order id"
   orderId: BigInt!
-  maker: String!
-  taker: String!
-  txOrigin: String!
-  "true when the resting maker order was a bid"
-  isBuy: Boolean!
+  "true when the resting maker order was a bid, i.e. the taker sold"
+  makerIsBuy: Boolean!
+  "filled against a passive band rather than an active FIFO slot"
+  passive: Boolean!
+  "last leg of this taker match"
+  matchEnd: Boolean!
   price: BigInt!
   filledSize: BigInt!
+  "maker size remaining after the fill. the book moves by (oldSize - updatedSize), which is not always filledSize."
   updatedSize: BigInt!
+  "fee = amount * pps / 10_000_000"
+  makerFeePps: Int!
+  takerFeePps: Int!
+  clientOrderId: String!
   timestamp: BigInt!
   blockNumber: BigInt!
   logIndex: Int!
   txHash: String!
+}
+
+"id = the uint40 AccountCore id"
+type KuruAccount {
+  id: ID!
+  address: String!
+  "equals id for a root account"
+  rootId: BigInt!
+  createdAtBlock: BigInt!
+  balances: [KuruBalance!]! @derivedFrom(field: "account")
+}
+
+"""
+id = <accountId>-<token>. SpotReserveUpdated is the sole writer: it is an
+authoritative post-state snapshot, so it overwrites. Deposit / Withdrawal /
+InternalAccountTransfer are history only and are deliberately not indexed —
+applying both would double-count.
+"""
+type KuruBalance {
+  id: ID!
+  account: KuruAccount!
+  "address(0) is native MON"
+  token: String!
+  "raw token atoms, not WAD"
+  free: BigInt!
+  "reserved across ALL verified spot markets; AccountCore does not attribute it per market"
+  reserved: BigInt!
+  updatedAtBlock: BigInt!
+  updatedAtTimestamp: BigInt!
 }

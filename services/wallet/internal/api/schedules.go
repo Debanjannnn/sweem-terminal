@@ -85,7 +85,7 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request) {
 	// a schedule authorizes future spending, so it is refused now if the
 	// delegation could not cover its first slice
 	probe := store.Intent{MarketID: sc.MarketID, Venue: sc.Venue, Size: slices[0].Amount}
-	rej, err := s.evaluate(r.Context(), u.ID, probe)
+	rej, err := s.evaluate(r.Context(), u, probe)
 	if err != nil {
 		s.fail(w, "evaluate delegation", err)
 		return
@@ -181,7 +181,6 @@ func (s *Server) dispatchSlice(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, "load user", err)
 		return
 	}
-
 	in := store.Intent{
 		Key:            intentKey("schedule", sc.ID, strconv.Itoa(index), strconv.Itoa(sl.Generation)),
 		UserID:         did,
@@ -195,7 +194,7 @@ func (s *Server) dispatchSlice(w http.ResponseWriter, r *http.Request) {
 		State:          "pending",
 	}
 
-	rej, err := s.evaluate(r.Context(), did, in)
+	rej, err := s.evaluate(r.Context(), u, in)
 	if err != nil {
 		s.fail(w, "evaluate delegation", err)
 		return
@@ -215,20 +214,12 @@ func (s *Server) dispatchSlice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	created, err := s.Store.InsertIntent(r.Context(), in)
-	if err != nil {
-		s.fail(w, "insert intent", err)
+	resp, execErr := s.submit(r.Context(), u, in)
+	if resp.Replayed {
+		httpx.OK(w, dispatchResponse{ScheduleID: sc.ID, SliceIndex: index, State: resp.State,
+			IntentKey: in.Key, TxHash: resp.TxHash, Error: resp.Error, Replayed: true})
 		return
 	}
-	if !created {
-		if done, ok := s.replay(r.Context(), in.Key); ok {
-			httpx.OK(w, dispatchResponse{ScheduleID: sc.ID, SliceIndex: index, State: done.State,
-				IntentKey: in.Key, TxHash: done.TxHash, Error: done.Error, Replayed: true})
-			return
-		}
-	}
-
-	resp, execErr := s.submit(r.Context(), u, in)
 	state := "dispatched"
 	if execErr != nil {
 		state = "failed"

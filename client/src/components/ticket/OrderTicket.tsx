@@ -1,25 +1,33 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { toast } from "sonner";
+import { TxState } from "@/components/table/TxState";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Dropdown } from "@/components/ui/Dropdown";
 import { ErrorState } from "@/components/ui/ErrorState";
+import { Segmented } from "@/components/ui/Segmented";
 import {
   CHAIN_ID,
   errorMessage,
   fromWad,
-  toUnits,
-  toWad,
-  wadToUnits,
+  txTier,
   type Market,
+  type OrderResponse,
 } from "@/lib/api";
-import { formatPct, formatSize, formatUsd } from "@/lib/format";
-import { useCreateOrder, useDelegation, useQuotePreview } from "@/lib/query";
+import { formatSize } from "@/lib/format";
+import { useAccount, useCreateOrder, useExecutions } from "@/lib/query";
 import { useSession } from "@/lib/session";
+import {
+  isZero,
+  limitPrice,
+  limitProblem,
+  limitQuantity,
+  marketSize,
+  quoteNotional,
+} from "@/lib/units";
 import { AmountInput } from "./AmountInput";
-import { OrderTypeTabs, type OrderType } from "./OrderTypeTabs";
+import { OrderTypeTabs, STOP_REASON, type OrderType } from "./OrderTypeTabs";
 import { SideToggle, type Side } from "./SideToggle";
 import { SummaryRows } from "./SummaryRows";
 
@@ -28,215 +36,253 @@ const MARGIN_MODES = [
   { value: "cross", label: "Cross" },
 ] as const;
 
+const TIFS = [
+  { value: "gtc", label: "GTC" },
+  { value: "ioc", label: "IOC" },
+  { value: "fok", label: "FOK" },
+] as const;
+
+const SLIPPAGE = [
+  { value: "10", label: "0.1% slippage" },
+  { value: "50", label: "0.5% slippage" },
+  { value: "100", label: "1% slippage" },
+] as const;
+
+// what actually happened, per the executor's read-back after the receipt
+const OUTCOME: Record<string, (r: OrderResponse) => string> = {
+  resting: (r) => `Resting on the book in slot ${r.slot_idx ?? "?"} as order ${r.order_id ?? "?"}.`,
+  not_resting: (r) =>
+    `It did not rest: ${r.reason ?? "the slot read back empty after the transaction confirmed"}.`,
+  filled_or_expired: () => "An IOC or FOK order never rests: it filled or expired on entry.",
+  submitted: () =>
+    "The transaction was sent but its receipt has not arrived, so the outcome is not known yet.",
+};
+
 export function OrderTicket({ market }: { market?: Market | null }) {
   const [margin, setMargin] = useState<"isolated" | "cross">("isolated");
   const [side, setSide] = useState<Side>("long");
   const [type, setType] = useState<OrderType>("market");
   const [leverage, setLeverage] = useState(10);
-  const [trigger, setTrigger] = useState("");
   const [price, setPrice] = useState("");
+  const [quantity, setQuantity] = useState("");
   const [amount, setAmount] = useState("");
+  const [tif, setTif] = useState<"gtc" | "ioc" | "fok">("gtc");
+  const [postOnly, setPostOnly] = useState(false);
+  const [slippage, setSlippage] = useState<"10" | "50" | "100">("50");
+  const [result, setResult] = useState<OrderResponse | null>(null);
 
   const { authenticated, login } = useSession();
-  const delegation = useDelegation();
+  const account = useAccount();
+  const executions = useExecutions();
   const create = useCreateOrder();
   const key = useRef(crypto.randomUUID());
 
   const base = market?.base ?? "";
   const quoteSymbol = market?.quote ?? "USDC";
   const apiSide = side === "long" ? "buy" : "sell";
-  const sizeWad = amount && Number(amount) > 0 ? toWad(amount) : "";
-  const quote = useQuotePreview(market?.id ?? null, apiSide, sizeWad);
+  const perp = market?.kind === "perp";
+  const limit = type === "limit";
+  const spend = apiSide === "buy" ? quoteSymbol : base;
 
   // a new attempt is a new order; a retry of the same one keeps its key
   useEffect(() => {
     key.current = crypto.randomUUID();
-  }, [market?.id, side, type, amount]);
+  }, [market?.id, side, type, amount, price, quantity]);
 
-  const perp = market?.kind === "perp";
-  const notionalWad = quote.data?.notional;
-  const submitError = create.error ? errorMessage(create.error) : null;
+  const size = market && amount ? marketSize(market, apiSide, amount) : "";
+  const rawPrice = market && price ? limitPrice(market, price) : "";
+  const rawQty = market && quantity ? limitQuantity(market, quantity) : "";
+  const filled = limit ? rawPrice !== "" && rawQty !== "" : size !== "";
 
-  // a buy spends quote tokens, so its size comes from the quoted notional
-  const size =
-    !market || !sizeWad
-      ? null
-      : apiSide === "sell"
-        ? toUnits(amount, market.baseDecimals)
-        : notionalWad
-          ? wadToUnits(notionalWad, market.quoteDecimals)
-          : null;
-
-  const blocked =
-    !market
-      ? "Pick a market before placing an order."
-      : type === "stop"
-        ? "This terminal routes market and limit orders only, so a stop cannot be submitted yet."
-        : !sizeWad
-          ? null
-          : apiSide === "buy" && !size
-            ? quote.isError
-              ? errorMessage(quote.error)
-              : "A buy is sized from a live quote, and this market has not been quoted yet."
+  const unfunded = market?.venue === "kuru" && account.data?.registered === false;
+  const blocked = !market
+    ? "Pick a market before placing an order."
+    : unfunded
+      ? "This wallet has no funded Kuru trading account, so no order can be placed yet. Deposit above first."
+      : !filled
+        ? null
+        : limit
+          ? limitProblem(market, rawPrice, rawQty)
+          : isZero(size)
+            ? `That amount rounds to zero at ${spend}'s decimals, so name a larger one.`
             : null;
 
   const submit = async () => {
-    if (!market || !size) return;
+    if (!market || !filled || blocked) return;
+    setResult(null);
     try {
       const res = await create.mutateAsync({
         market_id: market.id,
         venue: market.venue,
         side: apiSide,
-        order_type: type === "limit" ? "limit" : "market",
-        size,
-        limit_price:
-          type === "limit" && price ? toUnits(price, market.quoteDecimals) : undefined,
         chain_id: CHAIN_ID,
         idempotency_key: key.current,
+        ...(limit
+          ? { order_type: "limit", price: rawPrice, quantity: rawQty, tif, post_only: postOnly }
+          : { order_type: "market", size, max_slippage_bps: Number(slippage) }),
       });
-      toast.success(`Order ${res.state}`, { description: res.tx_hash ?? res.intent_key });
+      setResult(res);
       setAmount("");
+      setQuantity("");
     } catch {
       // the message renders under the button; a toast would hide the 412 sentence
     }
   };
 
+  const exec = result
+    ? executions.data?.executions.find((e) => e.intent_key === result.intent_key)
+    : undefined;
+  // ponytail: no preview of a market order's average price, the quote endpoint
+  // only takes a base size and a market buy is sized in quote atoms
+  const notional =
+    market && limit && rawPrice && rawQty
+      ? formatSize(fromWad(quoteNotional(market, rawPrice, rawQty), market.quoteDecimals))
+      : null;
+
   return (
-    <div className="flex flex-col gap-4">
-      <Card className="space-y-4 p-4">
-        {perp && (
-          <div className="flex items-center justify-between gap-3">
-            {/* ponytail: margin mode and leverage are display-only, wire them when a venue takes them */}
-            <Dropdown
-              value={margin}
-              onChange={setMargin}
-              options={MARGIN_MODES}
-              ariaLabel="Margin mode"
-            />
-            <span className="tnum rounded-full bg-secondary/70 px-4 py-2 text-sm font-medium">
-              {leverage}x
-            </span>
-          </div>
-        )}
-
-        <SideToggle value={side} onChange={setSide} />
-        <OrderTypeTabs value={type} onChange={setType} />
-
-        {type === "stop" && (
-          <AmountInput
-            label="Trigger price"
-            value={trigger}
-            onChange={setTrigger}
-            suffix={quoteSymbol}
+    <Card className="space-y-4 p-4">
+      {perp && (
+        <div className="flex items-center justify-between gap-3">
+          {/* ponytail: margin mode and leverage are display-only, wire them when a venue takes them */}
+          <Dropdown
+            value={margin}
+            onChange={setMargin}
+            options={MARGIN_MODES}
+            ariaLabel="Margin mode"
           />
-        )}
-        {type !== "market" && (
+          <span className="tnum rounded-full bg-secondary/70 px-4 py-2 text-sm font-medium">
+            {leverage}x
+          </span>
+        </div>
+      )}
+
+      <SideToggle value={side} onChange={setSide} />
+      <OrderTypeTabs value={type} onChange={setType} />
+      <p className="text-xs text-muted-foreground">{STOP_REASON}</p>
+
+      {perp && (
+        <div className="space-y-2">
+          <div className="flex items-center justify-between text-xs text-muted-foreground">
+            <span>Leverage</span>
+            <span className="tnum">{leverage}x</span>
+          </div>
+          <input
+            type="range"
+            min={1}
+            max={50}
+            value={leverage}
+            onChange={(e) => setLeverage(Number(e.target.value))}
+            aria-label="Leverage"
+            className="range"
+            style={{ "--pct": `${((leverage - 1) / 49) * 100}%` } as React.CSSProperties}
+          />
+        </div>
+      )}
+
+      {limit ? (
+        <>
           <AmountInput
-            label="Order price"
+            label="Limit price"
             value={price}
             onChange={setPrice}
             suffix={quoteSymbol}
           />
-        )}
-
-        {perp && (
-          <div className="space-y-2">
-            <div className="flex items-center justify-between text-xs text-muted-foreground">
-              <span>Leverage</span>
-              <span className="tnum">{leverage}x</span>
-            </div>
+          <AmountInput
+            label="Quantity"
+            value={quantity}
+            onChange={setQuantity}
+            suffix={base || "base"}
+          />
+          <Segmented
+            id="order-tif"
+            value={tif}
+            onChange={setTif}
+            options={TIFS}
+            className="grid-cols-3"
+          />
+          <label className="flex items-center gap-2 text-xs text-muted-foreground">
             <input
-              type="range"
-              min={1}
-              max={50}
-              value={leverage}
-              onChange={(e) => setLeverage(Number(e.target.value))}
-              aria-label="Leverage"
-              className="range"
-              style={{ "--pct": `${((leverage - 1) / 49) * 100}%` } as React.CSSProperties}
+              type="checkbox"
+              checked={postOnly}
+              onChange={(e) => setPostOnly(e.target.checked)}
+              className="size-4 accent-[var(--primary)]"
+            />
+            Post only — reject rather than take, so this order can only make
+          </label>
+        </>
+      ) : (
+        <>
+          <AmountInput
+            label={apiSide === "buy" ? "Amount to spend" : "Amount to sell"}
+            value={amount}
+            onChange={setAmount}
+            suffix={spend || "size"}
+          />
+          <div className="flex justify-end">
+            <Dropdown
+              value={slippage}
+              onChange={setSlippage}
+              options={SLIPPAGE}
+              ariaLabel="Max slippage"
             />
           </div>
-        )}
+        </>
+      )}
 
-        <AmountInput
-          label="Order size"
-          value={amount}
-          onChange={setAmount}
-          suffix={base || "size"}
-        />
+      <div className="h-px bg-border" />
 
-        <div className="h-px bg-border" />
+      <SummaryRows
+        rows={[
+          {
+            label: limit ? `Notional (${quoteSymbol})` : `Spends (${spend})`,
+            value: limit ? notional : amount || null,
+          },
+          {
+            label: limit ? "Time in force" : "Max slippage",
+            value: limit
+              ? `${tif.toUpperCase()}${postOnly ? " · post only" : ""}`
+              : `${Number(slippage) / 100}%`,
+          },
+        ]}
+      />
 
-        <SummaryRows
-          rows={[
-            {
-              label: "Average price",
-              value: quote.data ? formatUsd(fromWad(quote.data.avgPrice)) : null,
-            },
-            {
-              label: "Price impact",
-              value: quote.data ? formatPct(quote.data.impactBps / 100) : null,
-            },
-            {
-              label: `Spends (${apiSide === "buy" ? quoteSymbol : base || "base"})`,
-              value: quote.data
-                ? apiSide === "buy"
-                  ? formatUsd(fromWad(quote.data.notional))
-                  : formatSize(fromWad(quote.data.filled))
-                : null,
-            },
-          ]}
-        />
+      {authenticated ? (
+        <Button
+          className="w-full"
+          onClick={submit}
+          pending={create.isPending}
+          disabled={!filled || !!blocked}
+        >
+          {limit ? "Place limit order" : "Place market order"}
+        </Button>
+      ) : (
+        <Button className="w-full" onClick={login}>
+          Sign in to trade
+        </Button>
+      )}
 
-        {quote.data?.partial && (
-          <ErrorState message="The book is too thin to fill this size, so the quote is partial." />
-        )}
+      {blocked && <ErrorState message={blocked} />}
+      {create.error && <ErrorState message={errorMessage(create.error)} />}
 
-        {authenticated ? (
-          <Button
-            className="w-full"
-            onClick={submit}
-            pending={create.isPending}
-            disabled={!size || !!blocked}
-          >
-            Place Order
-          </Button>
+      {result &&
+        (result.error ? (
+          <ErrorState message={result.error} />
         ) : (
-          <Button className="w-full" onClick={login}>
-            Sign in to trade
-          </Button>
-        )}
-
-        {blocked && <ErrorState message={blocked} />}
-        {submitError && <ErrorState message={submitError} />}
-      </Card>
-
-      <Card className="space-y-3 p-4">
-        <h2 className="text-xs uppercase tracking-wide text-muted-foreground">
-          Delegation limits
-        </h2>
-        <SummaryRows
-          rows={[
-            {
-              label: "Per-order cap",
-              value: delegation.data?.max_notional_per_slice ?? null,
-            },
-            { label: "Total cap", value: delegation.data?.max_notional_total ?? null },
-            {
-              label: "Expires",
-              value: delegation.data
-                ? new Date(delegation.data.expires_at).toLocaleString()
-                : null,
-            },
-          ]}
-        />
-        {!delegation.data && authenticated && (
-          <p className="text-xs text-muted-foreground">
-            No signer is delegated, so scheduled strategies cannot run. Manual orders still
-            need one: the backend refuses to execute without it.
-          </p>
-        )}
-      </Card>
-    </div>
+          <div className="space-y-2 rounded-xl border border-border bg-secondary/30 p-3">
+            <div className="flex items-center gap-2">
+              <TxState tier={txTier(exec) ?? "seen"} />
+              <span className="text-xs text-muted-foreground">{result.state}</span>
+            </div>
+            <p className="text-xs">
+              {(OUTCOME[result.state] ?? ((r: OrderResponse) => r.reason ?? r.state))(result)}
+            </p>
+            {result.tx_hash && (
+              <p className="tnum text-[11px] break-all text-muted-foreground">
+                {result.tx_hash}
+              </p>
+            )}
+          </div>
+        ))}
+    </Card>
   );
 }

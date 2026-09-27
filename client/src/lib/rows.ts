@@ -9,7 +9,7 @@ import {
 import type { Position } from "@/components/table/PositionCard";
 
 // same id normalization the backend uses: "mon-usdc", "MON/USDC" and "MONUSDC" match
-const normId = (id: string) => id.toUpperCase().replace(/[^A-Z0-9]/g, "");
+export const normId = (id: string) => id.toUpperCase().replace(/[^A-Z0-9]/g, "");
 
 export const marketIndex = (markets: Market[]) =>
   new Map(markets.map((m) => [normId(m.id), m]));

@@ -30,6 +30,10 @@ type Store interface {
 	RevokeDelegation(ctx context.Context, userID string) error
 	SpentTotal(ctx context.Context, userID string) (string, error)
 
+	PutKuruAccount(ctx context.Context, ka store.KuruAccount) error
+	KuruAccount(ctx context.Context, userID string) (store.KuruAccount, error)
+	SetSignerExpiry(ctx context.Context, userID string, expiry int64) error
+
 	InsertIntent(ctx context.Context, in store.Intent) (bool, error)
 	Intent(ctx context.Context, key string) (store.Intent, error)
 	Intents(ctx context.Context, userID string, limit int) ([]store.Intent, error)
@@ -59,6 +63,8 @@ type Server struct {
 
 	// market-data owns the registry; this is a ttl cache of its ids
 	marketIDs *marketCache
+	// the executor owns the allowlist; this is a ttl cache of its scales
+	marketMeta *metaCache
 
 	ChainID            int64
 	DefaultSlippageBps int
@@ -68,6 +74,9 @@ func (s *Server) Routes() http.Handler {
 	if s.marketIDs == nil {
 		s.marketIDs = newMarketCache(60 * time.Second)
 	}
+	if s.marketMeta == nil {
+		s.marketMeta = newMetaCache(5 * time.Minute)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.health)
 
@@ -76,8 +85,13 @@ func (s *Server) Routes() http.Handler {
 	authed.HandleFunc("POST /v1/me", s.upsertMe)
 	authed.HandleFunc("PUT /v1/delegation", s.putDelegation)
 	authed.HandleFunc("DELETE /v1/delegation", s.deleteDelegation)
+	authed.HandleFunc("GET /v1/account", s.getAccount)
+	authed.HandleFunc("POST /v1/account/deposit", s.deposit)
+	authed.HandleFunc("POST /v1/account/authorize", s.authorizeSigner)
+	authed.HandleFunc("DELETE /v1/account/authorize", s.revokeSigner)
 	authed.HandleFunc("POST /v1/orders", s.createOrder)
 	authed.HandleFunc("GET /v1/orders", s.listOrders)
+	authed.HandleFunc("DELETE /v1/orders/{market_id}/{slot_idx}", s.cancelOrder)
 	authed.HandleFunc("GET /v1/portfolio", s.portfolio)
 	authed.HandleFunc("GET /v1/executions", s.listExecutions)
 	authed.HandleFunc("GET /v1/schedules", s.listSchedules)

@@ -41,6 +41,7 @@ type fakeStore struct {
 	execs       map[string]store.Execution
 	schedules   map[string]store.Schedule
 	slices      map[string]store.Slice
+	kuru        map[string]store.KuruAccount
 
 	insertAttempts int
 	pingErr        error
@@ -54,6 +55,7 @@ func newFakeStore() *fakeStore {
 		execs:       map[string]store.Execution{},
 		schedules:   map[string]store.Schedule{},
 		slices:      map[string]store.Slice{},
+		kuru:        map[string]store.KuruAccount{},
 	}
 }
 
@@ -102,12 +104,40 @@ func (f *fakeStore) RevokeDelegation(_ context.Context, userID string) error {
 func (f *fakeStore) SpentTotal(_ context.Context, userID string) (string, error) {
 	total := 0
 	for _, in := range f.intents {
-		if in.UserID == userID && in.State != "failed" {
+		if in.UserID == userID && in.State != "failed" && (in.OrderType == "market" || in.OrderType == "limit") {
 			n, _ := strconv.Atoi(in.Size)
 			total += n
 		}
 	}
 	return strconv.Itoa(total), nil
+}
+
+func (f *fakeStore) PutKuruAccount(_ context.Context, ka store.KuruAccount) error {
+	// mirrors the upsert: signer_expiry is not in its update list
+	if old, ok := f.kuru[ka.UserID]; ok {
+		ka.SignerExpiry = old.SignerExpiry
+	}
+	ka.UpdatedAt = time.Now()
+	f.kuru[ka.UserID] = ka
+	return nil
+}
+
+func (f *fakeStore) KuruAccount(_ context.Context, userID string) (store.KuruAccount, error) {
+	ka, ok := f.kuru[userID]
+	if !ok {
+		return store.KuruAccount{}, store.ErrNotFound
+	}
+	return ka, nil
+}
+
+func (f *fakeStore) SetSignerExpiry(_ context.Context, userID string, expiry int64) error {
+	ka, ok := f.kuru[userID]
+	if !ok {
+		return store.ErrNotFound
+	}
+	ka.SignerExpiry = expiry
+	f.kuru[userID] = ka
+	return nil
 }
 
 func (f *fakeStore) InsertIntent(_ context.Context, in store.Intent) (bool, error) {
@@ -247,31 +277,92 @@ func (f *fakeStore) MarkSlice(_ context.Context, id string, index int, state, in
 	return nil
 }
 
-// fakeExecutor records every /route call so a test can prove a retry did not
-// place a second order.
+// fakeExecutor records every write call and the path it arrived on, so a test
+// can prove a retry did not place a second order and that a limit order was
+// never flattened into a swap.
 type fakeExecutor struct {
-	srv    *httptest.Server
-	calls  int
-	status string
-	errMsg string
+	srv        *httptest.Server
+	calls      int
+	ensures    int
+	paths      []string
+	bodies     []map[string]any
+	status     string
+	errMsg     string
+	registered bool
+	authorized bool
+	authNonce  string
+	markets    []policy.Market
+}
+
+// mirrors the MON-USDC entry of executor/kuru-markets.json
+func fakeMarkets() []policy.Market {
+	return []policy.Market{{
+		ID: "MON-USDC", ChainID: 10143,
+		MarketAddress: "0xfdbe356828c8f5a5d5ed4f69dde0816f4058ef61",
+		BaseToken:     "0x0000000000000000000000000000000000000000",
+		QuoteToken:    "0xee0722ead54f1b4fe97be399be43bc0226a6f97e",
+		BaseDecimals:  18, QuoteDecimals: 6,
+		PricePrecision: "1000000", SizePrecision: "100000000",
+		BaseSizeMultiplier: "10000000000", TickSize: "1",
+		MinQuoteNotional: "10000000", MaxQuoteNotional: "5000000000000",
+	}}
 }
 
 func newFakeExecutor(t *testing.T) *fakeExecutor {
 	t.Helper()
-	f := &fakeExecutor{status: "submitted"}
+	f := &fakeExecutor{status: "submitted", registered: true, authorized: true,
+		authNonce: "6", markets: fakeMarkets()}
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req executor.RouteRequest
-		_ = json.NewDecoder(r.Body).Decode(&req)
+		enc := json.NewEncoder(w)
+		switch r.URL.Path {
+		case "/markets":
+			_ = enc.Encode(map[string]any{"markets": f.markets})
+			return
+		case "/account/ensure":
+			f.ensures++
+			id := 0
+			if f.registered {
+				id = 7
+			}
+			_ = enc.Encode(executor.Account{
+				ChainID: 10143, AccountCore: "0x6384e9b2Bf3b65e1535403a0A543b5FDA905eE22",
+				UserID: int64(id), Registered: f.registered,
+				SignerAuthorized: f.authorized, AuthNonce: f.authNonce,
+			})
+			return
+		}
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if f.status == "submitted" {
+			switch r.URL.Path {
+			case "/account/deposit":
+				f.registered = true // the first deposit mints the kuru account id
+			case "/account/authorize":
+				f.authorized = true
+			case "/account/revoke":
+				f.authorized = false
+			}
+		}
 		f.calls++
-		_ = json.NewEncoder(w).Encode(executor.RouteResponse{
-			IntentKey: req.IntentKey,
-			TxHash:    "0xtx" + req.IntentKey[:4],
+		f.paths = append(f.paths, r.URL.Path)
+		f.bodies = append(f.bodies, body)
+		key, _ := body["intent_key"].(string)
+		_ = enc.Encode(executor.RouteResponse{
+			IntentKey: key,
+			TxHash:    "0xtx" + key[:4],
 			Status:    f.status,
 			Error:     f.errMsg,
 		})
 	}))
 	t.Cleanup(f.srv.Close)
 	return f
+}
+
+func (f *fakeExecutor) sawOnly(t *testing.T, path string) {
+	t.Helper()
+	if len(f.paths) != 1 || f.paths[0] != path {
+		t.Fatalf("executor saw %v, want exactly [%s]", f.paths, path)
+	}
 }
 
 type harness struct {
@@ -366,6 +457,12 @@ func (h *harness) delegated(t *testing.T, perSlice, total string) {
 	}
 }
 
+// stale ages a cached row past accountFresh so the next read refreshes.
+func stale(ka store.KuruAccount) store.KuruAccount {
+	ka.UpdatedAt = time.Now().Add(-2 * accountFresh)
+	return ka
+}
+
 func body(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
 	t.Helper()
 	var env struct {
@@ -393,6 +490,11 @@ func TestRoutesRequireAuth(t *testing.T) {
 		{http.MethodDelete, "/v1/delegation"},
 		{http.MethodPost, "/v1/orders"},
 		{http.MethodGet, "/v1/orders"},
+		{http.MethodDelete, "/v1/orders/MON-USDC/3"},
+		{http.MethodGet, "/v1/account"},
+		{http.MethodPost, "/v1/account/deposit"},
+		{http.MethodPost, "/v1/account/authorize"},
+		{http.MethodDelete, "/v1/account/authorize"},
 		{http.MethodGet, "/v1/portfolio"},
 		{http.MethodGet, "/v1/executions"},
 		{http.MethodGet, "/v1/schedules"},
@@ -427,6 +529,8 @@ func TestInternalSecretOpensOnlyItsOwnRoutes(t *testing.T) {
 	}
 	closed := []struct{ method, path string }{
 		{http.MethodPost, "/v1/orders"},
+		{http.MethodPost, "/v1/account/deposit"},
+		{http.MethodPost, "/v1/account/authorize"},
 		{http.MethodGet, "/v1/me"},
 		{http.MethodPut, "/v1/delegation"},
 		{http.MethodPost, "/v1/schedules"},

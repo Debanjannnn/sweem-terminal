@@ -148,7 +148,10 @@ func TestCreateOrderRejectsBadRequests(t *testing.T) {
 		{"unknown side", `{"market_id":"MON-USDC","venue":"kuru","side":"long","size":"100","idempotency_key":"a"}`, "side"},
 		{"fractional size", `{"market_id":"MON-USDC","venue":"kuru","side":"buy","size":"1.5","idempotency_key":"a"}`, "size"},
 		{"zero size", `{"market_id":"MON-USDC","venue":"kuru","side":"buy","size":"0","idempotency_key":"a"}`, "size"},
-		{"limit without price", `{"market_id":"MON-USDC","venue":"kuru","side":"buy","order_type":"limit","size":"100","idempotency_key":"a"}`, "limit_price"},
+		{"limit without price", `{"market_id":"MON-USDC","venue":"kuru","side":"buy","order_type":"limit","quantity":"100","idempotency_key":"a"}`, "price"},
+		{"limit without quantity", `{"market_id":"MON-USDC","venue":"kuru","side":"buy","order_type":"limit","price":"25000","idempotency_key":"a"}`, "quantity"},
+		{"unknown tif", `{"market_id":"MON-USDC","venue":"kuru","side":"buy","order_type":"limit","price":"25000","quantity":"40000000000","tif":"aon","idempotency_key":"a"}`, "tif"},
+		{"post only on an ioc", `{"market_id":"MON-USDC","venue":"kuru","side":"buy","order_type":"limit","price":"25000","quantity":"40000000000","tif":"ioc","post_only":true,"idempotency_key":"a"}`, "post_only"},
 		{"unsupported chain", `{"market_id":"MON-USDC","venue":"kuru","side":"buy","size":"100","chain_id":1,"idempotency_key":"a"}`, "chain_id"},
 	}
 	for _, tt := range tests {

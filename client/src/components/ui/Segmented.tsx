@@ -15,7 +15,7 @@ export function Segmented<T extends string>({
   id: string;
   value: T;
   onChange: (v: T) => void;
-  options: readonly { value: T; label: string }[];
+  options: readonly { value: T; label: string; disabled?: boolean; title?: string }[];
   tone?: "neutral" | "accent";
   className?: string;
 }) {
@@ -36,9 +36,11 @@ export function Segmented<T extends string>({
             key={o.value}
             role="tab"
             aria-selected={on}
+            disabled={o.disabled}
+            title={o.title}
             onClick={() => onChange(o.value)}
             className={cn(
-              "relative rounded-lg px-4 py-2 text-sm font-medium transition-colors",
+              "relative rounded-lg px-4 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:text-muted-foreground/50 disabled:hover:text-muted-foreground/50",
               on
                 ? tone === "accent"
                   ? "text-primary-foreground"

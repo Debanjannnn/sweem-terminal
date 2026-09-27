@@ -13,9 +13,12 @@ import { useSession } from "./session";
 import {
   marketFetch,
   walletFetch,
+  type Account,
+  type AuthorizeResult,
   type Book,
   type Candle,
   type Delegation,
+  type DepositResult,
   type Execution,
   type Market,
   type Mark,
@@ -119,17 +122,68 @@ export const useSchedule = (id: string | null) =>
 export const useDelegation = () =>
   useAuthedQuery<Delegation>(["delegation"], "/v1/delegation", { retry: false });
 
+// 412 here is an unmet precondition, not a failure to retry: its message names
+// what is missing and is rendered verbatim
+export const useAccount = () =>
+  useAuthedQuery<Account>(["account"], "/v1/account", { retry: false });
+
+export function useDeposit() {
+  const { token } = useSession();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: { market_id: string; token: "base" | "quote"; amount: string }) =>
+      walletFetch<DepositResult>("/v1/account/deposit", await token(), {
+        method: "POST",
+        body: JSON.stringify(input),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["account"] }),
+  });
+}
+
+export function useAuthorize() {
+  const { token } = useSession();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (expiry: number) =>
+      walletFetch<AuthorizeResult>("/v1/account/authorize", await token(), {
+        method: "POST",
+        body: JSON.stringify({ expiry }),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["account"] }),
+  });
+}
+
+// revoking advances the authorization epoch, which invalidates every pending
+// automated order, so the open-order list is stale too
+export function useRevokeAuthorization() {
+  const { token } = useSession();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async () =>
+      walletFetch<AuthorizeResult>("/v1/account/authorize", await token(), { method: "DELETE" }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["account"] });
+      qc.invalidateQueries({ queryKey: ["orders"] });
+    },
+  });
+}
+
 export type OrderInput = {
   market_id: string;
   venue: string;
   side: "buy" | "sell";
-  order_type: "market" | "limit";
-  size: string;
-  limit_price?: string;
-  max_slippage_bps?: number;
   chain_id: number;
   idempotency_key: string;
-};
+} & (
+  | { order_type: "market"; size: string; max_slippage_bps: number }
+  | {
+      order_type: "limit";
+      price: string;
+      quantity: string;
+      tif: "gtc" | "ioc" | "fok";
+      post_only: boolean;
+    }
+);
 
 export function useCreateOrder() {
   const { token } = useSession();
@@ -144,6 +198,24 @@ export function useCreateOrder() {
       qc.invalidateQueries({ queryKey: ["orders"] });
       qc.invalidateQueries({ queryKey: ["executions"] });
       qc.invalidateQueries({ queryKey: ["portfolio"] });
+    },
+  });
+}
+
+// a slot is reused, so a cancel is bound to the order the caller believes is in it
+export function useCancelOrder() {
+  const { token } = useSession();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (o: { market_id: string; slot_idx: number; expected_order_id: string }) =>
+      walletFetch<OrderResponse>(
+        `/v1/orders/${encodeURIComponent(o.market_id)}/${o.slot_idx}?expected_order_id=${encodeURIComponent(o.expected_order_id)}`,
+        await token(),
+        { method: "DELETE" },
+      ),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["orders"] });
+      qc.invalidateQueries({ queryKey: ["executions"] });
     },
   });
 }

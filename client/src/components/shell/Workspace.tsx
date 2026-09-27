@@ -1,9 +1,11 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { AccountPanel } from "@/components/account/AccountPanel";
 import { ChartPanel } from "@/components/chart/ChartPanel";
 import { MarketHeader } from "@/components/market/MarketHeader";
 import { PositionsPanel } from "@/components/table/PositionsPanel";
+import { OpenOrders } from "@/components/ticket/OpenOrders";
 import { OrderTicket } from "@/components/ticket/OrderTicket";
 import { Card } from "@/components/ui/Card";
 import { EmptyState } from "@/components/ui/EmptyState";
@@ -131,6 +133,11 @@ export function Workspace({
         <Card className="flex min-h-[420px] flex-col">
           <ChartPanel market={market} />
         </Card>
+        {authenticated && market?.venue === "kuru" && (
+          <Card>
+            <OpenOrders venue="kuru" />
+          </Card>
+        )}
         <Card>
           {authenticated ? (
             <PositionsPanel
@@ -151,7 +158,9 @@ export function Workspace({
         </Card>
       </main>
 
-      <aside className="w-[var(--ticket-width)] shrink-0 overflow-y-auto">
+      <aside className="flex w-[var(--ticket-width)] shrink-0 flex-col gap-4 overflow-y-auto">
+        {/* kuru custody is a step of its own: funds live in AccountCore, not the wallet */}
+        {market?.venue === "kuru" && <AccountPanel market={market} />}
         <OrderTicket market={market} />
       </aside>
     </div>

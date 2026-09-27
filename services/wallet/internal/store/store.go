@@ -140,8 +140,9 @@ func audit(ctx context.Context, tx pgx.Tx, userID, action string, detail any) er
 // execution moved nothing, so it does not count.
 func (s *Store) SpentTotal(ctx context.Context, userID string) (string, error) {
 	var total string
-	err := s.pool.QueryRow(ctx,
-		`SELECT COALESCE(SUM(size), 0)::text FROM intents WHERE user_id = $1 AND state <> 'failed'`,
+	err := s.pool.QueryRow(ctx, `
+		SELECT COALESCE(SUM(size), 0)::text FROM intents
+		WHERE user_id = $1 AND state <> 'failed' AND order_type IN ('market', 'limit')`,
 		userID).Scan(&total)
 	return total, err
 }
@@ -151,11 +152,14 @@ func (s *Store) SpentTotal(ctx context.Context, userID string) (string, error) {
 func (s *Store) InsertIntent(ctx context.Context, in Intent) (bool, error) {
 	const q = `
 		INSERT INTO intents (intent_key, user_id, market_id, venue, side, order_type, size,
-		                     limit_price, max_slippage_bps, chain_id, state)
-		VALUES ($1,$2,$3,$4,$5,$6,$7::numeric, NULLIF($8,'')::numeric, $9, $10, $11)
+		                     limit_price, quantity, tif, post_only, token, slot_idx,
+		                     expected_order_id, max_slippage_bps, chain_id, state)
+		VALUES ($1,$2,$3,$4,$5,$6,$7::numeric, NULLIF($8,'')::numeric, NULLIF($9,'')::numeric,
+		        $10, $11, $12, $13, NULLIF($14,'')::numeric, $15, $16, $17)
 		ON CONFLICT (intent_key) DO NOTHING`
 	tag, err := s.pool.Exec(ctx, q, in.Key, in.UserID, in.MarketID, in.Venue, in.Side, in.OrderType,
-		in.Size, in.LimitPrice, in.MaxSlippageBps, in.ChainID, orDefault(in.State, "pending"))
+		in.Size, in.LimitPrice, in.Quantity, in.Tif, in.PostOnly, in.Token, in.SlotIdx,
+		in.ExpectedOrderID, in.MaxSlippageBps, in.ChainID, orDefault(in.State, "pending"))
 	if err != nil {
 		return false, fmt.Errorf("store: insert intent: %w", err)
 	}
@@ -163,13 +167,55 @@ func (s *Store) InsertIntent(ctx context.Context, in Intent) (bool, error) {
 }
 
 const intentCols = `intent_key, user_id, market_id, venue, side, order_type, size::text,
-                    COALESCE(limit_price::text, ''), max_slippage_bps, chain_id, state, created_at`
+                    COALESCE(limit_price::text, ''), COALESCE(quantity::text, ''), tif, post_only,
+                    token, slot_idx, COALESCE(expected_order_id::text, ''),
+                    max_slippage_bps, chain_id, state, created_at`
 
 func scanIntent(row pgx.Row) (Intent, error) {
 	var in Intent
 	err := row.Scan(&in.Key, &in.UserID, &in.MarketID, &in.Venue, &in.Side, &in.OrderType, &in.Size,
-		&in.LimitPrice, &in.MaxSlippageBps, &in.ChainID, &in.State, &in.CreatedAt)
+		&in.LimitPrice, &in.Quantity, &in.Tif, &in.PostOnly, &in.Token, &in.SlotIdx,
+		&in.ExpectedOrderID, &in.MaxSlippageBps, &in.ChainID, &in.State, &in.CreatedAt)
 	return in, err
+}
+
+// PutKuruAccount replaces the cached AccountCore state; the chain is the truth
+// and this row is only a copy of the last read.
+func (s *Store) PutKuruAccount(ctx context.Context, ka KuruAccount) error {
+	const q = `
+		INSERT INTO kuru_accounts (user_id, chain_id, kuru_user_id, signer_authorized,
+		                           auth_nonce, account_core, signer_expiry, updated_at)
+		VALUES ($1,$2,$3,$4,$5::numeric,$6,$7, now())
+		ON CONFLICT (user_id) DO UPDATE SET
+			chain_id = EXCLUDED.chain_id, kuru_user_id = EXCLUDED.kuru_user_id,
+			signer_authorized = EXCLUDED.signer_authorized, auth_nonce = EXCLUDED.auth_nonce,
+			account_core = EXCLUDED.account_core, updated_at = now()`
+	_, err := s.pool.Exec(ctx, q, ka.UserID, ka.ChainID, ka.KuruUserID, ka.SignerAuthorized,
+		orDefault(ka.AuthNonce, "0"), ka.AccountCore, ka.SignerExpiry)
+	return err
+}
+
+// SetSignerExpiry records the expiry this service asked for. /account/ensure
+// reads the permission bit back but not its expiry, so a refresh leaves this
+// column alone rather than overwriting it with a zero it cannot know.
+func (s *Store) SetSignerExpiry(ctx context.Context, userID string, expiry int64) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE kuru_accounts SET signer_expiry = $2 WHERE user_id = $1`, userID, expiry)
+	return err
+}
+
+func (s *Store) KuruAccount(ctx context.Context, userID string) (KuruAccount, error) {
+	var ka KuruAccount
+	err := s.pool.QueryRow(ctx, `
+		SELECT user_id, chain_id, kuru_user_id, signer_authorized, auth_nonce::text,
+		       account_core, signer_expiry, updated_at
+		FROM kuru_accounts WHERE user_id = $1`, userID).
+		Scan(&ka.UserID, &ka.ChainID, &ka.KuruUserID, &ka.SignerAuthorized, &ka.AuthNonce,
+			&ka.AccountCore, &ka.SignerExpiry, &ka.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return KuruAccount{}, ErrNotFound
+	}
+	return ka, err
 }
 
 func (s *Store) Intent(ctx context.Context, key string) (Intent, error) {

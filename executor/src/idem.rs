@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, VecDeque},
+    sync::atomic::{AtomicU64, Ordering},
     sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -42,10 +43,14 @@ pub fn privy_key(intent_key: &str, step: &str) -> String {
     format!("{intent_key}:{step}")
 }
 
-/// privy rejects a reused reference_id with a 400, so it carries a clock.
+/// privy rejects a reused reference_id with a 400, so it carries a clock plus a
+/// counter: two calls can land in the same nanosecond, and the clock alone can
+/// also go backwards.
 pub fn reference_id(intent_key: &str, step: &str) -> String {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-    format!("{intent_key}:{step}:{nanos}")
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("{intent_key}:{step}:{nanos}:{n}")
 }
 
 #[cfg(test)]
@@ -81,5 +86,8 @@ mod tests {
         assert_eq!(privy_key("i1", "swap"), privy_key("i1", "swap"));
         assert_ne!(privy_key("i1", "swap"), privy_key("i1", "approve"));
         assert_ne!(reference_id("i1", "swap"), reference_id("i1", "swap"));
+        // the clock alone is not enough: a tight loop shares a nanosecond
+        let ids: std::collections::HashSet<_> = (0..1000).map(|_| reference_id("i1", "swap")).collect();
+        assert_eq!(ids.len(), 1000, "every reference_id must be unique");
     }
 }

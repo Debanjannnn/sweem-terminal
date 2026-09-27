@@ -160,6 +160,38 @@ export type Me = {
   first_funded_at?: string;
 };
 
+// kuru holds every trader's funds in AccountCore, so an account has to exist and
+// be funded before any order can be placed. the first deposit is what creates it.
+export type Account = {
+  registered: boolean;
+  user_id: number;
+  signer_authorized: boolean;
+  auth_nonce: string;
+  account_core: string;
+  chain_id: number;
+  // a signer expiry emits no event, so it is only here if the backend reads it back
+  signer_expiry?: number;
+};
+
+export type DepositResult = {
+  state: string;
+  tx_hash?: string;
+  token?: string;
+  free?: string;
+  reserved?: string;
+  registered?: boolean;
+  error?: string;
+};
+
+export type AuthorizeResult = {
+  state: string;
+  tx_hash?: string;
+  signer_authorized?: boolean;
+  auth_nonce?: string;
+  expiry?: number;
+  error?: string;
+};
+
 export type Order = {
   intent_key: string;
   user_id: string;
@@ -173,6 +205,13 @@ export type Order = {
   chain_id: number;
   state: string;
   created_at: string;
+  // set once a limit order rests; both are needed to cancel it
+  slot_idx?: number;
+  order_id?: string;
+  price?: string;
+  quantity?: string;
+  tif?: string;
+  post_only?: boolean;
 };
 
 export type Execution = {
@@ -250,10 +289,15 @@ export type Delegation = {
   live: boolean;
 };
 
+// state is the truthful outcome, not "success": resting | not_resting |
+// filled_or_expired | submitted. a confirmed tx is not a resting order.
 export type OrderResponse = {
   intent_key: string;
   state: string;
   tx_hash?: string;
+  slot_idx?: number;
+  order_id?: string;
+  reason?: string;
   error?: string;
   replayed?: boolean;
 };

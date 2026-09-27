@@ -3,6 +3,17 @@ syntax = "proto3";
 package sweem.v1;
 
 // all monetary and size values are decimal strings, uint256-safe
+//
+// Units, once, for every amount that crosses a service boundary. Kuru Spot V2
+// speaks three different scales for one market and confusing them is silent:
+//
+//   raw atoms   what the token contract moves: display * 10^token_decimals
+//   raw ticks   what OrderBook.batch prices in: display_price * price_precision
+//   book units  what OrderBook.batch sizes in: display_base * size_precision
+//
+// raw base atoms == book units * base_size_multiplier, and
+// base_size_multiplier * size_precision == 10^base_decimals. Nothing here is
+// ever an x18 value and nothing here is ever a float.
 
 enum Venue {
   VENUE_UNSPECIFIED = 0;
@@ -106,10 +117,73 @@ message Intent {
   Venue venue = 3;
   Side side = 4;
   OrderType order_type = 5;
+
+  // ORDER_TYPE_MARKET, the taker leg (OrderBook.swap, exact input): RAW ATOMS
+  // OF THE INPUT TOKEN -- quote atoms for a buy, base atoms for a sell. This is
+  // the executor's /route `amount` unchanged.
+  //
+  // It is also the delegation cap denominator for every order type: what the
+  // order can spend, in raw atoms of the token it spends. A maker bid spends
+  // its quote notional, a maker ask spends its base quantity, so for
+  // ORDER_TYPE_LIMIT this field is derived, never sent by the client.
   string size = 6;
+
+  // ORDER_TYPE_LIMIT, the maker leg (OrderBook.batch): RAW TICK INTEGER,
+  // display_price * price_precision, and a multiple of tick_size.
   string limit_price = 7;
-  uint32 max_slippage_bps = 8;
+
+  uint32 max_slippage_bps = 8; // taker only; a maker order has no slippage
   int64 chain_id = 9;
+
+  // ORDER_TYPE_LIMIT: BOOK UNITS, display_base * size_precision. Never raw
+  // base atoms: on WETH-USDC the two differ by 1e8.
+  string quantity = 10;
+
+  TimeInForce tif = 11; // maker only
+  bool post_only = 12; // maker only, requires TIF_GTC
+}
+
+// gtc/ioc/fok as the OrderBook enumerates them. There is no market-order enum
+// on Kuru: a taker leg is OrderBook.swap, not a limit order with a flag.
+enum TimeInForce {
+  TIME_IN_FORCE_UNSPECIFIED = 0;
+  TIME_IN_FORCE_GTC = 1;
+  TIME_IN_FORCE_IOC = 2;
+  TIME_IN_FORCE_FOK = 3;
+}
+
+// KuruAccount is AccountCore state. Funds must sit in AccountCore before
+// anything can trade: a wallet balance cannot.
+message KuruAccount {
+  // uint40 AccountCore id. 0 means the address has never deposited, and every
+  // trading call names the account by this id, so 0 cannot trade.
+  uint64 user_id = 1;
+  bool registered = 2; // user_id != 0
+  bool signer_authorized = 3; // this terminal's signer holds TRADE
+  // unix seconds. expiry emits no event on chain and cannot be read back from
+  // the permission bit, so this is the deadline that was asked for.
+  int64 signer_expiry = 4;
+  // uint256 authorization epoch. every grant, revoke or subaccount creation
+  // advances it and invalidates every pre-signed intent bound to the old one.
+  string auth_nonce = 5;
+  string account_core = 6;
+  int64 chain_id = 7;
+}
+
+// A deposit is what mints the account id. token is the literal string "base" or
+// "quote", never an address.
+message KuruDeposit {
+  string market_id = 1;
+  string token = 2;
+  string amount = 3; // RAW TOKEN ATOMS of that side of the pair
+}
+
+// Kuru has no cancel-by-order-id: cancellation is slot-indexed, and slots are
+// reused, so the order believed to occupy the slot is required.
+message KuruCancel {
+  string market_id = 1;
+  uint32 slot_idx = 2; // 0..61, 62 maker slots per account
+  string expected_order_id = 3; // uint64, never 0
 }
 
 message Execution {

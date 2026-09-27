@@ -14,17 +14,23 @@ var Venues = []string{"kuru"}
 // callable addresses. The API validates delegations against it and sync-policy
 // builds the Privy policy from it, so the two guards name the same markets.
 type Market struct {
-	ID             string `json:"id"`
-	ChainID        int64  `json:"chain_id"`
-	MarketAddress  string `json:"market_address"`
-	BaseToken      string `json:"base_token"`
-	QuoteToken     string `json:"quote_token"`
-	BaseDecimals   int    `json:"base_decimals"`
-	QuoteDecimals  int    `json:"quote_decimals"`
+	ID            string `json:"id"`
+	ChainID       int64  `json:"chain_id"`
+	MarketAddress string `json:"market_address"`
+	BaseToken     string `json:"base_token"`
+	QuoteToken    string `json:"quote_token"`
+	BaseDecimals  int    `json:"base_decimals"`
+	QuoteDecimals int    `json:"quote_decimals"`
+	// displayPrice = price / price_precision
 	PricePrecision string `json:"price_precision"`
-	SizePrecision  string `json:"size_precision"`
-	TickSize       string `json:"tick_size"`
-	MinSize        string `json:"min_size"`
+	// displayBase = quantity / size_precision
+	SizePrecision string `json:"size_precision"`
+	// book quantity -> raw base atoms; == 10^base_decimals / size_precision
+	BaseSizeMultiplier string `json:"base_size_multiplier"`
+	TickSize           string `json:"tick_size"`
+	// raw quote atoms, not the x18 form the data api reports
+	MinQuoteNotional string `json:"min_quote_notional"`
+	MaxQuoteNotional string `json:"max_quote_notional"`
 }
 
 func LoadMarkets(path string) ([]Market, error) {

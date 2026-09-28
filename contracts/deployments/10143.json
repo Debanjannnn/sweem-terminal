@@ -2,7 +2,9 @@
   "chainId": 10143,
   "factory": "0xd4eA80F053a177BFAA93E86cadCB331A39097e74",
   "baskets": {
-    "BLUE": "0xE0b3bAafa8EDD1db95b49e62ea0fB18c04353870"
+    "BLUE": "0xE0b3bAafa8EDD1db95b49e62ea0fB18c04353870",
+    "GOLD": "0x7A035E626AA33295d7818fbBAd69078d2a1808da",
+    "CORE": "0x5a6d479E14716EBbEE307E2831689dE276c7f163"
   },
   "startBlock": 66519935,
   "kuru": {

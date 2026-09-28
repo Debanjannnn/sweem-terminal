@@ -98,3 +98,21 @@ func Run(ctx context.Context, addr string, h http.Handler) error {
 	}
 	return nil
 }
+
+// CORS lets the browser client call the service directly; "*" in origins allows any.
+func CORS(origins []string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if o := r.Header.Get("Origin"); o != "" && (slices.Contains(origins, o) || slices.Contains(origins, "*")) {
+			h := w.Header()
+			h.Set("Access-Control-Allow-Origin", o)
+			h.Set("Vary", "Origin")
+			h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+			h.Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}

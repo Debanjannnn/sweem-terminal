@@ -86,7 +86,7 @@ func TestHTTPRoutes(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 	defer cancel()
 	rdb, basket, mk := seed(t, ctx)
-	srv := httptest.NewServer(New(ctx, rdb))
+	srv := httptest.NewServer(New(ctx, rdb, []string{"http://allowed.test"}))
 	defer srv.Close()
 	u := srv.URL + "/api/v1"
 
@@ -144,7 +144,7 @@ func TestWebSocket(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 	defer cancel()
 	rdb, basket, mk := seed(t, ctx)
-	srv := httptest.NewServer(New(ctx, rdb))
+	srv := httptest.NewServer(New(ctx, rdb, []string{"http://allowed.test"}))
 	defer srv.Close()
 
 	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http")+"/api/v1/ws", nil)

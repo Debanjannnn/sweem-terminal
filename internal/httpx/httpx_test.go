@@ -59,3 +59,19 @@ func TestRequireInternal(t *testing.T) {
 		t.Error("empty secret must fail closed")
 	}
 }
+
+func TestCORS(t *testing.T) {
+	h := CORS([]string{"http://ok.test"}, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(299) }))
+	origin := func(o, method string) func(*http.Request) {
+		return func(r *http.Request) { r.Header.Set("Origin", o); r.Method = method }
+	}
+	if w := get(h, "/", origin("http://ok.test", "OPTIONS")); w.Code != 204 || w.Header().Get("Access-Control-Allow-Origin") != "http://ok.test" {
+		t.Fatal("preflight", w.Code, w.Header())
+	}
+	if w := get(h, "/", origin("http://ok.test", "GET")); w.Code != 299 || w.Header().Get("Access-Control-Allow-Origin") != "http://ok.test" {
+		t.Fatal("allowed", w.Code, w.Header())
+	}
+	if w := get(h, "/", origin("http://evil.test", "OPTIONS")); w.Code != 299 || w.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Fatal("denied", w.Code, w.Header())
+	}
+}

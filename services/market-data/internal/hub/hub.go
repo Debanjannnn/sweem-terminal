@@ -40,9 +40,11 @@ type topic struct {
 }
 
 type Hub struct {
-	ctx    context.Context
-	mu     sync.Mutex
-	topics map[string]*topic
+	// OriginPatterns are host[:port] globs allowed to open the socket (coder/websocket AcceptOptions).
+	OriginPatterns []string
+	ctx            context.Context
+	mu             sync.Mutex
+	topics         map[string]*topic
 	// run follows one topic until ctx ends, calling emit per message. Swapped in tests.
 	run func(ctx context.Context, topic string, emit func(any)) error
 }
@@ -136,8 +138,7 @@ func (c *Client) push(b []byte) {
 
 // Serve upgrades to WebSocket and runs the sub/unsub protocol until the client leaves or falls behind.
 func (h *Hub) Serve(w http.ResponseWriter, r *http.Request) {
-	// public read-only data, so any origin may connect
-	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{OriginPatterns: h.OriginPatterns})
 	if err != nil {
 		return
 	}

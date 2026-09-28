@@ -67,6 +67,7 @@ services:
     environment:
       <<: *base-env
       REDIS_URL: *redis
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
 
   api:
     build: {context: ., dockerfile: go.Dockerfile, args: {SVC: api}}

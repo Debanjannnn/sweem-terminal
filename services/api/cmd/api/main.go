@@ -3,10 +3,8 @@ package main
 import (
 	"context"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/signal"
-	"slices"
 	"strings"
 	"syscall"
 
@@ -49,23 +47,5 @@ func run() error {
 	mux := httpx.NewMux(map[string]httpx.Check{"postgres": db.Ping})
 	(&api.Server{Store: api.PG{DB: db}, Auth: verifier, Privy: privy.New(appID, secret, quorum), QuorumID: quorum}).Routes(mux)
 	slog.Info("listening", "addr", addr)
-	return httpx.Run(ctx, addr, cors(origins, mux))
-}
-
-// browser client calls :8080 directly with a bearer token
-func cors(origins []string, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if o := r.Header.Get("Origin"); o != "" && (slices.Contains(origins, o) || slices.Contains(origins, "*")) {
-			h := w.Header()
-			h.Set("Access-Control-Allow-Origin", o)
-			h.Set("Vary", "Origin")
-			h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
-			h.Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-			if r.Method == http.MethodOptions {
-				w.WriteHeader(http.StatusNoContent)
-				return
-			}
-		}
-		next.ServeHTTP(w, r)
-	})
+	return httpx.Run(ctx, addr, httpx.CORS(origins, mux))
 }

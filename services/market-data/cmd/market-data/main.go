@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/redis/go-redis/v9"
@@ -19,6 +20,7 @@ func main() {
 	var e config.Env
 	redisURL := e.Str("REDIS_URL")
 	addr := ":" + e.Opt("PORT", "8082")
+	origins := strings.Split(e.Opt("CORS_ORIGINS", "http://localhost:3000"), ",")
 	if err := e.Err(); err != nil {
 		slog.Error("config", "err", err)
 		os.Exit(1)
@@ -34,7 +36,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	slog.Info("listening", "addr", addr)
-	if err := httpx.Run(ctx, addr, routes.New(ctx, rdb)); err != nil {
+	if err := httpx.Run(ctx, addr, routes.New(ctx, rdb, origins)); err != nil {
 		slog.Error("serve", "err", err)
 		os.Exit(1)
 	}

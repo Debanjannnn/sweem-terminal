@@ -24,15 +24,23 @@ var (
 	intRE  = regexp.MustCompile(`^[0-9]{1,78}$`)
 )
 
-func New(ctx context.Context, rdb *redis.Client) http.Handler {
+// New serves the routes; origins are CORS origins (scheme://host[:port] or "*"), also allowed on the WebSocket.
+func New(ctx context.Context, rdb *redis.Client, origins []string) http.Handler {
 	s := srv{rdb}
 	mux := httpx.NewMux(map[string]httpx.Check{"redis": func(ctx context.Context) error { return rdb.Ping(ctx).Err() }})
-	mux.HandleFunc("GET /api/v1/ws", hub.New(ctx, rdb).Serve)
+	h := hub.New(ctx, rdb)
+	for _, o := range origins {
+		if _, host, ok := strings.Cut(o, "://"); ok {
+			o = host
+		}
+		h.OriginPatterns = append(h.OriginPatterns, o)
+	}
+	mux.HandleFunc("GET /api/v1/ws", h.Serve)
 	mux.HandleFunc("GET /api/v1/markets", s.markets)
 	mux.HandleFunc("GET /api/v1/baskets/{address}/nav", s.nav)
 	mux.HandleFunc("GET /api/v1/books/{market}", s.book)
 	mux.HandleFunc("GET /api/v1/quote/{basket}", s.quote)
-	return mux
+	return httpx.CORS(origins, mux)
 }
 
 type srv struct{ rdb *redis.Client }

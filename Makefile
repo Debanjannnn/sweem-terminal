@@ -33,5 +33,8 @@ infra:
 	docker compose up -d --wait postgres redis
 	docker compose run --rm migrate
 
+# real testnet txs against `make up`: deployer key only from .env.wallet, Privy e2e user from .env.e2e
 e2e:
-	@echo "e2e: not implemented yet" && exit 1
+	set -a && . ./.env && . ./.env.e2e && set +a && \
+	PRIVATE_KEY=$$(sed -n 's/^PRIVATE_KEY=//p' .env.wallet) E2E_DEPLOYMENTS_PATH=$(CURDIR)/contracts/deployments/10143.json \
+	go test -tags e2e -count=1 -v -timeout 15m ./e2e/

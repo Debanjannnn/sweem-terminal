@@ -102,6 +102,9 @@ services:
       INTERNAL_SECRET: ${INTERNAL_SECRET}
       EXECUTOR_URL: http://executor:8083
       KURU_GATEWAY_URL: ${KURU_GATEWAY_URL:-https://gateway.testnet.kuru.io}
+      # a requote tx burns ~0.08 MON (Monad bills the gas limit); GTC ladders can rest
+      SEEDER_REQUOTE_EVERY: ${SEEDER_REQUOTE_EVERY:-30m}
+      SEEDER_REQUOTE_BPS: ${SEEDER_REQUOTE_BPS:-100}
 
   # sole signer; reachable only on the compose network
   executor:

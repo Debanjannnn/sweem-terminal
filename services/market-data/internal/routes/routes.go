@@ -164,7 +164,6 @@ func (s srv) quote(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		httpx.Error(w, http.StatusServiceUnavailable, "unavailable")
 	default:
-		res.Stale = st.Nav.Stale
 		httpx.JSON(w, http.StatusOK, res)
 	}
 }

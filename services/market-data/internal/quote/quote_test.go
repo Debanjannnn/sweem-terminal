@@ -127,3 +127,19 @@ func TestErrors(t *testing.T) {
 		t.Fatalf("missing book: %v", err)
 	}
 }
+
+func TestStale(t *testing.T) {
+	s := forkState()
+	s.Nav.Stale = true // publisher marks supply-0 NAV stale
+	if r, _ := Mint(s, d("1000000000"), 0); r.Stale {
+		t.Fatal("first mint quote must not inherit supply-0 staleness")
+	}
+	s = afterFirstMint()
+	s.Nav.Stale = true
+	if r, _ := Mint(s, d("500000000"), 0); !r.Stale {
+		t.Fatal("mint with supply uses NAV values")
+	}
+	if r, _ := Redeem(s, d("1000000000000000000"), 0); !r.Stale {
+		t.Fatal("redeem stale")
+	}
+}

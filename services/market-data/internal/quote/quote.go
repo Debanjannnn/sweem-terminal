@@ -92,7 +92,8 @@ func Mint(s State, usdcRaw decimal.Decimal, slippageBps int64) (Result, error) {
 		return Result{}, ErrUnavailable // contract divides by zero
 	}
 
-	res := Result{Legs: []Leg{}}
+	// first mint allocates by weight, so the supply-0 NAV (stale by design) does not make it stale
+	res := Result{Legs: []Leg{}, Stale: s.Nav.Stale && supply.IsPositive()}
 	spent := decimal.Zero
 	var shares *decimal.Decimal
 	for _, l := range legs {
@@ -145,7 +146,7 @@ func Redeem(s State, sharesRaw decimal.Decimal, slippageBps int64) (Result, erro
 		return Result{}, ErrBadInput
 	}
 	qd := int32(legs[0].info.QuoteDecimals)
-	res := Result{Legs: []Leg{}}
+	res := Result{Legs: []Leg{}, Stale: s.Nav.Stale}
 	total := decimal.Zero
 	for _, l := range legs {
 		bd := int32(l.info.BaseDecimals)

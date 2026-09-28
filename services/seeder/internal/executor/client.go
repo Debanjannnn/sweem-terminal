@@ -32,8 +32,9 @@ type DepositReq struct {
 }
 
 type TxResp struct {
-	TxHash string `json:"txHash"`
-	Status string `json:"status"`
+	TxHash   string   `json:"txHash"`
+	Status   string   `json:"status"`
+	OrderIDs []string `json:"orderIds"`
 }
 
 type Balance struct {

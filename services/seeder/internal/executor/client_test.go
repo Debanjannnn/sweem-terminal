@@ -67,7 +67,15 @@ func TestOrdersMatchesFixture(t *testing.T) {
 			{Side: "sell", Price: "301000", Size: "5000000000", Tif: "gtc"},
 		},
 	})
-	if err != nil || got.TxHash == "" || got.Status != "submitted" {
+	if err != nil || got.TxHash == "" || got.Status != "confirmed" || len(got.OrderIDs) != 2 {
+		t.Fatal(got, err)
+	}
+}
+
+func TestOrdersNoop(t *testing.T) {
+	c := fake(t, "POST", "/api/v1/bot/orders", []byte(`{"market":"0xm","cancels":["1"],"orders":[]}`), 200, fixture(t, "bot_orders_noop.response.json"))
+	got, err := c.Orders(context.Background(), OrdersReq{Market: "0xm", Cancels: []string{"1"}})
+	if err != nil || got.Status != "noop" || got.TxHash != "" {
 		t.Fatal(got, err)
 	}
 }

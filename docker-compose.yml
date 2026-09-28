@@ -1,0 +1,126 @@
+name: sweem-baskets
+
+x-health: &health
+  interval: 5s
+  timeout: 3s
+  retries: 20
+
+x-base-env: &base-env
+  RPC_URL: ${RPC_URL:-https://testnet-rpc.monad.xyz}
+  CHAIN_ID: "10143"
+  DEPLOYMENTS_PATH: /deployments/10143.json
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+
+x-db: &db postgres://sweem:sweem@postgres:5432/sweem?sslmode=disable
+x-redis: &redis redis://redis:6379
+
+x-deps: &deps
+  postgres: {condition: service_healthy}
+  redis: {condition: service_healthy}
+  migrate: {condition: service_completed_successfully}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment: {POSTGRES_USER: sweem, POSTGRES_PASSWORD: sweem, POSTGRES_DB: sweem}
+    ports: ["${POSTGRES_HOST_PORT:-5433}:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck: {test: ["CMD-SHELL", "pg_isready -U sweem -d sweem"], <<: *health}
+
+  redis:
+    image: redis:7-alpine
+    ports: ["${REDIS_HOST_PORT:-6380}:6379"]
+    healthcheck: {test: ["CMD", "redis-cli", "ping"], <<: *health}
+
+  # applies each migrations/*.sql once, in name order, recorded in schema_migrations
+  migrate:
+    image: postgres:16-alpine
+    depends_on: {postgres: {condition: service_healthy}}
+    environment: {PGHOST: postgres, PGUSER: sweem, PGPASSWORD: sweem, PGDATABASE: sweem}
+    volumes: ["./migrations:/migrations:ro"]
+    entrypoint: ["sh", "-ec"]
+    command:
+      - |
+        psql -v ON_ERROR_STOP=1 -qc "create table if not exists schema_migrations(name text primary key, applied_at timestamptz not null default now())"
+        for f in $$(ls /migrations/*.sql | sort); do
+          n=$$(basename "$$f")
+          if [ -n "$$(psql -tAc "select 1 from schema_migrations where name='$$n'")" ]; then echo "skip $$n"; continue; fi
+          echo "apply $$n"
+          psql -1 -v ON_ERROR_STOP=1 -q -f "$$f" -c "insert into schema_migrations(name) values ('$$n')"
+        done
+
+  publisher:
+    build: {context: ., dockerfile: go.Dockerfile, args: {SVC: publisher}}
+    ports: ["8081:8081"]
+    depends_on: *deps
+    environment:
+      <<: *base-env
+      DATABASE_URL: *db
+      REDIS_URL: *redis
+      KURU_GATEWAY_WS_URL: ${KURU_GATEWAY_WS_URL}
+      KURU_API_URL: ${KURU_API_URL}
+
+  market-data:
+    build: {context: ., dockerfile: go.Dockerfile, args: {SVC: market-data}}
+    ports: ["8082:8082"]
+    depends_on: {redis: {condition: service_healthy}}
+    environment:
+      <<: *base-env
+      REDIS_URL: *redis
+
+  api:
+    build: {context: ., dockerfile: go.Dockerfile, args: {SVC: api}}
+    ports: ["8080:8080"]
+    depends_on: *deps
+    environment:
+      <<: *base-env
+      DATABASE_URL: *db
+      PRIVY_APP_ID: ${PRIVY_APP_ID}
+      PRIVY_KEY_QUORUM_ID: ${PRIVY_KEY_QUORUM_ID}
+
+  scheduler:
+    build: {context: ., dockerfile: go.Dockerfile, args: {SVC: scheduler}}
+    ports: ["8084:8084"]
+    depends_on: *deps
+    environment:
+      <<: *base-env
+      DATABASE_URL: *db
+      REDIS_URL: *redis
+      INTERNAL_SECRET: ${INTERNAL_SECRET}
+      EXECUTOR_URL: http://executor:8083
+
+  seeder:
+    build: {context: ., dockerfile: go.Dockerfile, args: {SVC: seeder}}
+    ports: ["8086:8086"]
+    depends_on: {redis: {condition: service_healthy}}
+    environment:
+      <<: *base-env
+      REDIS_URL: *redis
+      INTERNAL_SECRET: ${INTERNAL_SECRET}
+      EXECUTOR_URL: http://executor:8083
+
+  # sole signer; reachable only on the compose network
+  executor:
+    build: {context: ., dockerfile: services/executor/Dockerfile}
+    expose: ["8083"]
+    depends_on: *deps
+    env_file: [.env.executor]
+    environment:
+      <<: *base-env
+      DATABASE_URL: *db
+      INTERNAL_SECRET: ${INTERNAL_SECRET}
+      PRIVY_APP_ID: ${PRIVY_APP_ID}
+      PRIVY_KEY_QUORUM_ID: ${PRIVY_KEY_QUORUM_ID}
+      PRIVY_POLICY_ID: ${PRIVY_POLICY_ID}
+
+  indexer:
+    build: {context: ., dockerfile: services/indexer/Dockerfile}
+    ports: ["8085:8085"]
+    depends_on: *deps
+    environment:
+      <<: *base-env
+      DATABASE_URL: *db
+      ENVIO_API_TOKEN: ${ENVIO_API_TOKEN}
+
+volumes:
+  pgdata:

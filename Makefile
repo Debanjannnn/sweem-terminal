@@ -1,6 +1,9 @@
-.PHONY: abi test test-integration up down logs infra e2e
+.PHONY: deps abi test test-integration up down logs infra e2e
 
 BINDINGS := internal/chain/bindings
+
+deps:
+	cd contracts && forge install --no-git foundry-rs/forge-std OpenZeppelin/openzeppelin-contracts@v5.7.0
 
 abi:
 	contracts/script/export-abi.sh

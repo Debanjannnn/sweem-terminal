@@ -11,3 +11,4 @@ bun.lock
 !.env.example
 *.log
 .run/
+contracts/lib/

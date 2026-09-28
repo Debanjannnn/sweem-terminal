@@ -1,7 +1,0 @@
-.git
-target
-.env
-.env.*
-*.md
-Dockerfile
-.dockerignore

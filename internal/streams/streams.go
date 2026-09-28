@@ -55,6 +55,7 @@ type MarketInfo struct {
 	SizePrecision  Dec  `json:"sizePrecision"`
 	TickSize       Dec  `json:"tickSize"`
 	MinSize        Dec  `json:"minSize"`
+	TakerFeePps    Dec  `json:"takerFeePps"`
 }
 
 type Component struct {

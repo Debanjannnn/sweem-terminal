@@ -72,11 +72,13 @@ services:
     build: {context: ., dockerfile: go.Dockerfile, args: {SVC: api}}
     ports: ["8080:8080"]
     depends_on: *deps
+    env_file: [.env.api]
     environment:
       <<: *base-env
       DATABASE_URL: *db
       PRIVY_APP_ID: ${PRIVY_APP_ID}
       PRIVY_KEY_QUORUM_ID: ${PRIVY_KEY_QUORUM_ID}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
 
   scheduler:
     build: {context: ., dockerfile: go.Dockerfile, args: {SVC: scheduler}}
@@ -88,6 +90,7 @@ services:
       REDIS_URL: *redis
       INTERNAL_SECRET: ${INTERNAL_SECRET}
       EXECUTOR_URL: http://executor:8083
+      MARKET_DATA_URL: http://market-data:8082
 
   seeder:
     build: {context: ., dockerfile: go.Dockerfile, args: {SVC: seeder}}

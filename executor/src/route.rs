@@ -118,28 +118,28 @@ pub struct Step {
 }
 
 impl Step {
-    fn new(name: &str, status: &str, tx_hash: &str, detail: String) -> Self {
+    pub(crate) fn new(name: &str, status: &str, tx_hash: &str, detail: String) -> Self {
         Self { name: name.into(), status: status.into(), tx_hash: tx_hash.into(), detail }
     }
 }
 
-struct Done {
+pub(crate) struct Done {
     tx_hash: String,
     status: String,
     info: Value,
 }
 
 impl Done {
-    fn new(tx_hash: &str, status: &str, info: Value) -> Self {
+    pub(crate) fn new(tx_hash: &str, status: &str, info: Value) -> Self {
         Self { tx_hash: tx_hash.into(), status: status.into(), info }
     }
 }
 
 /// who signs and pays. the backend signer holds TRADE on the account; without one
 /// the user's own wallet signs for its own account.
-struct Sender {
-    wallet_id: String,
-    from: Address,
+pub(crate) struct Sender {
+    pub(crate) wallet_id: String,
+    pub(crate) from: Address,
 }
 
 fn now() -> u64 {
@@ -149,7 +149,7 @@ fn now() -> u64 {
         .unwrap_or(0)
 }
 
-fn amount(s: &str, what: &str) -> Result<U256, String> {
+pub(crate) fn amount(s: &str, what: &str) -> Result<U256, String> {
     let v = U256::from_str_radix(s.trim(), 10).map_err(|_| format!("{what} {s:?} is not a uint256"))?;
     if v.is_zero() {
         return Err(format!("{what} must be greater than zero"));
@@ -162,7 +162,7 @@ fn client_order_id(intent_key: &str) -> [u8; 32] {
     keccak256(intent_key).0
 }
 
-async fn signs_for(st: &AppState, wallet_id: &str, expect: Address) -> Result<(), String> {
+pub(crate) async fn signs_for(st: &AppState, wallet_id: &str, expect: Address) -> Result<(), String> {
     let w = st.privy.get_wallet(wallet_id).await.map_err(|e| format!("privy wallet lookup failed: {e}"))?;
     let owner: Address = w.address.parse().map_err(|_| format!("privy returned a bad address for {wallet_id}"))?;
     if owner != expect {
@@ -171,7 +171,7 @@ async fn signs_for(st: &AppState, wallet_id: &str, expect: Address) -> Result<()
     Ok(())
 }
 
-fn chain<'a>(st: &'a AppState, chain_id: u64) -> Result<(u64, &'a Rpc), String> {
+pub(crate) fn chain(st: &AppState, chain_id: u64) -> Result<(u64, &Rpc), String> {
     let id = if chain_id == 0 { crate::config::DEFAULT_CHAIN_ID } else { chain_id };
     st.rpc.get(&id).map(|r| (id, r)).ok_or(format!("no rpc for chain {id}"))
 }
@@ -206,7 +206,7 @@ fn trading_sender(st: &AppState, privy_wallet_id: &str, user: Address) -> Sender
     }
 }
 
-async fn submit(st: &AppState, chain_id: u64, intent_key: &str, sender: &Sender, step: &str, call: &Call, fallback_gas: u64) -> Result<String, String> {
+pub(crate) async fn submit(st: &AppState, chain_id: u64, intent_key: &str, sender: &Sender, step: &str, call: &Call, fallback_gas: u64) -> Result<String, String> {
     let (_, rpc) = chain(st, chain_id)?;
     let limit = gas::limit(rpc, sender.from, call.to, call.value, &call.data, fallback_gas).await;
     let fees = gas::fees(rpc, limit).await;
@@ -227,7 +227,7 @@ async fn submit(st: &AppState, chain_id: u64, intent_key: &str, sender: &Sender,
     Ok(tx.hash)
 }
 
-async fn mined(st: &AppState, rpc: &Rpc, hash: &str, step: &str) -> Result<bool, String> {
+pub(crate) async fn mined(st: &AppState, rpc: &Rpc, hash: &str, step: &str) -> Result<bool, String> {
     match rpc::wait(|| rpc.receipt(hash), st.receipt_timeout, rpc::POLL_INTERVAL).await {
         Some(Outcome::Confirmed) => Ok(true),
         Some(Outcome::Reverted) => Err(format!("{step} reverted: {hash}")),
@@ -236,7 +236,7 @@ async fn mined(st: &AppState, rpc: &Rpc, hash: &str, step: &str) -> Result<bool,
 }
 
 /// one recorded answer per intent_key, serialized on the wallet that signs.
-async fn guarded<F, Fut>(st: &AppState, intent_key: &str, wallet_id: &str, run: F) -> Json<RouteResponse>
+pub(crate) async fn guarded<F, Fut>(st: &AppState, intent_key: &str, wallet_id: &str, run: F) -> Json<RouteResponse>
 where
     F: FnOnce(Vec<Step>) -> Fut,
     Fut: std::future::Future<Output = (Result<Done, String>, Vec<Step>)>,
@@ -286,9 +286,13 @@ async fn ensure(st: &AppState, req: &AccountRequest) -> Result<Value, String> {
     let id = account::user_id(rpc, st.account_core, user).await?;
     let epoch = account::auth_nonce(rpc, st.account_core, user).await?;
     let signer = st.signer.as_ref().map(|s| s.address);
-    let authorized = match (signer, id) {
-        (Some(s), id) if id != 0 => account::is_authorized(rpc, st.account_core, user, s).await?,
-        _ => false,
+    let authorized = match signer {
+        Some(s) if id != 0 => account::is_authorized(rpc, st.account_core, user, s).await?,
+        Some(_) => false,
+        // no backend signer: trades are signed by the owner's own wallet, which
+        // is the account and needs no TRADE grant. reporting false here left
+        // every order refused and /account/authorize with nobody to authorize.
+        None => true,
     };
     Ok(json!({
         "chain_id": chain_id,

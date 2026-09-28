@@ -30,6 +30,43 @@ const privyAPI = "https://api.privy.io"
 // the kuru router proxy, mirroring executor/src/config.rs
 const defaultAccountCore = "0x6384e9b2Bf3b65e1535403a0A543b5FDA905eE22"
 
+// the perpl Exchange proxy, mirroring executor/src/config.rs
+const defaultPerplExchange = "0x1964c32f0be608e7d29302aff5e61268e72080cc"
+
+// perplTarget reads the collateral the pinned exchange pulls from perpl's own
+// context, rather than a per-network constant that drifts.
+func perplTarget(apiURL, exchange string) (*Perpl, error) {
+	resp, err := http.Get(strings.TrimRight(apiURL, "/") + "/v1/pub/context")
+	if err != nil {
+		return nil, fmt.Errorf("perpl context unreachable: %w", err)
+	}
+	defer resp.Body.Close()
+	var ctx struct {
+		Instances []struct {
+			Address         string `json:"address"`
+			CollateralToken int    `json:"collateral_token_id"`
+		} `json:"instances"`
+		Tokens []struct {
+			ID      int    `json:"id"`
+			Address string `json:"address"`
+		} `json:"tokens"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&ctx); err != nil {
+		return nil, fmt.Errorf("perpl context did not parse: %w", err)
+	}
+	for _, in := range ctx.Instances {
+		if !strings.EqualFold(in.Address, exchange) {
+			continue
+		}
+		for _, t := range ctx.Tokens {
+			if t.ID == in.CollateralToken {
+				return &Perpl{Exchange: exchange, Collateral: t.Address}, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("perpl context names no collateral for exchange %s", exchange)
+}
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "sync-policy:", err)
@@ -68,7 +105,12 @@ func run() error {
 		}
 	}
 
-	spec, err := Build(*name, ownerID, *accountCore, markets)
+	perpl, err := perplTarget(config.GetEnv("PERPL_API_URL", "https://testnet.perpl.xyz/api"),
+		config.GetEnv("PERPL_EXCHANGE_ADDRESS", defaultPerplExchange))
+	if err != nil {
+		return err
+	}
+	spec, err := Build(*name, ownerID, *accountCore, markets, perpl)
 	if err != nil {
 		return err
 	}

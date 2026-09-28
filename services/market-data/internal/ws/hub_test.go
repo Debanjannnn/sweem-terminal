@@ -76,6 +76,11 @@ func TestHubRoundTrip(t *testing.T) {
 			}
 		}()
 		m := readDown(t, c)
+		// a publish that beat the subscribe is stored and replayed as the
+		// snapshot; the live update is the frame after it
+		if m["type"] == ws.TypeSnapshot {
+			m = readDown(t, c)
+		}
 		if m["topic"] != topic {
 			t.Errorf("topic = %v", m["topic"])
 		}

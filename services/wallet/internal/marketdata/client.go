@@ -79,24 +79,58 @@ func (c *Client) Markets(ctx context.Context) ([]string, error) {
 	if res.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("market-data answered %d for the market list", res.StatusCode)
 	}
+	// GET /v1/markets answers {"data": [market, ...]}
 	var body struct {
-		Data struct {
-			Markets []struct {
-				ID     string `json:"id"`
-				Venue  string `json:"venue"`
-				Symbol string `json:"symbol"`
-			} `json:"markets"`
+		Data []struct {
+			ID     string `json:"id"`
+			Venue  string `json:"venue"`
+			Symbol string `json:"symbol"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
 		return nil, fmt.Errorf("market-data returned a market list this service could not parse: %w", err)
 	}
-	ids := make([]string, 0, len(body.Data.Markets)*2)
-	for _, m := range body.Data.Markets {
+	ids := make([]string, 0, len(body.Data)*2)
+	for _, m := range body.Data {
 		ids = append(ids, m.ID)
 		if m.Venue != "" && m.Symbol != "" {
 			ids = append(ids, strings.ToLower(m.Venue+":"+m.Symbol))
 		}
 	}
 	return ids, nil
+}
+
+// Market is market-data's listing of one market: its scales, and its mark in
+// WAD when market-data has one.
+type Market struct {
+	ID            string `json:"id"`
+	Venue         string `json:"venue"`
+	Kind          string `json:"kind"`
+	Symbol        string `json:"symbol"`
+	PriceDecimals int    `json:"priceDecimals"`
+	SizeDecimals  int    `json:"sizeDecimals"`
+	QuoteDecimals int    `json:"quoteDecimals"`
+	Mark          string `json:"mark"`
+}
+
+func (c *Client) Market(ctx context.Context, id string) (Market, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/v1/markets/"+url.PathEscape(id), nil)
+	if err != nil {
+		return Market{}, err
+	}
+	res, err := c.http.Do(req)
+	if err != nil {
+		return Market{}, fmt.Errorf("market-data is unreachable, so market %s could not be read: %w", id, err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return Market{}, fmt.Errorf("market-data answered %d for market %s", res.StatusCode, id)
+	}
+	var body struct {
+		Data Market `json:"data"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+		return Market{}, fmt.Errorf("market-data returned market %s in a shape this service could not parse: %w", id, err)
+	}
+	return body.Data, nil
 }

@@ -37,6 +37,8 @@ type orderRequest struct {
 	MaxSlippageBps int    `json:"max_slippage_bps"`
 	ChainID        int64  `json:"chain_id"`
 	IdempotencyKey string `json:"idempotency_key"`
+	// perpl only: hundredths, 500 = 5x
+	Leverage int `json:"leverage"`
 }
 
 type orderResponse struct {
@@ -145,7 +147,11 @@ func (s *Server) listOrders(w http.ResponseWriter, r *http.Request) {
 // evaluate runs the real guard. A non-nil rejection is a 412 naming what is
 // missing or breached; an error is this service's own fault.
 func (s *Server) evaluate(ctx context.Context, u store.User, in store.Intent) (*policy.Rejection, error) {
-	if rej := s.kuruReady(ctx, u); rej != nil {
+	ready := s.kuruReady
+	if in.Venue == venuePerpl {
+		ready = s.perplReady
+	}
+	if rej := ready(ctx, u); rej != nil {
 		return rej, nil
 	}
 	userID := u.ID
@@ -190,13 +196,20 @@ func (s *Server) replay(ctx context.Context, key string) (orderResponse, bool) {
 // limit order routed as a swap would be a market order the user never asked for.
 func (s *Server) submit(ctx context.Context, u store.User, in store.Intent) (orderResponse, error) {
 	return s.perform(ctx, in, func(ctx context.Context) (executor.RouteResponse, error) {
+		if in.Venue == venuePerpl {
+			return s.submitPerpl(ctx, u, in)
+		}
+		marketID, err := s.executorMarket(ctx, in.MarketID)
+		if err != nil {
+			return executor.RouteResponse{}, err
+		}
 		switch in.OrderType {
 		case "limit":
 			return s.Executor.Order(ctx, executor.OrderRequest{
 				IntentKey:     in.Key,
 				PrivyWalletID: u.PrivyWalletID,
 				UserWallet:    u.WalletAddress,
-				MarketID:      in.MarketID,
+				MarketID:      marketID,
 				Side:          in.Side,
 				Price:         in.LimitPrice,
 				Quantity:      in.Quantity,
@@ -209,7 +222,7 @@ func (s *Server) submit(ctx context.Context, u store.User, in store.Intent) (ord
 				IntentKey:       in.Key,
 				PrivyWalletID:   u.PrivyWalletID,
 				UserWallet:      u.WalletAddress,
-				MarketID:        in.MarketID,
+				MarketID:        marketID,
 				SlotIdx:         slotOf(in),
 				ExpectedOrderID: in.ExpectedOrderID,
 				ChainID:         in.ChainID,
@@ -219,7 +232,7 @@ func (s *Server) submit(ctx context.Context, u store.User, in store.Intent) (ord
 				IntentKey:      in.Key,
 				PrivyWalletID:  u.PrivyWalletID,
 				UserWallet:     u.WalletAddress,
-				MarketID:       in.MarketID,
+				MarketID:       marketID,
 				Venue:          in.Venue,
 				Side:           in.Side,
 				Amount:         in.Size,
@@ -232,7 +245,9 @@ func (s *Server) submit(ctx context.Context, u store.User, in store.Intent) (ord
 
 // the executor is truthful about what happened; none of these mean the call
 // failed. a maker order that did not rest is still a landed transaction.
-var landed = []string{"submitted", "confirmed", "resting", "not_resting", "filled_or_expired", "canceled"}
+var landed = []string{"submitted", "confirmed", "resting", "not_resting", "filled_or_expired", "canceled",
+	// perpl reads its outcome from the receipt: a landed IOC may match nothing
+	"filled", "partial", "not_filled"}
 
 // perform records the intent, replays a retry instead of signing again, calls
 // the executor once and records the outcome. Every executor call goes through
@@ -274,6 +289,11 @@ func (s *Server) perform(ctx context.Context, in store.Intent, call func(context
 		TxHash:       resp.TxHash,
 		Confirmation: finality.Seen.String(),
 	}, resp.Status)
+	if id, slot := orderRef(resp.Info); id != "" {
+		if err := s.Store.SetOrderRef(ctx, in.Key, id, slot); err != nil {
+			s.log().Error("record order ref", "intent_key", in.Key, "err", err)
+		}
+	}
 	s.emit(ctx, natsbus.SubjExecutionPending, in, resp.TxHash, "")
 	return orderResponse{IntentKey: in.Key, State: resp.Status, TxHash: resp.TxHash,
 		Steps: resp.Steps, Info: resp.Info}, nil
@@ -347,6 +367,9 @@ func (s *Server) buildIntent(ctx context.Context, userID string, req orderReques
 	}
 	if !policy.KnownVenue(req.Venue) {
 		return store.Intent{}, fmt.Sprintf("Venue %q is not one this terminal can route to (%s).", req.Venue, strings.Join(policy.Venues, ", "))
+	}
+	if req.Venue == venuePerpl {
+		return s.buildPerplIntent(ctx, userID, req)
 	}
 	if !s.knownMarket(ctx, req.MarketID) {
 		return store.Intent{}, fmt.Sprintf("Market %q is not on the executor's allowlist, so no order can be routed for it.", req.MarketID)

@@ -4,7 +4,7 @@ import { Segmented } from "@/components/ui/Segmented";
 
 export type OrderType = "market" | "limit" | "stop";
 
-export const STOP_REASON =
+const STOP_REASON =
   "Stop orders are unavailable: Kuru's order book has no stop type, so nothing could trigger one.";
 
 const TYPES = [

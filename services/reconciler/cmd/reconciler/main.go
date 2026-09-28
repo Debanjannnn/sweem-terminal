@@ -110,17 +110,25 @@ func main() {
 	}()
 
 	log.Info("reconciler up", "chainId", chainID, "markets", len(r.markets), "engine", r.engine)
-	var wg sync.WaitGroup
-	for _, l := range []struct {
+	type job struct {
 		name string
 		d    time.Duration
 		fn   func(context.Context)
-	}{
-		{"risk-sweep", sweepEvery, func(c context.Context) { r.sweeper.Sweep(c) }},
-		{"reconcile", reconcileEvery, r.reconcile},
-		{"snapshot", snapshotEvery, r.snapshot},
-		{"panel", panelEvery, r.panel},
-	} {
+	}
+	jobs := []job{{"reconcile", reconcileEvery, r.reconcile}}
+	if r.engineDeployed() {
+		jobs = append(jobs,
+			job{"risk-sweep", sweepEvery, func(c context.Context) { r.sweeper.Sweep(c) }},
+			job{"snapshot", snapshotEvery, r.snapshot},
+			job{"panel", panelEvery, r.panel},
+		)
+	} else {
+		// every read against the zero address returns 0 bytes; sweeping it once a
+		// second is pure log noise. kuru executions still settle.
+		log.Warn("IndexPerpEngine is not deployed on this chain; risk sweep, snapshots, OI panel and vault diff are off until it is")
+	}
+	var wg sync.WaitGroup
+	for _, l := range jobs {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -208,8 +216,18 @@ func (r *reconciler) reconcile(ctx context.Context) {
 		safe = finalized
 	}
 	r.settleExecutions(ctx, safe, finalized)
+	if !r.engineDeployed() {
+		return
+	}
 	r.diffPositions(ctx, finalized)
 	r.diffVault(ctx, finalized)
+}
+
+func (r *reconciler) engineDeployed() bool { return deployed(r.engine) }
+
+// an unset or 0x0 address means the contracts were never deployed on this chain
+func deployed(a string) bool {
+	return strings.Trim(strings.TrimPrefix(strings.ToLower(a), "0x"), "0") != ""
 }
 
 func (r *reconciler) settleExecutions(ctx context.Context, safe, finalized uint64) {
@@ -389,9 +407,9 @@ func (r *reconciler) refreshOwners(ctx context.Context, m market) {
 		r.addOwners(m.hex, stored)
 	}
 	// ponytail: replays from block 0 each pass, add a watermark when event counts grow
-	events, err := r.indexer.PositionEvents(ctx, m.label, 0)
+	events, err := r.indexer.PositionEvents(ctx, m.hex, 0)
 	if err != nil {
-		r.log.Warn("indexer position events unavailable", "market", m.label, "err", err)
+		r.log.Warn("indexer position events unavailable", "market", m.hex, "err", err)
 		return
 	}
 	owners := make([]string, 0, len(events))
@@ -409,13 +427,13 @@ func (r *reconciler) panel(ctx context.Context) {
 	}
 	now := time.Now().Unix()
 	for _, m := range r.markets {
-		if points, err := r.indexer.FundingRatePoints(ctx, m.label, now-3600, now); err == nil && len(points) > 0 {
+		if points, err := r.indexer.FundingRatePoints(ctx, m.hex, now-3600, now); err == nil && len(points) > 0 {
 			last := points[len(points)-1]
 			if err := r.db.SaveFunding(ctx, m.hex, last.Ts, last.Rate); err != nil {
 				r.log.Warn("funding snapshot write failed", "market", m.hex, "err", err)
 			}
 		} else if err != nil {
-			r.log.Warn("funding rate points unavailable", "market", m.label, "err", err)
+			r.log.Warn("funding rate points unavailable", "market", m.hex, "err", err)
 		}
 		st, err := r.chain.MarketState(ctx, r.engine, m.key, finality.Seen)
 		if err != nil {

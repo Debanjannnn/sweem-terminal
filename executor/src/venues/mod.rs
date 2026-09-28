@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 pub mod account;
 pub mod kuru;
+pub mod perpl;
 
 pub const DEFAULT_SLIPPAGE_BPS: u32 = 50;
 pub const MIN_SLIPPAGE_BPS: u32 = 10;

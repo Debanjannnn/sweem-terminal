@@ -9,7 +9,6 @@ import { Dropdown } from "@/components/ui/Dropdown";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { ErrorState } from "@/components/ui/ErrorState";
 import { Pill } from "@/components/ui/Pill";
-import { Segmented } from "@/components/ui/Segmented";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { ApiError, errorMessage, toUnits, type Schedule, type SliceState } from "@/lib/api";
 import {
@@ -21,11 +20,9 @@ import {
   useSchedules,
 } from "@/lib/query";
 import { useSession } from "@/lib/session";
+import { SectionTitle } from "@/components/ui/SectionTitle";
+import { SideToggle } from "@/components/ticket/SideToggle";
 
-const SIDES = [
-  { value: "buy", label: "Buy" },
-  { value: "sell", label: "Sell" },
-] as const;
 
 const SLICE_TONE: Record<SliceState, "neutral" | "positive" | "warning" | "destructive"> = {
   pending: "neutral",
@@ -111,7 +108,7 @@ export function SchedulePanel({ kind }: { kind: "twap" | "dca" | "grid" }) {
       )}
 
       <Card className="space-y-4 p-4">
-        <h1 className="text-sm font-medium">New {COPY[kind].title}</h1>
+        <SectionTitle as="h1">New {COPY[kind].title}</SectionTitle>
 
         {markets.isError ? (
           <ErrorState message={errorMessage(markets.error)} />
@@ -134,7 +131,12 @@ export function SchedulePanel({ kind }: { kind: "twap" | "dca" | "grid" }) {
 
             <div className="space-y-1.5">
               <span className="text-xs text-muted-foreground">Side</span>
-              <Segmented id={`${kind}-side`} value={side} onChange={setSide} options={SIDES} />
+              <SideToggle
+                id={`${kind}-side`}
+                value={side === "buy" ? "long" : "short"}
+                onChange={(v) => setSide(v === "long" ? "buy" : "sell")}
+                labels={["Buy", "Sell"]}
+              />
             </div>
 
             <AmountInput
@@ -187,7 +189,7 @@ export function SchedulePanel({ kind }: { kind: "twap" | "dca" | "grid" }) {
       </Card>
 
       <Card className="space-y-3 p-4">
-        <h2 className="text-sm font-medium">{COPY[kind].title} schedules</h2>
+        <SectionTitle>{COPY[kind].title} schedules</SectionTitle>
         {!authenticated ? (
           <EmptyState message="Sign in to see your schedules." />
         ) : schedules.isError ? (
@@ -240,7 +242,7 @@ function ScheduleRow({
         >
           {schedule.market_id}
         </button>
-        <Pill tone={schedule.side === "buy" ? "positive" : "destructive"}>
+        <Pill tone={schedule.side === "buy" ? "long" : "short"}>
           {schedule.side}
         </Pill>
         <Pill tone={schedule.state === "active" ? "positive" : "neutral"}>

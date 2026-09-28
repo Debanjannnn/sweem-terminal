@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"math/big"
 	"os"
 	"os/signal"
 	"sync"
@@ -32,7 +33,10 @@ const (
 	kuruMarketsEvery = 30 * time.Second
 	pruneEvery       = time.Hour
 	perplCtxEvery    = 5 * time.Minute
-	backfillWindow   = 48 * time.Hour
+	backfillWindow   = 30 * 24 * time.Hour // the chart's 1M range
+	// the indexer trails head, so one pass at startup would chart only what it
+	// had reached; upserts merge, so a rerun is harmless
+	backfillEvery = 10 * time.Minute
 )
 
 type ingest struct {
@@ -85,7 +89,7 @@ func main() {
 	go g.pruneLoop(ctx)
 	go g.perplLoop(ctx)
 	go g.indexLoop(ctx)
-	go g.backfill(ctx) // never blocks anything live
+	go every(ctx, backfillEvery, g.backfill) // never blocks anything live
 
 	slog.Info("ingest running", "chain_id", chainID)
 	<-ctx.Done()
@@ -291,8 +295,8 @@ func millis(ts int64) int64 {
 	return ts
 }
 
-// backfill replays finalized Kuru Trade events into candles so a cold start
-// shows a chart. Nothing live waits on the indexer.
+// backfill replays finalized Kuru fills into candles so a cold start shows a
+// chart. Nothing live waits on the indexer.
 func (g *ingest) backfill(ctx context.Context) {
 	ms, err := g.kuru.Markets(ctx)
 	if err != nil {
@@ -302,25 +306,41 @@ func (g *ingest) backfill(ctx context.Context) {
 	idx := indexerclient.New()
 	to := time.Now().Unix()
 	from := to - int64(backfillWindow.Seconds())
-	agg := candle.New()
 	for _, m := range ms {
 		trades, err := idx.KuruTrades(ctx, m.ID, from, to)
-		if err != nil {
+		if err != nil && len(trades) == 0 {
 			slog.Warn("backfill", "market", m.ID, "err", err)
 			continue
 		}
-		for _, t := range trades {
-			side := "sell"
-			if t.IsBuy {
-				side = "buy"
-			}
-			agg.Add(candle.Tick{MarketID: m.ID, Venue: store.VenueKuru, Price: t.Price, Size: t.Size, Side: side, Ts: millis(t.Ts)})
+		if err != nil {
+			slog.Warn("backfill truncated", "market", m.ID, "err", err)
 		}
-		cs := agg.Flush()
+		cs, skipped := backfillCandles(m, trades)
 		if err := g.pg.UpsertCandles(ctx, cs); err != nil {
 			slog.Warn("backfill persist", "market", m.ID, "err", err)
 			continue
 		}
-		slog.Info("backfilled", "market", m.ID, "trades", len(trades), "candles", len(cs))
+		slog.Info("backfilled", "market", m.ID, "trades", len(trades), "candles", len(cs), "skipped", skipped)
 	}
+}
+
+// backfillCandles scales the indexer's raw book units exactly as the live
+// stream does, then buckets them. A fill that does not parse is skipped.
+func backfillCandles(m store.Market, trades []indexerclient.KuruTrade) ([]candle.Candle, int) {
+	agg, skipped := candle.New(), 0
+	for _, t := range trades {
+		price, ok1 := new(big.Int).SetString(t.Price, 10)
+		size, ok2 := new(big.Int).SetString(t.Size, 10)
+		if !ok1 || !ok2 {
+			skipped++
+			continue
+		}
+		l := kuru.WadLevel(price, size, m)
+		side := "sell"
+		if t.IsBuy {
+			side = "buy"
+		}
+		agg.Add(candle.Tick{MarketID: m.ID, Venue: store.VenueKuru, Price: l.Price, Size: l.Size, Side: side, Ts: millis(t.Ts)})
+	}
+	return agg.Flush(), skipped
 }

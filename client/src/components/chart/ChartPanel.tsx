@@ -24,61 +24,60 @@ const STYLES = [
   { value: "line", label: "Line" },
 ] as const;
 
-// resolution seconds and lookback seconds; resolutions the ingest actually keeps
-const RANGES = [
-  { value: "1D", label: "1D", resolution: 300, span: 86_400 },
-  { value: "7D", label: "7D", resolution: 3_600, span: 7 * 86_400 },
-  { value: "1M", label: "1M", resolution: 14_400, span: 30 * 86_400 },
-  { value: "3M", label: "3M", resolution: 86_400, span: 90 * 86_400 },
-  { value: "1Y", label: "1Y", resolution: 86_400, span: 365 * 86_400 },
-  { value: "All", label: "All", resolution: 86_400, span: 1024 * 86_400 },
+// bar intervals both venues serve: kuru's aggregator and perpl's candles
+// overlap on exactly these. the chart pans and zooms through the history.
+const INTERVALS = [
+  { value: "60", label: "1m" },
+  { value: "300", label: "5m" },
+  { value: "900", label: "15m" },
+  { value: "3600", label: "1H" },
+  { value: "14400", label: "4H" },
+  { value: "86400", label: "1D" },
 ] as const;
+
+// perpl answers at most 1024 bars a request
+const BARS = 1000;
 
 type Tab = (typeof TABS)[number]["value"];
 type Style = (typeof STYLES)[number]["value"];
-type Range = (typeof RANGES)[number]["value"];
+type Interval = (typeof INTERVALS)[number]["value"];
 
-const toRow = (c: Candle): Row => {
-  const l = fromWad(c.low);
-  const h = fromWad(c.high);
-  return {
-    t: c.openTime,
-    o: fromWad(c.open),
-    h,
-    l,
-    c: fromWad(c.close),
-    v: fromWad(c.volume),
-    range: [l, h],
-  };
-};
+const toRow = (c: Candle): Row => ({
+  t: c.openTime,
+  o: fromWad(c.open),
+  h: fromWad(c.high),
+  l: fromWad(c.low),
+  c: fromWad(c.close),
+  v: fromWad(c.volume),
+});
 
 export function ChartPanel({ market }: { market?: Market | null }) {
   const [tab, setTab] = useState<Tab>("chart");
   const [style, setStyle] = useState<Style>("candle");
-  const [range, setRange] = useState<Range>("1D");
+  const [interval, setBarInterval] = useState<Interval>("900");
 
-  const spec = RANGES.find((r) => r.value === range)!;
-  // the window only moves when the range does, so the query key stays stable
+  const resolution = Number(interval);
+  // the window only moves when the interval does, so the query key stays stable
   const window = useMemo(() => {
     const to = Math.floor(Date.now() / 1000);
-    return { from: to - spec.span, to };
-  }, [spec.span]);
+    return { from: to - BARS * resolution, to };
+  }, [resolution]);
 
   const id = market?.id ?? null;
-  const candles = useCandles(id, spec.resolution, window.from, window.to);
+  const candles = useCandles(id, resolution, window.from, window.to);
   const live = useTopic<Candle>(
-    id ? `candle.${id.toLowerCase()}.${spec.resolution}` : null,
+    id ? `candle.${id.toLowerCase()}.${resolution}` : null,
   );
 
   const rows = useMemo(() => {
     const out = (candles.data ?? []).map(toRow);
-    if (!live.data || live.data.resolution !== spec.resolution) return out;
+    if (!live.data || live.data.resolution !== resolution) return out;
     const next = toRow(live.data);
     const last = out[out.length - 1];
     if (last && last.t === next.t) out[out.length - 1] = next;
     else if (!last || next.t > last.t) out.push(next);
     return out;
-  }, [candles.data, live.data, spec.resolution]);
+  }, [candles.data, live.data, resolution]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-4 p-4">
@@ -94,7 +93,7 @@ export function ChartPanel({ market }: { market?: Market | null }) {
         <>
           <div className="flex flex-wrap items-center justify-between gap-3">
             <Segmented id="chart-style" value={style} onChange={setStyle} options={STYLES} />
-            <Segmented id="chart-range" value={range} onChange={setRange} options={RANGES} />
+            <Segmented id="chart-interval" value={interval} onChange={setBarInterval} options={INTERVALS} />
           </div>
           {!market ? (
             <EmptyState message="Pick a market to chart it." />
@@ -103,10 +102,15 @@ export function ChartPanel({ market }: { market?: Market | null }) {
           ) : candles.isPending ? (
             <Skeleton className="min-h-[340px] flex-1 rounded-xl" />
           ) : rows.length === 0 ? (
-            <EmptyState message="No candles have been recorded for this market in that range." />
+            <EmptyState message="No trades have printed on this market in the last 1,000 bars of this interval." />
           ) : (
             <div className="min-h-[340px] flex-1">
-              <PriceChart rows={rows} style={style} />
+              <PriceChart
+                key={`${market.id}:${interval}`}
+                rows={rows}
+                style={style}
+                priceDecimals={market.priceDecimals}
+              />
             </div>
           )}
         </>

@@ -15,7 +15,7 @@ GraphQL is on **8090** (`HASURA_EXTERNAL_PORT`), not 8080: `wallet` owns 8080.
 |---|---|
 | bun | `bun install`, `bunx envio`. No pnpm, no workspace: this package installs standalone. |
 | Node 22+ on PATH | envio's CLI is a node binary with native addons and globs `src/handlers/**` using Node >=22 APIs. bun installs it fine; it runs under node. |
-| Docker running | Postgres. `bunx envio dev` starts its own Postgres + Hasura. |
+| Docker running | Postgres. `bunx envio local docker up` starts its own Postgres + Hasura. |
 | A **HyperSync** API token | Hard requirement, see §1. |
 
 ## 1. `ENVIO_API_TOKEN` is required
@@ -97,8 +97,20 @@ cd main/indexer
 bun install
 bunx envio codegen     # regenerates .envio/types.d.ts
 bun run test           # abi drift + scale + vault reducer, no network
-bunx envio dev         # brings up its own Postgres + Hasura on 8090
+bunx envio local docker up   # envio-postgres (ENVIO_PG_PORT) + envio-hasura (8090)
+bunx envio start             # codegen + migrate + track Hasura + index
 ```
+
+Env must be loaded (`set -a; . ../.env; set +a`) — `.env` needs
+`ENVIO_PG_PORT=5434` (ours owns 5433) and
+`HASURA_GRAPHQL_ENDPOINT=http://localhost:8090/v1/metadata`.
+
+**Not `envio dev`.** envio 3.9.0's `dev` waits on Hasura health at a
+hardcoded `http://localhost:8080//hasura/healthz`
+(`packages/cli/src/service_health.rs`, `HASURA_ENDPOINT` const), ignoring
+`HASURA_EXTERNAL_PORT`. `wallet` owns 8080 and 404s it, so `dev` hangs silently
+for ~2h (1s..120s linear backoff) before failing. `start` is `dev` minus Docker
+and that check.
 
 `bun` is the only supported package manager here. envio's docs recommend pnpm;
 bun installs the `envio-darwin-arm64` native addon and runs `codegen` fine.

@@ -43,6 +43,8 @@ type wireMarket struct {
 		MinPostingAmount string `json:"min_posting_amount"`
 		MakerFee         int    `json:"maker_fee"`
 		TakerFee         int    `json:"taker_fee"`
+		// max leverage in hundredths: 1500 = 15x
+		InitialMargin int `json:"initial_margin"`
 	} `json:"config"`
 	State struct {
 		Mrk int64 `json:"mrk"`
@@ -114,6 +116,7 @@ func normalizeContext(w wireContext) (*Context, error) {
 			MakerFeeMicros: m.Config.MakerFee,
 			Status:         status,
 			Mark:           scalePrice(m.State.Mrk, m.Config.PriceDecimals),
+			MaxLeverage:    m.Config.InitialMargin,
 			Last:           scalePrice(m.State.Lst, m.Config.PriceDecimals),
 		}
 		out.Markets = append(out.Markets, nm)

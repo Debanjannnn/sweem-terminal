@@ -47,11 +47,18 @@ const zeroAddress = "0x0000000000000000000000000000000000000000"
 // internal/policy and this document is only a backstop.
 var approveABI = json.RawMessage(`[{"name":"approve","type":"function","inputs":[{"name":"spender","type":"address"},{"name":"amount","type":"uint256"}],"outputs":[],"stateMutability":"nonpayable"}]`)
 
+// Perpl is the one Exchange perps trade on, and the collateral it pulls. The
+// account's own wallet calls it directly, so both need an allow rule.
+type Perpl struct {
+	Exchange   string
+	Collateral string
+}
+
 // Build derives the policy from the same market allowlist the API validates
 // delegations against, so the two guards cannot name different markets.
 // spot v2 has no trading router. orders and swaps go to each market's own
 // OrderBook, funds live in AccountCore, and AccountCore is the approve spender.
-func Build(name, ownerID, accountCore string, markets []policy.Market) (Policy, error) {
+func Build(name, ownerID, accountCore string, markets []policy.Market, perpl *Perpl) (Policy, error) {
 	if len(markets) == 0 {
 		return Policy{}, fmt.Errorf("no markets: refusing to build a policy that allows nothing")
 	}
@@ -111,6 +118,25 @@ func Build(name, ownerID, accountCore string, markets []policy.Market) (Policy, 
 		Condition{FieldSource: "ethereum_calldata", Field: "function_name", ABI: approveABI, Operator: "eq", Value: "approve"},
 		Condition{FieldSource: "ethereum_calldata", Field: "approve.spender", ABI: approveABI, Operator: "in", Value: []string{accountCore}},
 	)
+
+	if perpl != nil {
+		exchange, collateral := strings.ToLower(strings.TrimSpace(perpl.Exchange)), strings.ToLower(strings.TrimSpace(perpl.Collateral))
+		for _, a := range []string{exchange, collateral} {
+			if len(a) != 42 || !strings.HasPrefix(a, "0x") {
+				return Policy{}, fmt.Errorf("perpl address %q is not a 20 byte address", a)
+			}
+		}
+		add("Perpl exchange orders and collateral",
+			chainCond,
+			Condition{FieldSource: "ethereum_transaction", Field: "to", Operator: "in", Value: []string{exchange}},
+		)
+		add("ERC-20 approve to Perpl exchange",
+			chainCond,
+			Condition{FieldSource: "ethereum_transaction", Field: "to", Operator: "in", Value: []string{collateral}},
+			Condition{FieldSource: "ethereum_calldata", Field: "function_name", ABI: approveABI, Operator: "eq", Value: "approve"},
+			Condition{FieldSource: "ethereum_calldata", Field: "approve.spender", ABI: approveABI, Operator: "in", Value: []string{exchange}},
+		)
+	}
 
 	return Policy{Version: "1.0", Name: name, ChainType: "ethereum", Rules: rules, OwnerID: ownerID}, nil
 }

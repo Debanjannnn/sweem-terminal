@@ -1,173 +1,211 @@
 "use client";
 
+import { useEffect, useRef, useState } from "react";
 import {
-  Bar,
-  CartesianGrid,
-  ComposedChart,
-  Line,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
-import { formatUsd, formatUsdCompact, formatSize } from "@/lib/format";
+  CandlestickSeries,
+  ColorType,
+  CrosshairMode,
+  HistogramSeries,
+  LineSeries,
+  createChart,
+  type IChartApi,
+  type ISeriesApi,
+  type MouseEventParams,
+  type Time,
+  type UTCTimestamp,
+} from "lightweight-charts";
+import { formatSize } from "@/lib/format";
+import { cn } from "@/lib/cn";
 
 export type Row = {
+  /** bar open, unix seconds */
   t: number;
   o: number;
   h: number;
   l: number;
   c: number;
   v: number;
-  range: [number, number];
 };
 
-type ShapeProps = {
-  x?: number;
-  y?: number;
-  width?: number;
-  height?: number;
-  payload?: Row;
-};
+export type ChartStyle = "candle" | "line";
 
-const UP = "var(--long)";
-const DOWN = "var(--short)";
-
-// recharts has no candle primitive: the Bar plots [low, high] so the y scale is
-// right, and this shape ignores its rect and redraws open/close off the payload.
-function Candle({ x = 0, y = 0, width = 0, height = 0, payload }: ShapeProps) {
-  if (!payload) return null;
-  const { o, c, h, l } = payload;
-  const span = h - l;
-  const at = (p: number) => (span === 0 ? y + height / 2 : y + ((h - p) / span) * height);
-  const fill = c >= o ? UP : DOWN;
-  const bodyTop = at(Math.max(o, c));
-  const bodyHeight = Math.max(1, at(Math.min(o, c)) - bodyTop);
-  const bodyWidth = Math.max(1, width * 0.6);
-  return (
-    <g>
-      <line
-        x1={x + width / 2}
-        x2={x + width / 2}
-        y1={y}
-        y2={y + height}
-        stroke={fill}
-        strokeWidth={1}
-      />
-      <rect
-        x={x + (width - bodyWidth) / 2}
-        y={bodyTop}
-        width={bodyWidth}
-        height={bodyHeight}
-        rx={2}
-        fill={fill}
-      />
-    </g>
-  );
+// lightweight-charts parses a handful of color syntaxes and the theme is in
+// oklch, so each token is painted once and read back as rgba
+function cssColor(name: string, fallback: string): string {
+  if (typeof document === "undefined") return fallback;
+  const raw = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  if (!raw) return fallback;
+  const ctx = document.createElement("canvas").getContext("2d");
+  if (!ctx) return fallback;
+  ctx.fillStyle = fallback;
+  ctx.fillStyle = raw;
+  ctx.fillRect(0, 0, 1, 1);
+  const [r, g, b, a] = ctx.getImageData(0, 0, 1, 1).data;
+  return `rgba(${r}, ${g}, ${b}, ${(a / 255).toFixed(3)})`;
 }
 
-function VolumeBar({ x = 0, y = 0, width = 0, height = 0, payload }: ShapeProps) {
-  if (!payload) return null;
-  const w = Math.max(1, width * 0.6);
-  return (
-    <rect
-      x={x + (width - w) / 2}
-      y={y}
-      width={w}
-      height={Math.max(0, height)}
-      rx={1}
-      fill={payload.c >= payload.o ? UP : DOWN}
-      opacity={0.35}
-    />
-  );
-}
+const withAlpha = (rgba: string, alpha: number) => rgba.replace(/[\d.]+\)$/, `${alpha})`);
 
-const time = (t: number) =>
-  new Date(t * 1000).toLocaleString("en-US", {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  });
-
-function CandleTooltip({
-  active,
-  payload,
-}: {
-  active?: boolean;
-  payload?: { payload: Row }[];
-}) {
-  const row = active ? payload?.[0]?.payload : undefined;
-  if (!row) return null;
-  return (
-    <div className="rounded-xl border border-border bg-popover p-3 text-xs shadow-xl">
-      <div className="mb-1.5 text-muted-foreground">{time(row.t)}</div>
-      <dl className="tnum grid grid-cols-2 gap-x-4 gap-y-1">
-        {(
-          [
-            ["O", formatUsd(row.o)],
-            ["H", formatUsd(row.h)],
-            ["L", formatUsd(row.l)],
-            ["C", formatUsd(row.c)],
-            ["Vol", formatSize(row.v, 2)],
-          ] as const
-        ).map(([k, v]) => (
-          <div key={k} className="contents">
-            <dt className="text-muted-foreground">{k}</dt>
-            <dd className="text-right">{v}</dd>
-          </div>
-        ))}
-      </dl>
-    </div>
-  );
-}
+type Legend = { row: Row; prev?: Row };
 
 export function PriceChart({
   rows,
-  style = "candle",
+  style,
+  priceDecimals,
 }: {
   rows: Row[];
-  style?: "candle" | "line";
+  style: ChartStyle;
+  /** the venue's price precision, so the axis never shows digits the book cannot hold */
+  priceDecimals: number;
 }) {
-  const maxVolume = rows.reduce((m, r) => Math.max(m, r.v), 0);
+  const box = useRef<HTMLDivElement>(null);
+  const chart = useRef<IChartApi | null>(null);
+  const price = useRef<ISeriesApi<"Candlestick"> | ISeriesApi<"Line"> | null>(null);
+  const volume = useRef<ISeriesApi<"Histogram"> | null>(null);
+  const loaded = useRef<{ first: number; count: number } | null>(null);
+  const colors = useRef({ up: "", down: "" });
+  const [legend, setLegend] = useState<Legend | null>(null);
+
+  // one chart per mount; the parent remounts on a new market or interval
+  useEffect(() => {
+    const el = box.current;
+    if (!el) return;
+    const up = cssColor("--long", "#c6f36b");
+    const down = cssColor("--short", "#e5484d");
+    const text = cssColor("--muted-foreground", "#a1a1a1");
+    const grid = cssColor("--border", "rgba(255,255,255,0.06)");
+    colors.current = { up, down };
+
+    const c = createChart(el, {
+      autoSize: true,
+      layout: {
+        background: { type: ColorType.Solid, color: "transparent" },
+        textColor: text,
+        fontFamily: getComputedStyle(el).fontFamily,
+        fontSize: 11,
+        attributionLogo: true,
+        panes: { separatorColor: grid, separatorHoverColor: grid, enableResize: true },
+      },
+      grid: { vertLines: { color: grid }, horzLines: { color: grid } },
+      crosshair: {
+        mode: CrosshairMode.Normal,
+        vertLine: { color: text, labelBackgroundColor: withAlpha(text, 0.9) },
+        horzLine: { color: text, labelBackgroundColor: withAlpha(text, 0.9) },
+      },
+      rightPriceScale: { borderColor: grid },
+
+      timeScale: { borderColor: grid, timeVisible: true, secondsVisible: false, rightOffset: 6 },
+    });
+    chart.current = c;
+
+    // grouped digits like the header and legend; scoped to price so volume keeps its own format
+    const format = {
+      type: "custom" as const,
+      minMove: 10 ** -priceDecimals,
+      formatter: (n: number) =>
+        n.toLocaleString("en-US", { minimumFractionDigits: priceDecimals, maximumFractionDigits: priceDecimals }),
+    };
+    price.current =
+      style === "candle"
+        ? c.addSeries(CandlestickSeries, {
+            upColor: up,
+            downColor: down,
+            borderUpColor: up,
+            borderDownColor: down,
+            wickUpColor: up,
+            wickDownColor: down,
+            priceFormat: format,
+          })
+        : c.addSeries(LineSeries, { color: up, lineWidth: 2, priceFormat: format });
+    // volume gets its own pane, as on a trading terminal
+    volume.current = c.addSeries(
+      HistogramSeries,
+      { priceFormat: { type: "volume" }, lastValueVisible: false, priceLineVisible: false },
+      1,
+    );
+    c.panes()[1]?.setHeight(90);
+
+    const onMove = (p: MouseEventParams<Time>) => {
+      const bar = p.time !== undefined && price.current ? p.seriesData.get(price.current) : undefined;
+      if (!bar) {
+        setLegend(null);
+        return;
+      }
+      setLegend(latest.current.find(p.time as number));
+    };
+    c.subscribeCrosshairMove(onMove);
+
+    return () => {
+      c.unsubscribeCrosshairMove(onMove);
+      c.remove();
+      chart.current = price.current = volume.current = null;
+      loaded.current = null;
+    };
+  }, [style, priceDecimals]);
+
+  // the crosshair callback reads the newest rows without re-subscribing
+  const latest = useRef({ find: (_t: number): Legend | null => null });
+  latest.current.find = (t: number) => {
+    const i = rows.findIndex((r) => r.t === t);
+    return i < 0 ? null : { row: rows[i], prev: rows[i - 1] };
+  };
+
+  // a live bar is an update; anything else reloads the series
+  useEffect(() => {
+    const p = price.current;
+    const v = volume.current;
+    if (!p || !v || rows.length === 0) return;
+    const { up, down } = colors.current;
+    const toBar = (r: Row) =>
+      style === "candle"
+        ? { time: r.t as UTCTimestamp, open: r.o, high: r.h, low: r.l, close: r.c }
+        : { time: r.t as UTCTimestamp, value: r.c };
+    const toVol = (r: Row) => ({
+      time: r.t as UTCTimestamp,
+      value: r.v,
+      color: withAlpha(r.c >= r.o ? up : down, 0.45),
+    });
+
+    const prev = loaded.current;
+    const sameHistory = prev && prev.first === rows[0].t && rows.length - prev.count <= 1 && rows.length >= prev.count;
+    if (sameHistory) {
+      const last = rows[rows.length - 1];
+      (p as ISeriesApi<"Candlestick">).update(toBar(last) as never);
+      v.update(toVol(last));
+    } else {
+      (p as ISeriesApi<"Candlestick">).setData(rows.map(toBar) as never);
+      v.setData(rows.map(toVol));
+      if (!prev) chart.current?.timeScale().fitContent();
+    }
+    loaded.current = { first: rows[0].t, count: rows.length };
+  }, [rows, style]);
+
+  const shown = legend ?? (rows.length ? { row: rows[rows.length - 1], prev: rows[rows.length - 2] } : null);
+  const change = shown?.prev ? (shown.row.c / shown.prev.c - 1) * 100 : undefined;
+  const fmt = (n: number) => n.toLocaleString("en-US", { minimumFractionDigits: priceDecimals, maximumFractionDigits: priceDecimals });
+
   return (
-    <ResponsiveContainer width="100%" height="100%" minHeight={340}>
-      <ComposedChart data={rows} margin={{ top: 8, right: 8, bottom: 0, left: 8 }}>
-        <CartesianGrid stroke="var(--border)" vertical={false} />
-        <XAxis
-          dataKey="t"
-          tickFormatter={time}
-          minTickGap={48}
-          tick={{ fill: "var(--muted-foreground)", fontSize: 11 }}
-          axisLine={false}
-          tickLine={false}
-        />
-        <YAxis
-          orientation="right"
-          domain={["dataMin", "dataMax"]}
-          tickFormatter={formatUsdCompact}
-          tick={{ fill: "var(--muted-foreground)", fontSize: 11 }}
-          axisLine={false}
-          tickLine={false}
-          width={72}
-        />
-        {/* volume keeps its own hidden scale so the bars sit in the bottom quarter */}
-        <YAxis yAxisId="vol" hide domain={[0, maxVolume * 4 || 1]} />
-        <Tooltip content={<CandleTooltip />} cursor={{ stroke: "var(--border)" }} />
-        <Bar yAxisId="vol" dataKey="v" shape={<VolumeBar />} isAnimationActive={false} />
-        {style === "candle" ? (
-          <Bar dataKey="range" shape={<Candle />} isAnimationActive={false} />
-        ) : (
-          <Line
-            dataKey="c"
-            type="monotone"
-            stroke="var(--primary)"
-            strokeWidth={2}
-            dot={false}
-            isAnimationActive={false}
-          />
-        )}
-      </ComposedChart>
-    </ResponsiveContainer>
+    <div className="relative h-full w-full">
+      {shown && (
+        <div className="tnum pointer-events-none absolute top-1 left-2 z-10 flex flex-wrap gap-x-3 text-[11px] text-muted-foreground">
+          {(["o", "h", "l", "c"] as const).map((k) => (
+            <span key={k}>
+              {k.toUpperCase()}{" "}
+              <span className={cn(shown.row.c >= shown.row.o ? "text-long" : "text-short")}>
+                {fmt(shown.row[k])}
+              </span>
+            </span>
+          ))}
+          {change !== undefined && (
+            <span className={change >= 0 ? "text-long" : "text-short"}>
+              {change >= 0 ? "+" : ""}
+              {change.toFixed(2)}%
+            </span>
+          )}
+          <span>Vol {formatSize(shown.row.v, 2)}</span>
+        </div>
+      )}
+      <div ref={box} className="h-full w-full" />
+    </div>
   );
 }

@@ -24,7 +24,11 @@ type portfolioPosition struct {
 	EntryPrice string `json:"entry_price,omitempty"`
 	Collateral string `json:"collateral,omitempty"`
 	Mark       string `json:"mark,omitempty"`
-	// "indexer" when the chain reports it, "local" when only our rows do
+	// perpl only: the venue's own unrealized pnl, and our liquidation estimate
+	PnL            string `json:"pnl,omitempty"`
+	LiquidationEst string `json:"liquidation_price_est,omitempty"`
+	// "indexer" when the chain reports it, "perpl" when Perpl's Exchange does,
+	// "local" when only our rows do
 	Source          string `json:"source"`
 	Reconciled      bool   `json:"reconciled"`
 	ReconcileReason string `json:"reconcile_reason,omitempty"`
@@ -88,10 +92,21 @@ func (s *Server) portfolio(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	out := reconcile(positions, marks, mine)
+	if s.Executor != nil && u.WalletAddress != "" {
+		// a perpl position is read from the Exchange itself, so it is the truth
+		if a, err := s.perplAccount(r.Context(), u); err != nil {
+			s.log().Warn("perpl account unavailable", "err", err)
+			degraded = append(degraded, "perpl")
+		} else {
+			out = append(out, perplPositions(a)...)
+		}
+	}
+
 	httpx.OK(w, portfolioResponse{
 		UserID:        u.ID,
 		WalletAddress: u.WalletAddress,
-		Positions:     reconcile(positions, marks, mine),
+		Positions:     out,
 		Degraded:      degraded,
 		UpdatedAt:     time.Now().UTC(),
 	})
@@ -154,7 +169,8 @@ func reconcile(positions []indexerclient.Position, marks map[string]marketdata.M
 func localActivity(intents []store.Intent) map[string]local {
 	out := map[string]local{}
 	for _, in := range intents {
-		if in.State != "submitted" && in.State != "filled" {
+		// perpl positions are read from the Exchange, not inferred from our rows
+		if in.Venue == venuePerpl || (in.State != "submitted" && in.State != "filled") {
 			continue
 		}
 		key := normalizeID(in.MarketID)

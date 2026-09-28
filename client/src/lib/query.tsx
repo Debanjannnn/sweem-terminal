@@ -24,6 +24,7 @@ import {
   type Mark,
   type Order,
   type OrderResponse,
+  type PerplAccount,
   type Portfolio,
   type Quote,
   type Schedule,
@@ -176,6 +177,10 @@ export type OrderInput = {
   idempotency_key: string;
 } & (
   | { order_type: "market"; size: string; max_slippage_bps: number }
+  // perpl: quantity in lots, price in PNS, leverage in hundredths
+  | { order_type: "perp_market"; quantity: string; leverage: number; max_slippage_bps: number }
+  | { order_type: "perp_limit"; price: string; quantity: string; leverage: number; post_only: boolean }
+  | { order_type: "close"; quantity?: string; max_slippage_bps: number }
   | {
       order_type: "limit";
       price: string;
@@ -192,12 +197,17 @@ export function useCreateOrder() {
     mutationFn: async (input: OrderInput) =>
       walletFetch<OrderResponse>("/v1/orders", await token(), {
         method: "POST",
-        body: JSON.stringify(input),
+        // the wallet names perp orders market/limit too; the venue tells them apart
+        body: JSON.stringify({
+          ...input,
+          order_type: input.order_type.replace(/^perp_/, ""),
+        }),
       }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["orders"] });
       qc.invalidateQueries({ queryKey: ["executions"] });
       qc.invalidateQueries({ queryKey: ["portfolio"] });
+      qc.invalidateQueries({ queryKey: ["perpl-account"] });
     },
   });
 }
@@ -216,6 +226,49 @@ export function useCancelOrder() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["orders"] });
       qc.invalidateQueries({ queryKey: ["executions"] });
+    },
+  });
+}
+
+export const usePerplAccount = () =>
+  useAuthedQuery<PerplAccount>(["perpl-account"], "/v1/perpl/account", { retry: false });
+
+function usePerplFunds(path: "/v1/perpl/deposit" | "/v1/perpl/withdraw") {
+  const { token } = useSession();
+  const qc = useQueryClient();
+  return useMutation({
+    // amount in collateral atoms
+    mutationFn: async (amount: string) =>
+      walletFetch<OrderResponse>(path, await token(), {
+        method: "POST",
+        body: JSON.stringify({ amount, idempotency_key: crypto.randomUUID() }),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["perpl-account"] });
+      qc.invalidateQueries({ queryKey: ["portfolio"] });
+      qc.invalidateQueries({ queryKey: ["orders"] });
+    },
+  });
+}
+
+export const usePerplDeposit = () => usePerplFunds("/v1/perpl/deposit");
+export const usePerplWithdraw = () => usePerplFunds("/v1/perpl/withdraw");
+
+// perpl order ids are recycled; the executor refuses unless the order is still ours
+export function useCancelPerplOrder() {
+  const { token } = useSession();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (o: { market_id: string; order_id: string }) =>
+      walletFetch<OrderResponse>(
+        `/v1/perpl/orders/${encodeURIComponent(o.market_id)}/${encodeURIComponent(o.order_id)}`,
+        await token(),
+        { method: "DELETE" },
+      ),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["orders"] });
+      qc.invalidateQueries({ queryKey: ["executions"] });
+      qc.invalidateQueries({ queryKey: ["perpl-account"] });
     },
   });
 }

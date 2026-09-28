@@ -221,3 +221,38 @@ func TestSubAdvance(t *testing.T) {
 		})
 	}
 }
+
+// A market with no book changes still has a live book. It must be re-published
+// while the socket is healthy, or its cache entry expires and reads as cold.
+func TestQuietBookIsRefreshed(t *testing.T) {
+	prev := bookRefreshEvery
+	bookRefreshEvery = 50 * time.Millisecond
+	t.Cleanup(func() { bookRefreshEvery = prev })
+
+	c := fakeGateway(t, func(t *testing.T, conn *ws.Conn) {
+		bookSub := readSub(t, conn)
+		tradeSub := readSub(t, conn)
+		ack(t, conn, bookSub)
+		ack(t, conn, tradeSub)
+		conn.WriteBinary(frameFor(t, fxL2Book, bookSub.ID))
+		// nothing trades; only keepalive pongs arrive
+		for range 3 {
+			time.Sleep(80 * time.Millisecond)
+			conn.WriteText([]byte(`{"op":"pong"}`))
+		}
+		<-t.Context().Done()
+	})
+
+	books := make(chan book.Book, 16)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	go c.Stream(ctx, Handlers{Book: func(b book.Book) { books <- b }, Tick: func(candle.Tick) {}})
+
+	recv(t, books) // REST seed
+	snap := recv(t, books)
+	again := recv(t, books)
+	eq(t, "refresh re-publishes the same book", again.Bids[0].Price, snap.Bids[0].Price)
+	if again.Ts < snap.Ts {
+		t.Fatalf("refreshed book is older than the snapshot: %d < %d", again.Ts, snap.Ts)
+	}
+}

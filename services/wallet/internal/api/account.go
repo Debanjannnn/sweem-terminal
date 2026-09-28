@@ -35,6 +35,9 @@ type accountView struct {
 	AuthNonce    string `json:"auth_nonce"`
 	AccountCore  string `json:"account_core"`
 	ChainID      int64  `json:"chain_id"`
+	// the backend key trading for this account; omitted when the owner's own
+	// wallet signs, which needs no grant and has nothing to revoke
+	Signer string `json:"signer,omitempty"`
 }
 
 func view(ka store.KuruAccount) accountView {
@@ -46,6 +49,7 @@ func view(ka store.KuruAccount) accountView {
 		AuthNonce:        orZero(ka.AuthNonce),
 		AccountCore:      ka.AccountCore,
 		ChainID:          ka.ChainID,
+		Signer:           ka.Signer,
 	}
 	if !ka.SignerAuthorized {
 		// the permission is gone, so its deadline is not a fact about anything
@@ -119,11 +123,15 @@ func (s *Server) deposit(w http.ResponseWriter, r *http.Request) {
 		State:     "pending",
 	}
 	resp, execErr := s.perform(r.Context(), in, func(ctx context.Context) (executor.RouteResponse, error) {
+		marketID, err := s.executorMarket(ctx, in.MarketID)
+		if err != nil {
+			return executor.RouteResponse{}, err
+		}
 		return s.Executor.Deposit(ctx, executor.DepositRequest{
 			IntentKey:     in.Key,
 			PrivyWalletID: u.PrivyWalletID,
 			UserWallet:    u.WalletAddress,
-			MarketID:      in.MarketID,
+			MarketID:      marketID,
 			Token:         in.Token,
 			Amount:        in.Size,
 			ChainID:       in.ChainID,
@@ -275,6 +283,7 @@ func (s *Server) refresh(ctx context.Context, u store.User) (store.KuruAccount, 
 		SignerAuthorized: acct.SignerAuthorized,
 		AuthNonce:        orZero(acct.AuthNonce),
 		AccountCore:      acct.AccountCore,
+		Signer:           acct.Signer,
 		UpdatedAt:        time.Now(),
 	}
 	if err := s.Store.PutKuruAccount(ctx, ka); err != nil {

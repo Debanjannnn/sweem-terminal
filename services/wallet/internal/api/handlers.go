@@ -2,12 +2,14 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/sweem-terminal/sweem-terminal/internal/shared/httpx"
 	"github.com/sweem-terminal/sweem-terminal/internal/shared/privyauth"
+	"github.com/sweem-terminal/sweem-terminal/services/wallet/internal/store"
 )
 
 const maxBody = 1 << 20
@@ -57,6 +59,11 @@ func (s *Server) upsertMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u, err := s.Store.UpsertUser(r.Context(), did, req.WalletAddress, strings.TrimSpace(req.PrivyWalletID))
+	if errors.Is(err, store.ErrWalletTaken) {
+		httpx.Fail(w, http.StatusConflict, "wallet_taken",
+			"This wallet is already registered to another sign-in, so it cannot be claimed by this one.")
+		return
+	}
 	if err != nil {
 		s.fail(w, "upsert user", err)
 		return

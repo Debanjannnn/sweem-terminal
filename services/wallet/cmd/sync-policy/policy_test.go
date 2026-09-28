@@ -27,7 +27,7 @@ func fixture() []walletpolicy.Market {
 
 func build(t *testing.T) Policy {
 	t.Helper()
-	p, err := Build("test policy", "quorum-1", accountCore, fixture())
+	p, err := Build("test policy", "quorum-1", accountCore, fixture(), nil)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestBuildRefusals(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := Build("n", "", tt.core, tt.markets)
+			_, err := Build("n", "", tt.core, tt.markets, nil)
 			if err == nil {
 				t.Fatal("Build accepted an unusable input")
 			}
@@ -448,3 +448,31 @@ const golden = `{
   ],
   "owner_id": "quorum-1"
 }`
+
+// perps are signed by the same wallet under the same policy, so the Exchange
+// and an approve naming it as spender must both be allowed, and nothing wider.
+func TestPerplRulesAllowTheExchangeAndOnlyItsApprove(t *testing.T) {
+	const ex, ausd = "0x1964c32f0be608e7d29302aff5e61268e72080cc", "0xa9012a055bd4e0edff8ce09f960291c09d5322dc"
+	p, err := Build("n", "", accountCore, fixture(), &Perpl{Exchange: ex, Collateral: ausd})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawTo, sawSpender bool
+	for _, r := range p.Rules {
+		for _, c := range r.Conditions {
+			vals, _ := c.Value.([]string)
+			if c.Field == "to" && len(vals) == 1 && vals[0] == ex {
+				sawTo = true
+			}
+			if c.Field == "approve.spender" && len(vals) == 1 && vals[0] == ex {
+				sawSpender = true
+			}
+		}
+	}
+	if !sawTo || !sawSpender {
+		t.Fatalf("perpl rules missing: to=%v spender=%v", sawTo, sawSpender)
+	}
+	if _, err := Build("n", "", accountCore, fixture(), &Perpl{Exchange: "0x1", Collateral: ausd}); err == nil {
+		t.Fatal("a malformed exchange address was accepted")
+	}
+}

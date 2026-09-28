@@ -18,7 +18,9 @@ func NewMarketData(baseURL string) *MarketData {
 	return &MarketData{BaseURL: baseURL, HTTP: &http.Client{Timeout: 5 * time.Second}}
 }
 
-// Mid is only used to decide whether to fire, never to price a fill.
+// Mid is only used to decide whether to fire, never to price a fill. It is a
+// display price: book levels are WAD integers, and grid levels, drift bands and
+// the gas ratio are all in plain units, so a WAD mid would never cross a level.
 func (m *MarketData) Mid(ctx context.Context, marketID string) (float64, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.BaseURL+"/v1/book/"+marketID, nil)
 	if err != nil {
@@ -48,6 +50,7 @@ func (m *MarketData) Mid(ctx context.Context, marketID string) (float64, error) 
 	if len(env.Data.Asks) > 0 {
 		ask, _ = strconv.ParseFloat(env.Data.Asks[0].Price, 64)
 	}
+	bid, ask = bid/1e18, ask/1e18
 	switch {
 	case bid > 0 && ask > 0:
 		return (bid + ask) / 2, nil

@@ -36,6 +36,12 @@ const (
 	healthySession = 5 * time.Minute
 )
 
+// bookRefreshEvery re-caches every book the live session holds. A quiet
+// testnet market sends no delta for minutes, and a book only written on change
+// would outlive its redis TTL and read as cold while the socket is healthy. The
+// keepalive pong wakes the read loop, so this runs even when nothing trades.
+var bookRefreshEvery = time.Minute
+
 var backoffs = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second, 32 * time.Second, time.Minute}
 
 type Handlers struct {
@@ -101,6 +107,8 @@ type gwSession struct {
 	next  uint64
 	subs  map[uint64]*gwSub
 	books map[string]*book.Book
+	// last time every book was re-published, see bookRefreshEvery
+	refreshed time.Time
 }
 
 func (c *Client) session(ctx context.Context, h Handlers) error {
@@ -131,7 +139,7 @@ func (c *Client) session(ctx context.Context, h Handlers) error {
 	// ponytail: cursors live and die with the session, so a reconnect rejoins
 	// trades live; carry (feedEpoch, marketSeq) across sessions if a gap of
 	// prints during a reconnect ever matters more than the indexer backfill
-	s := &gwSession{c: c, conn: conn, h: h, subs: map[uint64]*gwSub{}, books: map[string]*book.Book{}}
+	s := &gwSession{c: c, conn: conn, h: h, subs: map[uint64]*gwSub{}, books: map[string]*book.Book{}, refreshed: time.Now()}
 	for _, m := range markets {
 		if b, err := c.Book(ctx, m.ID, DefaultDepth); err == nil {
 			s.books[m.ID] = &b
@@ -157,6 +165,12 @@ func (c *Client) session(ctx context.Context, h Handlers) error {
 		}
 		if err != nil {
 			return err
+		}
+		if time.Since(s.refreshed) >= bookRefreshEvery {
+			s.refreshed = time.Now()
+			for id := range s.books {
+				s.publish(id)
+			}
 		}
 	}
 }
@@ -375,7 +389,7 @@ func (s *gwSession) applyDelta(sub *gwSub, d L2Delta) {
 	}
 	var bids, asks []book.Level
 	for _, u := range d.Updates {
-		l := wadLevel(u.Price, u.TotalBase, sub.market)
+		l := WadLevel(u.Price, u.TotalBase, sub.market)
 		if u.Side == SideBuy {
 			bids = append(bids, l)
 		} else {
@@ -405,7 +419,7 @@ func (s *gwSession) emitTrades(sub *gwSub, t Trades) {
 		if row.TakerSide == SideSell {
 			side = "sell"
 		}
-		l := wadLevel(row.Price, row.BaseFilled, sub.market)
+		l := WadLevel(row.Price, row.BaseFilled, sub.market)
 		s.h.Tick(candle.Tick{
 			MarketID: sub.market.ID, Venue: sub.market.Venue, Side: side,
 			Price: l.Price, Size: l.Size, Ts: int64(row.Ts) * 1000,
@@ -413,7 +427,9 @@ func (s *gwSession) emitTrades(sub *gwSub, t Trades) {
 	}
 }
 
-func wadLevel(price, size *big.Int, m store.Market) book.Level {
+// WadLevel scales a raw book-unit price and size to WAD. The live stream and the
+// indexer backfill both go through here, so a chart never mixes two scales.
+func WadLevel(price, size *big.Int, m store.Market) book.Level {
 	return book.Level{
 		Price: wad.Scale(price, m.PriceDecimals, wad.Decimals).String(),
 		Size:  wad.Scale(size, m.SizeDecimals, wad.Decimals).String(),
@@ -426,7 +442,7 @@ func levels(ls []PriceLevel, m store.Market, desc bool) []book.Level {
 		if l.Price.Sign() <= 0 || l.TotalBase.Sign() <= 0 {
 			continue
 		}
-		out = append(out, wadLevel(l.Price, l.TotalBase, m))
+		out = append(out, WadLevel(l.Price, l.TotalBase, m))
 	}
 	return book.Sort(out, desc)
 }

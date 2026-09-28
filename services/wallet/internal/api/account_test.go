@@ -233,3 +233,21 @@ func TestAuthorizeRejectsALapsedExpiry(t *testing.T) {
 		t.Fatalf("executor was called %d times for a lapsed grant", h.exec.calls)
 	}
 }
+
+// With no backend signer the owner's own wallet trades, so the account reports
+// no signer and the client offers no grant; with one, its address is shown.
+func TestAccountNamesTheSignerOnlyWhenThereIsOne(t *testing.T) {
+	for _, signer := range []string{"", "0x2222222222222222222222222222222222222222"} {
+		h := newHarness(t)
+		h.registered(t)
+		h.exec.signer = signer
+		got := body(t, h.do(t, http.MethodGet, "/v1/account", ""))
+		v, present := got["signer"]
+		if signer == "" && present {
+			t.Fatalf("owner-signed account reported a signer: %v", got)
+		}
+		if signer != "" && v != signer {
+			t.Fatalf("signer = %v, want %s", v, signer)
+		}
+	}
+}

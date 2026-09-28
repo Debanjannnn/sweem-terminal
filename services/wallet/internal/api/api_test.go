@@ -64,6 +64,12 @@ func sliceKey(id string, i int) string { return id + ":" + strconv.Itoa(i) }
 func (f *fakeStore) Ping(context.Context) error { return f.pingErr }
 
 func (f *fakeStore) UpsertUser(_ context.Context, id, wallet, walletID string) (store.User, error) {
+	// mirrors the unique index on users.wallet_address
+	for _, u := range f.users {
+		if u.ID != id && strings.EqualFold(u.WalletAddress, wallet) {
+			return store.User{}, store.ErrWalletTaken
+		}
+	}
 	u := store.User{ID: id, WalletAddress: wallet, PrivyWalletID: walletID, CreatedAt: time.Now()}
 	f.users[id] = u
 	return u, nil
@@ -167,6 +173,19 @@ func (f *fakeStore) Intents(_ context.Context, userID string, _ int) ([]store.In
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 	return out, nil
+}
+
+func (f *fakeStore) SetOrderRef(_ context.Context, key, orderID string, slot *int) error {
+	in, ok := f.intents[key]
+	if !ok {
+		return store.ErrNotFound
+	}
+	in.OrderID = orderID
+	if slot != nil {
+		in.SlotIdx = slot
+	}
+	f.intents[key] = in
+	return nil
 }
 
 func (f *fakeStore) SetIntentState(_ context.Context, key, state string) error {
@@ -291,7 +310,11 @@ type fakeExecutor struct {
 	registered bool
 	authorized bool
 	authNonce  string
+	signer     string
 	markets    []policy.Market
+	// perpl: what /perpl/account answers, and extra info on every write
+	perplAccount executor.PerplAccount
+	info         json.RawMessage
 }
 
 // mirrors the MON-USDC entry of executor/kuru-markets.json
@@ -318,6 +341,9 @@ func newFakeExecutor(t *testing.T) *fakeExecutor {
 		case "/markets":
 			_ = enc.Encode(map[string]any{"markets": f.markets})
 			return
+		case "/perpl/account":
+			_ = enc.Encode(f.perplAccount)
+			return
 		case "/account/ensure":
 			f.ensures++
 			id := 0
@@ -327,7 +353,7 @@ func newFakeExecutor(t *testing.T) *fakeExecutor {
 			_ = enc.Encode(executor.Account{
 				ChainID: 10143, AccountCore: "0x6384e9b2Bf3b65e1535403a0A543b5FDA905eE22",
 				UserID: int64(id), Registered: f.registered,
-				SignerAuthorized: f.authorized, AuthNonce: f.authNonce,
+				SignerAuthorized: f.authorized, AuthNonce: f.authNonce, Signer: f.signer,
 			})
 			return
 		}
@@ -352,6 +378,7 @@ func newFakeExecutor(t *testing.T) *fakeExecutor {
 			TxHash:    "0xtx" + key[:4],
 			Status:    f.status,
 			Error:     f.errMsg,
+			Info:      f.info,
 		})
 	}))
 	t.Cleanup(f.srv.Close)
@@ -370,9 +397,10 @@ type harness struct {
 	store   *fakeStore
 	exec    *fakeExecutor
 	key     *ecdsa.PrivateKey
+	auth    *privyauth.Verifier
 }
 
-func newHarness(t *testing.T) *harness {
+func newHarness(t *testing.T, opts ...func(*Server)) *harness {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -396,7 +424,10 @@ func newHarness(t *testing.T) *harness {
 		ChainID:            10143,
 		DefaultSlippageBps: 50,
 	}
-	return &harness{handler: s.Routes(), store: fs, exec: fe, key: key}
+	for _, o := range opts {
+		o(s)
+	}
+	return &harness{handler: s.Routes(), store: fs, exec: fe, key: key, auth: verifier}
 }
 
 func (h *harness) token(t *testing.T, subject string) string {
@@ -570,5 +601,18 @@ func TestDelegationUserParamNeedsInternalSecret(t *testing.T) {
 	rec := h.do(t, http.MethodGet, "/v1/delegation?user=did:privy:bob", "")
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+}
+
+func TestAWalletBelongsToOneSignIn(t *testing.T) {
+	h := newHarness(t)
+	const me = `{"wallet_address":"0x1111111111111111111111111111111111111111"}`
+	if rec := h.do(t, http.MethodPost, "/v1/me", me); rec.Code != http.StatusOK {
+		t.Fatalf("first claim: %d %s", rec.Code, rec.Body)
+	}
+	rec := h.send(t, http.MethodPost, "/v1/me", me,
+		map[string]string{"Authorization": "Bearer " + h.token(t, "did:privy:mallory")})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("second claim: %d %s, want 409", rec.Code, rec.Body)
 	}
 }

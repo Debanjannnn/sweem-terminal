@@ -7,6 +7,8 @@ pub const DEFAULT_CHAIN_ID: u64 = 10143;
 // AccountCore proxy: custodian, account registry and signer authority. there is
 // no router in spot v2 - orders go straight to the market proxy.
 pub const ACCOUNT_CORE: Address = address!("6384e9b2Bf3b65e1535403a0A543b5FDA905eE22");
+// the Perpl Exchange proxy on testnet. the context must name this same address.
+pub const PERPL_EXCHANGE: Address = address!("1964c32f0be608e7d29302aff5e61268e72080cc");
 
 /// the backend key holding TRADE on the user's account. unset means the user's
 /// own privy wallet signs for its own account.
@@ -26,6 +28,8 @@ pub struct Config {
     pub signer: Option<Signer>,
     pub rpc_urls: HashMap<u64, String>,
     pub receipt_timeout: Duration,
+    pub perpl_api_url: String,
+    pub perpl_exchange: Address,
 }
 
 impl Config {
@@ -59,6 +63,11 @@ impl Config {
             receipt_timeout: Duration::from_secs(
                 opt("RECEIPT_TIMEOUT").and_then(|v| v.parse().ok()).unwrap_or(60),
             ),
+            perpl_api_url: opt("PERPL_API_URL").unwrap_or_else(|| "https://testnet.perpl.xyz/api".into()),
+            perpl_exchange: match opt("PERPL_EXCHANGE_ADDRESS") {
+                Some(v) => v.parse().map_err(|_| format!("PERPL_EXCHANGE_ADDRESS is not an address: {v}"))?,
+                None => PERPL_EXCHANGE,
+            },
         })
     }
 }

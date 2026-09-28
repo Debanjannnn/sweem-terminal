@@ -149,6 +149,8 @@ pub fn batch_call(
     }
 }
 
+// one argument per field of the on-chain order; a struct would only rename them
+#[allow(clippy::too_many_arguments)]
 pub fn limit_call(
     m: &Market,
     user_id: u64,

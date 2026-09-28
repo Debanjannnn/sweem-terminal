@@ -52,23 +52,24 @@ export function TopBar() {
           <Bell className="size-5" />
         </button>
 
-        <div className="flex h-9 items-center rounded-full bg-secondary/70 px-4">
-          {!authenticated ? (
-            <span className="text-sm text-muted-foreground">Not connected</span>
-          ) : portfolio.isPending ? (
-            <Skeleton className="h-4 w-24" />
-          ) : (
-            <span className="tnum text-sm">
-              {value == null
-                ? "—"
-                : currency === "USD"
-                  ? formatUsd(value)
-                  : Number.isFinite(monPrice) && monPrice > 0
-                    ? `${formatSize(value / monPrice, 2)} MON`
-                    : "—"}
-            </span>
-          )}
-        </div>
+        {/* a balance exists only for a signed-in wallet */}
+        {authenticated && (
+          <div className="flex h-9 items-center rounded-full bg-secondary/70 px-4">
+            {portfolio.isPending ? (
+              <Skeleton className="h-4 w-24" />
+            ) : (
+              <span className="tnum text-sm">
+                {value == null
+                  ? "—"
+                  : currency === "USD"
+                    ? formatUsd(value)
+                    : Number.isFinite(monPrice) && monPrice > 0
+                      ? `${formatSize(value / monPrice, 2)} MON`
+                      : "—"}
+              </span>
+            )}
+          </div>
+        )}
 
         <Dropdown
           value={currency}

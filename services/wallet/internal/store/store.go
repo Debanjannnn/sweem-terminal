@@ -9,11 +9,15 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/sweem-terminal/sweem-terminal/services/wallet/internal/policy"
 )
 
 var ErrNotFound = errors.New("store: not found")
+
+// ErrWalletTaken: another identity already holds this wallet address.
+var ErrWalletTaken = errors.New("store: wallet address belongs to another user")
 
 type Store struct{ pool *pgxpool.Pool }
 
@@ -44,6 +48,9 @@ func (s *Store) UpsertUser(ctx context.Context, did, wallet, privyWalletID strin
 	var u User
 	err := s.pool.QueryRow(ctx, q, did, strings.ToLower(strings.TrimSpace(wallet)), privyWalletID).
 		Scan(&u.ID, &u.WalletAddress, &u.PrivyWalletID, &u.CreatedAt, &u.FirstFundedAt)
+	if pe := (*pgconn.PgError)(nil); errors.As(err, &pe) && pe.Code == "23505" {
+		return User{}, ErrWalletTaken
+	}
 	return u, err
 }
 
@@ -153,13 +160,13 @@ func (s *Store) InsertIntent(ctx context.Context, in Intent) (bool, error) {
 	const q = `
 		INSERT INTO intents (intent_key, user_id, market_id, venue, side, order_type, size,
 		                     limit_price, quantity, tif, post_only, token, slot_idx,
-		                     expected_order_id, max_slippage_bps, chain_id, state)
+		                     expected_order_id, max_slippage_bps, chain_id, state, leverage)
 		VALUES ($1,$2,$3,$4,$5,$6,$7::numeric, NULLIF($8,'')::numeric, NULLIF($9,'')::numeric,
-		        $10, $11, $12, $13, NULLIF($14,'')::numeric, $15, $16, $17)
+		        $10, $11, $12, $13, NULLIF($14,'')::numeric, $15, $16, $17, $18)
 		ON CONFLICT (intent_key) DO NOTHING`
 	tag, err := s.pool.Exec(ctx, q, in.Key, in.UserID, in.MarketID, in.Venue, in.Side, in.OrderType,
 		in.Size, in.LimitPrice, in.Quantity, in.Tif, in.PostOnly, in.Token, in.SlotIdx,
-		in.ExpectedOrderID, in.MaxSlippageBps, in.ChainID, orDefault(in.State, "pending"))
+		in.ExpectedOrderID, in.MaxSlippageBps, in.ChainID, orDefault(in.State, "pending"), in.Leverage)
 	if err != nil {
 		return false, fmt.Errorf("store: insert intent: %w", err)
 	}
@@ -169,14 +176,24 @@ func (s *Store) InsertIntent(ctx context.Context, in Intent) (bool, error) {
 const intentCols = `intent_key, user_id, market_id, venue, side, order_type, size::text,
                     COALESCE(limit_price::text, ''), COALESCE(quantity::text, ''), tif, post_only,
                     token, slot_idx, COALESCE(expected_order_id::text, ''),
-                    max_slippage_bps, chain_id, state, created_at`
+                    max_slippage_bps, chain_id, state, created_at, leverage, order_id`
 
 func scanIntent(row pgx.Row) (Intent, error) {
 	var in Intent
 	err := row.Scan(&in.Key, &in.UserID, &in.MarketID, &in.Venue, &in.Side, &in.OrderType, &in.Size,
 		&in.LimitPrice, &in.Quantity, &in.Tif, &in.PostOnly, &in.Token, &in.SlotIdx,
-		&in.ExpectedOrderID, &in.MaxSlippageBps, &in.ChainID, &in.State, &in.CreatedAt)
+		&in.ExpectedOrderID, &in.MaxSlippageBps, &in.ChainID, &in.State, &in.CreatedAt,
+		&in.Leverage, &in.OrderID)
 	return in, err
+}
+
+// SetOrderRef records where a resting order sits, as the executor reported it,
+// so a later cancel can name it. slot is kuru's; perpl has none.
+func (s *Store) SetOrderRef(ctx context.Context, key, orderID string, slot *int) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE intents SET order_id = $2, slot_idx = COALESCE($3, slot_idx) WHERE intent_key = $1`,
+		key, orderID, slot)
+	return err
 }
 
 // PutKuruAccount replaces the cached AccountCore state; the chain is the truth
@@ -184,14 +201,14 @@ func scanIntent(row pgx.Row) (Intent, error) {
 func (s *Store) PutKuruAccount(ctx context.Context, ka KuruAccount) error {
 	const q = `
 		INSERT INTO kuru_accounts (user_id, chain_id, kuru_user_id, signer_authorized,
-		                           auth_nonce, account_core, signer_expiry, updated_at)
-		VALUES ($1,$2,$3,$4,$5::numeric,$6,$7, now())
+		                           auth_nonce, account_core, signer_expiry, signer, updated_at)
+		VALUES ($1,$2,$3,$4,$5::numeric,$6,$7,$8, now())
 		ON CONFLICT (user_id) DO UPDATE SET
 			chain_id = EXCLUDED.chain_id, kuru_user_id = EXCLUDED.kuru_user_id,
 			signer_authorized = EXCLUDED.signer_authorized, auth_nonce = EXCLUDED.auth_nonce,
-			account_core = EXCLUDED.account_core, updated_at = now()`
+			account_core = EXCLUDED.account_core, signer = EXCLUDED.signer, updated_at = now()`
 	_, err := s.pool.Exec(ctx, q, ka.UserID, ka.ChainID, ka.KuruUserID, ka.SignerAuthorized,
-		orDefault(ka.AuthNonce, "0"), ka.AccountCore, ka.SignerExpiry)
+		orDefault(ka.AuthNonce, "0"), ka.AccountCore, ka.SignerExpiry, ka.Signer)
 	return err
 }
 
@@ -208,10 +225,10 @@ func (s *Store) KuruAccount(ctx context.Context, userID string) (KuruAccount, er
 	var ka KuruAccount
 	err := s.pool.QueryRow(ctx, `
 		SELECT user_id, chain_id, kuru_user_id, signer_authorized, auth_nonce::text,
-		       account_core, signer_expiry, updated_at
+		       account_core, signer_expiry, signer, updated_at
 		FROM kuru_accounts WHERE user_id = $1`, userID).
 		Scan(&ka.UserID, &ka.ChainID, &ka.KuruUserID, &ka.SignerAuthorized, &ka.AuthNonce,
-			&ka.AccountCore, &ka.SignerExpiry, &ka.UpdatedAt)
+			&ka.AccountCore, &ka.SignerExpiry, &ka.Signer, &ka.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return KuruAccount{}, ErrNotFound
 	}

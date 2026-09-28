@@ -2,17 +2,20 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { AccountPanel } from "@/components/account/AccountPanel";
+import { PerplAccountPanel } from "@/components/account/PerplAccountPanel";
 import { ChartPanel } from "@/components/chart/ChartPanel";
 import { MarketHeader } from "@/components/market/MarketHeader";
 import { PositionsPanel } from "@/components/table/PositionsPanel";
 import { OpenOrders } from "@/components/ticket/OpenOrders";
 import { OrderTicket } from "@/components/ticket/OrderTicket";
+import { PerpTicket } from "@/components/ticket/PerpTicket";
 import { Card } from "@/components/ui/Card";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { ErrorState } from "@/components/ui/ErrorState";
-import { errorMessage, fromWad, type Candle, type IndexFrame, type Tick } from "@/lib/api";
+import { CHAIN_ID, errorMessage, fromWad, type Candle, type IndexFrame, type Tick } from "@/lib/api";
 import {
   useCandles,
+  useCreateOrder,
   useExecutions,
   useMarkets,
   useMarks,
@@ -68,6 +71,7 @@ export function Workspace({
   const hourly = useCandles(id, 3_600, day.from, day.to);
 
   const portfolio = usePortfolio();
+  const close = useCreateOrder();
   const orders = useOrders();
   const executions = useExecutions();
 
@@ -93,6 +97,7 @@ export function Workspace({
   const header = market
     ? {
         symbol: market.symbol,
+        priceDecimals: market.priceDecimals,
         price,
         markPrice: markPrice ? Number(markPrice) : undefined,
         indexPrice: index.data ? fromWad(index.data.value) : undefined,
@@ -133,9 +138,9 @@ export function Workspace({
         <Card className="flex min-h-[420px] flex-col">
           <ChartPanel market={market} />
         </Card>
-        {authenticated && market?.venue === "kuru" && (
+        {authenticated && market && (market.venue === "kuru" || market.venue === "perpl") && (
           <Card>
-            <OpenOrders venue="kuru" />
+            <OpenOrders venue={market.venue} />
           </Card>
         )}
         <Card>
@@ -151,9 +156,35 @@ export function Workspace({
                     : null
               }
               degraded={portfolio.data?.degraded ?? []}
+              // a close is a reduce-only IOC for the whole position at the market
+              onClose={(p) =>
+                p.closeMarketId &&
+                close.mutate({
+                  market_id: p.closeMarketId,
+                  venue: "perpl",
+                  side: p.side === "long" ? "sell" : "buy",
+                  chain_id: CHAIN_ID,
+                  idempotency_key: crypto.randomUUID(),
+                  order_type: "close",
+                  max_slippage_bps: 100,
+                })
+              }
+              closingId={
+                close.isPending ? `${close.variables?.market_id}:perpl` : undefined
+              }
             />
           ) : (
             <EmptyState message="Sign in to see your positions and orders." />
+          )}
+          {close.error && (
+            <div className="px-4 pb-4">
+              <ErrorState message={errorMessage(close.error)} />
+            </div>
+          )}
+          {close.data?.state === "not_filled" && (
+            <p className="px-4 pb-4 text-xs text-muted-foreground">
+              The close matched nothing inside 1% of the book, so the position is unchanged.
+            </p>
           )}
         </Card>
       </main>
@@ -161,7 +192,8 @@ export function Workspace({
       <aside className="flex w-[var(--ticket-width)] shrink-0 flex-col gap-4 overflow-y-auto">
         {/* kuru custody is a step of its own: funds live in AccountCore, not the wallet */}
         {market?.venue === "kuru" && <AccountPanel market={market} />}
-        <OrderTicket market={market} />
+        {market?.venue === "perpl" && <PerplAccountPanel />}
+        {market?.venue === "perpl" ? <PerpTicket market={market} /> : <OrderTicket market={market} />}
       </aside>
     </div>
   );

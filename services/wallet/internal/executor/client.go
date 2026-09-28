@@ -223,3 +223,107 @@ func (c *Client) post(ctx context.Context, path, intentKey string, req, dst any)
 	}
 	return nil
 }
+
+// PerplAccountRequest reads the Perpl account a wallet owns. The wallet id is
+// checked against the address before anything is read.
+type PerplAccountRequest struct {
+	PrivyWalletID string `json:"privy_wallet_id"`
+	UserWallet    string `json:"user_wallet"`
+}
+
+// PerplPosition is one open position. Integers are the venue's own units:
+// price in PNS, lot in LNS, collateral in atoms; the decimals say how to read them.
+type PerplPosition struct {
+	MarketID       string  `json:"market_id"`
+	Symbol         string  `json:"symbol"`
+	Side           string  `json:"side"`
+	Lot            string  `json:"lot"`
+	EntryPrice     string  `json:"entry_price"`
+	Deposit        string  `json:"deposit"`
+	PnL            string  `json:"pnl"`
+	MarkPrice      *string `json:"mark_price"`
+	LiquidationEst *string `json:"liquidation_price_est"`
+	PriceDecimals  int     `json:"price_decimals"`
+	SizeDecimals   int     `json:"size_decimals"`
+}
+
+type PerplCollateral struct {
+	Symbol   string `json:"symbol"`
+	Address  string `json:"address"`
+	Decimals int    `json:"decimals"`
+}
+
+type PerplAccount struct {
+	ChainID     int64           `json:"chain_id"`
+	Exchange    string          `json:"exchange"`
+	Collateral  PerplCollateral `json:"collateral"`
+	MinOpen     string          `json:"min_open"`
+	MinDeposit  string          `json:"min_deposit"`
+	MinWithdraw string          `json:"min_withdraw"`
+	Registered  bool            `json:"registered"`
+	AccountID   string          `json:"account_id,omitempty"`
+	Balance     string          `json:"balance,omitempty"`
+	Locked      string          `json:"locked,omitempty"`
+	Frozen      bool            `json:"frozen,omitempty"`
+	Positions   []PerplPosition `json:"positions"`
+	Error       string          `json:"error,omitempty"`
+}
+
+// PerplFundsRequest moves collateral in or out: amount in collateral atoms.
+type PerplFundsRequest struct {
+	IntentKey     string `json:"intent_key"`
+	PrivyWalletID string `json:"privy_wallet_id"`
+	UserWallet    string `json:"user_wallet"`
+	Amount        string `json:"amount"`
+}
+
+// PerplOrderRequest opens, adds to or closes a position. kind is market, limit
+// or close; lot in LNS, price in PNS (limit only), leverage in hundredths.
+type PerplOrderRequest struct {
+	IntentKey      string `json:"intent_key"`
+	PrivyWalletID  string `json:"privy_wallet_id"`
+	UserWallet     string `json:"user_wallet"`
+	MarketID       string `json:"market_id"`
+	Side           string `json:"side"`
+	Kind           string `json:"kind"`
+	Lot            string `json:"lot"`
+	Price          string `json:"price,omitempty"`
+	Leverage       int    `json:"leverage"`
+	PostOnly       bool   `json:"post_only"`
+	MaxSlippageBps int    `json:"max_slippage_bps"`
+}
+
+type PerplCancelRequest struct {
+	IntentKey     string `json:"intent_key"`
+	PrivyWalletID string `json:"privy_wallet_id"`
+	UserWallet    string `json:"user_wallet"`
+	MarketID      string `json:"market_id"`
+	OrderID       string `json:"order_id"`
+}
+
+func (c *Client) PerplAccount(ctx context.Context, req PerplAccountRequest) (PerplAccount, error) {
+	var out PerplAccount
+	if err := c.post(ctx, "/perpl/account", "perpl-account", req, &out); err != nil {
+		return out, err
+	}
+	if out.Error != "" {
+		return out, fmt.Errorf("the executor could not read the perpl account: %s", out.Error)
+	}
+	return out, nil
+}
+
+func (c *Client) PerplDeposit(ctx context.Context, req PerplFundsRequest) (RouteResponse, error) {
+	return c.write(ctx, "/perpl/deposit", req.IntentKey, req)
+}
+
+func (c *Client) PerplWithdraw(ctx context.Context, req PerplFundsRequest) (RouteResponse, error) {
+	return c.write(ctx, "/perpl/withdraw", req.IntentKey, req)
+}
+
+func (c *Client) PerplOrder(ctx context.Context, req PerplOrderRequest) (RouteResponse, error) {
+	return c.write(ctx, "/perpl/order", req.IntentKey, req)
+}
+
+func (c *Client) PerplCancel(ctx context.Context, req PerplCancelRequest) (RouteResponse, error) {
+	return c.write(ctx, "/perpl/cancel", req.IntentKey, req)
+}

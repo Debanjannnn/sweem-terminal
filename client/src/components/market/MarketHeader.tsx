@@ -2,7 +2,7 @@
 
 import { Settings2 } from "lucide-react";
 import { Skeleton } from "@/components/ui/Skeleton";
-import { formatPctSigned, formatUsd, formatUsdCompact } from "@/lib/format";
+import { formatPctSigned, formatPrice, formatUsdCompact } from "@/lib/format";
 import { cn } from "@/lib/cn";
 import { MarketPicker, type MarketOption } from "./MarketPicker";
 
@@ -10,6 +10,8 @@ import { MarketPicker, type MarketOption } from "./MarketPicker";
 export type Market = {
   symbol: string;
   price?: number;
+  // the venue's price precision
+  priceDecimals?: number;
   markPrice?: number;
   indexPrice?: number;
   changePct?: number;
@@ -28,6 +30,7 @@ export function MarketHeader({
   onSelect?: (symbol: string) => void;
 }) {
   // undefined = still loading, null = the feed has no value for it
+  const px = (n: number) => formatPrice(n, market?.priceDecimals);
   const show = <T,>(v: T | undefined, fmt: (v: T) => string) =>
     market ? (v === undefined || (typeof v === "number" && Number.isNaN(v)) ? null : fmt(v)) : undefined;
 
@@ -43,15 +46,15 @@ export function MarketHeader({
           <span className="tnum text-2xl font-semibold">
             {market.price === undefined || Number.isNaN(market.price)
               ? "—"
-              : formatUsd(market.price)}
+              : formatPrice(market.price, market.priceDecimals)}
           </span>
         ) : (
           <Skeleton className="h-7 w-32" />
         )}
       </div>
 
-      <Stat label="Mark" value={show(market?.markPrice, formatUsd)} />
-      <Stat label="Index" value={show(market?.indexPrice, formatUsd)} />
+      <Stat label="Mark" value={show(market?.markPrice, px)} />
+      <Stat label="Index" value={show(market?.indexPrice, px)} />
       <Stat
         label="24h change"
         value={show(market?.changePct, (v) => formatPctSigned(v))}
@@ -63,7 +66,7 @@ export function MarketHeader({
         label="24h high / low"
         value={
           market && market.high24h !== undefined && market.low24h !== undefined
-            ? `${formatUsd(market.high24h)} / ${formatUsd(market.low24h)}`
+            ? `${px(market.high24h)} / ${px(market.low24h)}`
             : market
               ? null
               : undefined

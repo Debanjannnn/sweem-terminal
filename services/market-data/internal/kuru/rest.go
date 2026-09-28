@@ -87,7 +87,7 @@ func restLevels(ls []gwLevel, m store.Market, desc bool) []book.Level {
 		if !pok || !sok || price.Sign() <= 0 || size.Sign() <= 0 {
 			continue
 		}
-		out = append(out, wadLevel(price, size, m))
+		out = append(out, WadLevel(price, size, m))
 	}
 	return book.Sort(out, desc)
 }

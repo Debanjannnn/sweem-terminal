@@ -95,9 +95,14 @@ func (c *metaCache) get(ctx context.Context, fetch func(context.Context) ([]poli
 		}
 		return policy.Market{}, err
 	}
-	by := make(map[string]policy.Market, len(ms))
+	// a market is named by market-data's id, its address, everywhere a client
+	// sees it, and by its allowlist name inside the executor; either finds it
+	by := make(map[string]policy.Market, 2*len(ms))
 	for _, m := range ms {
 		by[normalizeMarketID(m.ID)] = m
+		if m.MarketAddress != "" {
+			by[normalizeMarketID(m.MarketAddress)] = m
+		}
 	}
 	c.mu.Lock()
 	c.by, c.fetched = by, time.Now()
@@ -115,4 +120,15 @@ func (s *Server) market(ctx context.Context, id string) (policy.Market, error) {
 		return policy.Market{}, fmt.Errorf("this service has no executor to read the scales of market %q from", id)
 	}
 	return s.marketMeta.get(ctx, s.Executor.Markets, id)
+}
+
+// executorMarket names a market the way the executor's allowlist does. Callers
+// hold market-data's id (the market address); the executor takes a name, never
+// an address, so every write resolves through here.
+func (s *Server) executorMarket(ctx context.Context, id string) (string, error) {
+	m, err := s.market(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	return m.ID, nil
 }

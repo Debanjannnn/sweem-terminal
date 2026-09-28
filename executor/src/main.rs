@@ -3,6 +3,7 @@ mod config;
 mod gas;
 mod idem;
 mod nonce;
+mod perpl_route;
 mod privy;
 mod route;
 mod rpc;
@@ -38,6 +39,7 @@ pub struct AppState {
     pub account_core: Address,
     pub signer: Option<Arc<Signer>>,
     pub receipt_timeout: Duration,
+    pub perpl: Arc<venues::perpl::Client>,
 }
 
 #[tokio::main]
@@ -77,6 +79,7 @@ async fn run() -> Result<(), String> {
         account_core: cfg.account_core,
         signer: cfg.signer.clone().map(Arc::new),
         receipt_timeout: cfg.receipt_timeout,
+        perpl: Arc::new(venues::perpl::Client::new(&cfg.perpl_api_url, cfg.perpl_exchange)),
     };
 
     let app = Router::new()
@@ -89,6 +92,11 @@ async fn run() -> Result<(), String> {
         .route("/route", post(route::route))
         .route("/order", post(route::order))
         .route("/order/cancel", post(route::cancel))
+        .route("/perpl/account", post(perpl_route::account))
+        .route("/perpl/deposit", post(perpl_route::deposit))
+        .route("/perpl/withdraw", post(perpl_route::withdraw))
+        .route("/perpl/order", post(perpl_route::order))
+        .route("/perpl/cancel", post(perpl_route::cancel))
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .with_state(state);
 
@@ -105,6 +113,7 @@ async fn health(State(st): State<AppState>) -> Json<serde_json::Value> {
         "chains": st.rpc.keys().copied().collect::<Vec<_>>(),
         "account_core": st.account_core,
         "signer": st.signer.as_ref().map(|s| s.address),
+        "perpl_exchange": st.perpl.pinned,
     }))
 }
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -16,7 +17,7 @@ const contextPayload = `{
  "tokens":[{"id":1,"address":"0xa9012a055bd4e0edff8ce09f960291c09d5322dc","symbol":"AUSD","decimals":6}],
  "markets":[
   {"id":16,"instance_id":12,"symbol":"BTC",
-   "config":{"is_open":true,"price_decimals":1,"size_decimals":5,"min_posting_amount":"0","maker_fee":45,"taker_fee":345},
+   "config":{"is_open":true,"price_decimals":1,"size_decimals":5,"min_posting_amount":"0","maker_fee":45,"taker_fee":345,"initial_margin":1500},
    "state":{"orl":817616,"mrk":817779,"lst":817733}},
   {"id":32,"instance_id":12,"symbol":"ETH",
    "config":{"is_open":true,"price_decimals":2,"size_decimals":3,"min_posting_amount":"1000000","maker_fee":45,"taker_fee":345},
@@ -65,6 +66,8 @@ func TestContextIsResolvedAtRuntime(t *testing.T) {
 		{"kind", btc.Kind, "perp"},
 		// mrk 817779 at price_decimals 1 is $81,777.9
 		{"mark", btc.Mark, "81777900000000000000000"},
+		// the live BTC perp caps leverage at 15x
+		{"max leverage", strconv.Itoa(btc.MaxLeverage), "1500"},
 		{"last", btc.Last, "81773300000000000000000"},
 	}
 	for _, c := range cases {

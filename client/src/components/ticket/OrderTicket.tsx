@@ -27,7 +27,7 @@ import {
   quoteNotional,
 } from "@/lib/units";
 import { AmountInput } from "./AmountInput";
-import { OrderTypeTabs, STOP_REASON, type OrderType } from "./OrderTypeTabs";
+import { OrderTypeTabs, type OrderType } from "./OrderTypeTabs";
 import { SideToggle, type Side } from "./SideToggle";
 import { SummaryRows } from "./SummaryRows";
 
@@ -50,9 +50,9 @@ const SLIPPAGE = [
 
 // what actually happened, per the executor's read-back after the receipt
 const OUTCOME: Record<string, (r: OrderResponse) => string> = {
-  resting: (r) => `Resting on the book in slot ${r.slot_idx ?? "?"} as order ${r.order_id ?? "?"}.`,
+  resting: (r) => `Resting on the book in slot ${r.info?.slot_idx ?? "?"} as order ${r.info?.order_id ?? "?"}.`,
   not_resting: (r) =>
-    `It did not rest: ${r.reason ?? "the slot read back empty after the transaction confirmed"}.`,
+    `It did not rest: ${r.info?.reason ?? "the slot read back empty after the transaction confirmed"}.`,
   filled_or_expired: () => "An IOC or FOK order never rests: it filled or expired on entry.",
   submitted: () =>
     "The transaction was sent but its receipt has not arrived, so the outcome is not known yet.",
@@ -156,9 +156,8 @@ export function OrderTicket({ market }: { market?: Market | null }) {
         </div>
       )}
 
-      <SideToggle value={side} onChange={setSide} />
+      <SideToggle value={side} onChange={setSide} labels={["Buy", "Sell"]} />
       <OrderTypeTabs value={type} onChange={setType} />
-      <p className="text-xs text-muted-foreground">{STOP_REASON}</p>
 
       {perp && (
         <div className="space-y-2">
@@ -274,7 +273,7 @@ export function OrderTicket({ market }: { market?: Market | null }) {
               <span className="text-xs text-muted-foreground">{result.state}</span>
             </div>
             <p className="text-xs">
-              {(OUTCOME[result.state] ?? ((r: OrderResponse) => r.reason ?? r.state))(result)}
+              {(OUTCOME[result.state] ?? ((r: OrderResponse) => r.info?.reason ?? r.state))(result)}
             </p>
             {result.tx_hash && (
               <p className="tnum text-[11px] break-all text-muted-foreground">

@@ -10,6 +10,10 @@ pub const SWAP: u64 = 900_000;
 pub const DEPOSIT: u64 = 250_000;
 pub const BATCH: u64 = 1_200_000;
 pub const AUTHORIZE: u64 = 150_000;
+// perpl, from live eth_estimateGas: a resting order 255k, a taker hitting 5 makers 822k
+pub const PERPL_POST: u64 = 350_000;
+pub const PERPL_TAKE: u64 = 1_200_000;
+pub const PERPL_ACCOUNT: u64 = 400_000;
 
 const GWEI: u128 = 1_000_000_000;
 // only used when the node will not answer; monad's base fee sits near 100 gwei

@@ -6,17 +6,22 @@ import { cn } from "@/lib/cn";
 
 export type Side = "long" | "short";
 
-const SIDES: { value: Side; label: string; fill: string; text: string }[] = [
-  { value: "long", label: "Long", fill: "bg-long", text: "text-long-foreground" },
-  { value: "short", label: "Short", fill: "bg-short", text: "text-short-foreground" },
+const SIDES: { value: Side; fill: string; text: string }[] = [
+  { value: "long", fill: "bg-long", text: "text-long-foreground" },
+  { value: "short", fill: "bg-short", text: "text-short-foreground" },
 ];
 
+// spot buys and sells; a perp goes long or short. same control, same colours.
 export function SideToggle({
   value,
   onChange,
+  labels = ["Long", "Short"],
+  id = "side-toggle",
 }: {
   value: Side;
   onChange: (v: Side) => void;
+  labels?: [string, string];
+  id?: string;
 }) {
   const reduced = useReducedMotion();
   return (
@@ -43,12 +48,12 @@ export function SideToggle({
                 <span className={cn("absolute inset-0 rounded-lg", s.fill)} />
               ) : (
                 <motion.span
-                  layoutId="side-toggle"
+                  layoutId={id}
                   className={cn("absolute inset-0 rounded-lg", s.fill)}
                   transition={PILL_SPRING}
                 />
               ))}
-            <span className="relative">{s.label}</span>
+            <span className="relative">{labels[s.value === "long" ? 0 : 1]}</span>
           </button>
         );
       })}

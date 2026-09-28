@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Pill } from "@/components/ui/Pill";
 import { formatPctSigned, formatSize, formatUsd } from "@/lib/format";
@@ -23,18 +24,31 @@ export type Position = {
   takeProfit?: number;
   tx?: TxTier;
   note?: string;
+  // perps: margin, and a liquidation price that is our estimate, not the venue's
+  collateral?: number;
+  liquidationEst?: number;
+  // set when the position can be closed from here: the venue's market id
+  closeMarketId?: string;
 };
 
 const value = (n: number | undefined, fmt: (n: number) => string) =>
   n === undefined || Number.isNaN(n) ? "—" : fmt(n);
 
-export function PositionCard({ position: p }: { position: Position }) {
+export function PositionCard({
+  position: p,
+  onClose,
+  closing = false,
+}: {
+  position: Position;
+  onClose?: (p: Position) => void;
+  closing?: boolean;
+}) {
   const up = (p.pnl ?? 0) >= 0;
   return (
     <Card className="space-y-3 bg-background/40 p-4">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
         <span className="font-medium">{p.symbol}</span>
-        <Pill tone={p.side === "long" ? "positive" : "destructive"}>
+        <Pill tone={p.side === "long" ? "long" : "short"}>
           {p.side}
           {p.leverage !== undefined && ` ${p.leverage}x`}
         </Pill>
@@ -58,6 +72,19 @@ export function PositionCard({ position: p }: { position: Position }) {
         <span className="tnum">Size {formatSize(p.size)}</span>
         <span className="tnum">Entry {value(p.entryPrice, formatUsd)}</span>
         <span className="tnum">Mark {value(p.markPrice, formatUsd)}</span>
+        {p.collateral !== undefined && (
+          <span className="tnum">Margin {value(p.collateral, formatUsd)}</span>
+        )}
+        {p.liquidationEst !== undefined && (
+          <span className="tnum" title="Estimated from Perpl's maintenance margin; funding and fees move it">
+            Liq. est. {value(p.liquidationEst, formatUsd)}
+          </span>
+        )}
+        {p.closeMarketId && onClose && (
+          <Button variant="ghost" className="ml-auto h-7 px-3 text-xs" pending={closing} onClick={() => onClose(p)}>
+            Close
+          </Button>
+        )}
       </div>
 
       {p.note && <p className="text-xs text-muted-foreground">{p.note}</p>}

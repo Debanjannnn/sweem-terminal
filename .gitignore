@@ -10,3 +10,4 @@ bun.lock
 .env.*
 !.env.example
 *.log
+.run/

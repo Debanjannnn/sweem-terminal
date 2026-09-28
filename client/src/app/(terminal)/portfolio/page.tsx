@@ -12,6 +12,7 @@ import { truncateAddress } from "@/lib/format";
 import { useExecutions, useMarkets, useOrders, usePortfolio } from "@/lib/query";
 import { marketIndex, orderRows, positionRows } from "@/lib/rows";
 import { useSession } from "@/lib/session";
+import { SectionTitle } from "@/components/ui/SectionTitle";
 
 export default function Page() {
   const { authenticated, ready } = useSession();
@@ -33,8 +34,8 @@ export default function Page() {
     return (
       <div className="min-h-0 flex-1 overflow-y-auto p-4">
         <Card className="p-4">
-          <h1 className="text-sm font-medium">Portfolio</h1>
-          <EmptyState message="Connect a wallet to see your portfolio." />
+          <SectionTitle as="h1">Portfolio</SectionTitle>
+          <EmptyState message="Sign in to see your portfolio." />
         </Card>
       </div>
     );
@@ -43,7 +44,7 @@ export default function Page() {
   return (
     <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4">
       <Card className="space-y-2 p-4">
-        <h1 className="text-sm font-medium">Portfolio</h1>
+        <SectionTitle as="h1">Portfolio</SectionTitle>
         {portfolio.isError ? (
           <ErrorState message={errorMessage(portfolio.error)} />
         ) : portfolio.isPending ? (
@@ -66,7 +67,7 @@ export default function Page() {
       </Card>
 
       <Card className="space-y-3 p-4">
-        <h2 className="text-sm font-medium">Executions</h2>
+        <SectionTitle>Executions</SectionTitle>
         {executions.isError ? (
           <ErrorState message={errorMessage(executions.error)} />
         ) : executions.isPending ? (

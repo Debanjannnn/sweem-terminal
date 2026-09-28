@@ -50,6 +50,8 @@ type Market struct {
 	Address            string `json:"address"`
 	Mark               string `json:"mark,omitempty"`
 	Last               string `json:"last,omitempty"`
+	// perps only: the venue's max leverage in hundredths, 1500 = 15x
+	MaxLeverage int `json:"maxLeverage,omitempty"`
 }
 
 type Redis struct{ c *redis.Client }

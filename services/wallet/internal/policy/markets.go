@@ -8,7 +8,7 @@ import (
 )
 
 // Venues the executor can route to. Mirrors executor/src/venues/mod.rs.
-var Venues = []string{"kuru"}
+var Venues = []string{"kuru", "perpl"}
 
 // Market is one entry of executor/kuru-markets.json, the single allowlist of
 // callable addresses. The API validates delegations against it and sync-policy

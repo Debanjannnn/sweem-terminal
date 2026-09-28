@@ -57,9 +57,12 @@ client: ## run client :3000
 oracle: ## run oracle
 	cd oracle && bun install && bun start
 
-indexer: ## run envio indexer :8090
-	@test -n "$$ENVIO_API_TOKEN" || { echo "ENVIO_API_TOKEN required (HyperSync has no unauthenticated mode)"; exit 1; }
-	cd indexer && bun install && bunx envio dev
+# `envio start`, not `envio dev`: dev health-checks hasura on a hardcoded :8080,
+# which is wallet, and hangs. see indexer/SETUP.md.
+indexer: ## run envio indexer, graphql :8090
+	set -a; . ./.env; set +a; \
+	  test -n "$$ENVIO_API_TOKEN" || { echo "ENVIO_API_TOKEN required (HyperSync has no unauthenticated mode)"; exit 1; }; \
+	  cd indexer && bun install && bunx envio local docker up && bunx envio start
 
 # ── contracts ────────────────────────────────────────────────────────────
 build-contracts: ## forge build
@@ -77,18 +80,22 @@ deploy: ## deploy contracts to $$CHAIN_ID
 # nohup+disown, not a trailing foreground process. a `make dev` whose services
 # survive only because a foreground step holds the shell open dies silently the
 # day that step is removed.
-dev: infra ## start every backend service in the background
-	@mkdir -p .run
-	@nohup go run ./services/market-data/cmd/api    > .run/market-data.log 2>&1 & disown
-	@nohup go run ./services/market-data/cmd/ingest > .run/ingest.log      2>&1 & disown
-	@nohup go run ./services/wallet/cmd/api         > .run/wallet.log      2>&1 & disown
-	@nohup go run ./services/scheduler/cmd/scheduler> .run/scheduler.log   2>&1 & disown
-	@nohup go run ./services/reconciler/cmd/reconciler > .run/reconciler.log 2>&1 & disown
-	@echo "backend up. logs in .run/. now: make client"
+# built binaries, not `go run`: go run leaves its child running when killed, so
+# a restart kept serving the old build. dev-stop matches this exact path.
+GO_SVCS := market-data:services/market-data/cmd/api ingest:services/market-data/cmd/ingest \
+           wallet:services/wallet/cmd/api scheduler:services/scheduler/cmd/scheduler \
+           reconciler:services/reconciler/cmd/reconciler
+
+dev: infra dev-stop ## (re)build and start every backend service in the background
+	@mkdir -p .run/bin
+	@for s in $(GO_SVCS); do n=$${s%%:*}; \
+	  go build -o $(CURDIR)/.run/bin/$$n ./$${s#*:} || exit 1; \
+	  nohup $(CURDIR)/.run/bin/$$n > .run/$$n.log 2>&1 & disown; \
+	done
+	@echo "backend up. logs in .run/. now: make executor, make client"
 
 dev-stop: ## stop background services
-	-@pkill -f 'go-build.*sweem-terminal' 2>/dev/null || true
-	-@pkill -f 'services/(wallet|market-data|scheduler|reconciler)' 2>/dev/null || true
+	-@pkill -f '$(CURDIR)/.run/bin/' 2>/dev/null || true
 	@echo stopped
 
 status: ## curl /health on every service

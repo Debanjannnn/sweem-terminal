@@ -93,6 +93,32 @@ impl Rpc {
     }
 }
 
+/// the receipt's own logs, for venues whose outcome is only in events.
+pub type ReceiptLogs = (Outcome, Vec<crate::venues::perpl::Log>);
+
+impl Rpc {
+    pub async fn receipt_logs(&self, hash: &str) -> Option<ReceiptLogs> {
+        let r = self.call("eth_getTransactionReceipt", json!([hash])).await?;
+        let outcome = match r.get("status")?.as_str()? {
+            "0x1" => Outcome::Confirmed,
+            _ => Outcome::Reverted,
+        };
+        let logs = r
+            .get("logs")?
+            .as_array()?
+            .iter()
+            .filter_map(|l| {
+                Some(crate::venues::perpl::Log {
+                    address: l.get("address")?.as_str()?.parse().ok()?,
+                    topics: l.get("topics")?.as_array()?.iter().filter_map(|t| t.as_str()?.parse().ok()).collect(),
+                    data: hex::decode(l.get("data")?.as_str()?).ok()?,
+                })
+            })
+            .collect();
+        Some((outcome, logs))
+    }
+}
+
 pub async fn wait<T, F, Fut>(mut fetch: F, timeout: Duration, interval: Duration) -> Option<T>
 where
     F: FnMut() -> Fut,

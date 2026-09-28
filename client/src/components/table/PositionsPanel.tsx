@@ -27,11 +27,15 @@ export function PositionsPanel({
   loading = false,
   error = null,
   degraded = [],
+  onClose,
+  closingId,
 }: {
   positions?: Position[];
   loading?: boolean;
   error?: string | null;
   degraded?: string[];
+  onClose?: (p: Position) => void;
+  closingId?: string;
 }) {
   const [filter, setFilter] = useState<PositionStatus>("open");
   const shown = positions.filter((p) => p.status === filter);
@@ -72,7 +76,7 @@ export function PositionsPanel({
               {...rise}
               transition={{ ...rise.transition, delay: i * STAGGER_STEP }}
             >
-              <PositionCard position={p} />
+              <PositionCard position={p} onClose={onClose} closing={closingId === p.id} />
             </motion.div>
           ))}
         </div>

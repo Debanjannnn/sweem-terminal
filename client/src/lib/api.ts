@@ -106,6 +106,8 @@ export type Market = {
   address: string;
   mark?: string;
   last?: string;
+  // perps only: max leverage in hundredths, 1500 = 15x
+  maxLeverage?: number;
 };
 
 export type Mark = { market_id: string; price: string; ts: number };
@@ -171,6 +173,8 @@ export type Account = {
   chain_id: number;
   // a signer expiry emits no event, so it is only here if the backend reads it back
   signer_expiry?: number;
+  // the backend key that trades for this account; absent when your own wallet signs
+  signer?: string;
 };
 
 export type DepositResult = {
@@ -205,11 +209,12 @@ export type Order = {
   chain_id: number;
   state: string;
   created_at: string;
-  // set once a limit order rests; both are needed to cancel it
+  // set once a limit order rests: kuru cancels by slot + id, perpl by id alone
   slot_idx?: number;
   order_id?: string;
-  price?: string;
   quantity?: string;
+  // perpl only, hundredths
+  leverage?: number;
   tif?: string;
   post_only?: boolean;
 };
@@ -233,6 +238,9 @@ export type PortfolioPosition = {
   mark?: string;
   source: string;
   reconciled: boolean;
+  // perpl only, WAD: the venue's unrealized pnl and our liquidation estimate
+  pnl?: string;
+  liquidation_price_est?: string;
   reconcile_reason?: string;
   updated_at?: number;
 };
@@ -295,11 +303,16 @@ export type OrderResponse = {
   intent_key: string;
   state: string;
   tx_hash?: string;
-  slot_idx?: number;
-  order_id?: string;
-  reason?: string;
   error?: string;
   replayed?: boolean;
+  // the executor's read-back after the receipt; the wallet passes it through
+  info?: {
+    slot_idx?: number;
+    order_id?: string | null;
+    reason?: string;
+    filled_lot?: string;
+    avg_price?: string | null;
+  };
 };
 
 // Monad tiers: latest is Proposed and can still change, safe is Voted, finalized is irreversible.
@@ -314,4 +327,35 @@ export const txTier = (e: Execution | undefined) => {
     default:
       return "seen" as const;
   }
+};
+
+// Perpl: the wallet is the account, so there is nothing to authorize. integers
+// are the venue's own units and the decimals say how to read them.
+export type PerplPosition = {
+  market_id: string;
+  symbol: string;
+  side: "long" | "short";
+  lot: string;
+  entry_price: string;
+  deposit: string;
+  pnl: string;
+  mark_price: string | null;
+  liquidation_price_est: string | null;
+  price_decimals: number;
+  size_decimals: number;
+};
+
+export type PerplAccount = {
+  chain_id: number;
+  exchange: string;
+  collateral: { symbol: string; address: string; decimals: number };
+  min_open: string;
+  min_deposit: string;
+  min_withdraw: string;
+  registered: boolean;
+  account_id?: string;
+  balance?: string;
+  locked?: string;
+  frozen?: boolean;
+  positions: PerplPosition[];
 };

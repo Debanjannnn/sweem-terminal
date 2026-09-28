@@ -15,6 +15,7 @@ import { formatSize } from "@/lib/format";
 import { useAccount, useAuthorize, useDeposit, useRevokeAuthorization } from "@/lib/query";
 import { useSession } from "@/lib/session";
 import { depositAmount, isZero } from "@/lib/units";
+import { SectionTitle } from "@/components/ui/SectionTitle";
 
 const EXPIRY = [
   { value: "24", label: "24h" },
@@ -22,10 +23,11 @@ const EXPIRY = [
   { value: "720", label: "30d" },
 ] as const;
 
-type Stage = "unfunded" | "funded" | "delegated";
+type Stage = "unfunded" | "funded" | "delegated" | "ready";
 
+// with no backend signer the owner's own wallet trades, so funded is ready
 const stage = (a: Account): Stage =>
-  !a.registered ? "unfunded" : a.signer_authorized ? "delegated" : "funded";
+  !a.registered ? "unfunded" : !a.signer ? "ready" : a.signer_authorized ? "delegated" : "funded";
 
 const STAGE = {
   unfunded: {
@@ -42,6 +44,11 @@ const STAGE = {
     tone: "positive",
     label: "funded · delegated",
     line: "This account holds funds inside Kuru and our signer may trade it.",
+  },
+  ready: {
+    tone: "positive",
+    label: "funded",
+    line: "This account holds funds inside Kuru. Your own wallet signs its orders, so there is no separate signer to authorize.",
   },
 } as const;
 
@@ -194,77 +201,81 @@ export function AccountPanel({ market }: { market?: Market | null }) {
         {deposit.error && <ErrorState message={errorMessage(deposit.error)} />}
       </div>
 
-      <div className="h-px bg-border" />
+      {a.signer && (
+        <>
+          <div className="h-px bg-border" />
 
-      <div className="space-y-3">
-        <div className="text-[11px] uppercase tracking-wide text-muted-foreground">
-          Delegated trading
-        </div>
-        <p className="text-xs text-muted-foreground">
-          Our backend signer gets TRADE only: it can place and cancel orders for this
-          account, and it cannot withdraw from it. Revoking advances the authorization
-          epoch, which invalidates every pending automated order.
-        </p>
-        {a.signer_authorized ? (
-          <>
-            <SummaryRows
-              rows={[
-                {
-                  label: "Expires",
-                  value: a.signer_expiry
-                    ? new Date(a.signer_expiry * 1000).toLocaleString()
-                    : null,
-                },
-              ]}
-            />
-            {!a.signer_expiry && (
-              <p className="text-xs text-muted-foreground">
-                The contract emits no event for a signer expiry, so this account does not
-                report when the grant ends. Revoke to end it now.
-              </p>
-            )}
-            <Button
-              variant="ghost"
-              className="w-full"
-              onClick={() => revoke.mutate()}
-              pending={revoke.isPending}
-            >
-              Revoke trading authorization
-            </Button>
-          </>
-        ) : (
-          <>
-            <Segmented
-              id="authorize-expiry"
-              value={hours}
-              onChange={setHours}
-              options={EXPIRY}
-              className="grid-cols-3"
-            />
+          <div className="space-y-3">
+            <div className="text-[11px] uppercase tracking-wide text-muted-foreground">
+              Delegated trading
+            </div>
             <p className="text-xs text-muted-foreground">
-              Expires {new Date(expiry * 1000).toLocaleString()}.
+              Our backend signer gets TRADE only: it can place and cancel orders for this
+              account, and it cannot withdraw from it. Revoking advances the authorization
+              epoch, which invalidates every pending automated order.
             </p>
-            <Button
-              className="w-full"
-              onClick={() => authorize.mutate(expiry)}
-              pending={authorize.isPending}
-              disabled={!a.registered}
-            >
-              Authorize trading
-            </Button>
-          </>
-        )}
-        {(authorize.error || revoke.error) && (
-          <ErrorState message={errorMessage(authorize.error ?? revoke.error)} />
-        )}
-      </div>
+            {a.signer_authorized ? (
+              <>
+                <SummaryRows
+                  rows={[
+                    {
+                      label: "Expires",
+                      value: a.signer_expiry
+                        ? new Date(a.signer_expiry * 1000).toLocaleString()
+                        : null,
+                    },
+                  ]}
+                />
+                {!a.signer_expiry && (
+                  <p className="text-xs text-muted-foreground">
+                    The contract emits no event for a signer expiry, so this account does not
+                    report when the grant ends. Revoke to end it now.
+                  </p>
+                )}
+                <Button
+                  variant="ghost"
+                  className="w-full"
+                  onClick={() => revoke.mutate()}
+                  pending={revoke.isPending}
+                >
+                  Revoke trading authorization
+                </Button>
+              </>
+            ) : (
+              <>
+                <Segmented
+                  id="authorize-expiry"
+                  value={hours}
+                  onChange={setHours}
+                  options={EXPIRY}
+                  className="grid-cols-3"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Expires {new Date(expiry * 1000).toLocaleString()}.
+                </p>
+                <Button
+                  className="w-full"
+                  onClick={() => authorize.mutate(expiry)}
+                  pending={authorize.isPending}
+                  disabled={!a.registered}
+                >
+                  Authorize trading
+                </Button>
+              </>
+            )}
+            {(authorize.error || revoke.error) && (
+              <ErrorState message={errorMessage(authorize.error ?? revoke.error)} />
+            )}
+          </div>
+        </>
+      )}
     </Card>
   );
 }
 
 const Header = ({ children }: { children?: React.ReactNode }) => (
   <div className="flex items-center justify-between gap-3">
-    <h2 className="text-xs uppercase tracking-wide text-muted-foreground">Trading account</h2>
+    <SectionTitle>Kuru account</SectionTitle>
     {children}
   </div>
 );

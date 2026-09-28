@@ -41,8 +41,11 @@ export function WalletMenu() {
       await put.mutateAsync({
         signer_id: session.signerId,
         policy_id: session.policyId,
-        venues: ["kuru"],
-        markets: (markets.data ?? []).filter((m) => m.venue === "kuru").map((m) => m.id),
+        // perpl caps count margin in AUSD atoms, kuru counts what a trade spends
+        venues: ["kuru", "perpl"],
+        markets: (markets.data ?? [])
+          .filter((m) => m.venue === "kuru" || m.venue === "perpl")
+          .map((m) => m.id),
         max_notional_per_slice: perSlice,
         max_notional_total: total,
         expires_at: new Date(Date.now() + hours * 3_600_000).toISOString(),
@@ -71,7 +74,7 @@ export function WalletMenu() {
   if (!session.authenticated) {
     return (
       <Button variant="ghost" onClick={session.login} className="rounded-full">
-        Connect
+        Sign in
       </Button>
     );
   }

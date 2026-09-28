@@ -5,6 +5,9 @@ const TONE = {
   positive: "border-positive/30 bg-positive/10 text-positive",
   warning: "border-warning/30 bg-warning/10 text-warning",
   destructive: "border-destructive/30 bg-destructive/10 text-destructive",
+  // order side. teal is yield, so a long is never "positive"
+  long: "border-long/30 bg-long/10 text-long",
+  short: "border-short/30 bg-short/10 text-short",
 };
 
 export function Pill({

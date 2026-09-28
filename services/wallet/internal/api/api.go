@@ -38,6 +38,7 @@ type Store interface {
 	Intent(ctx context.Context, key string) (store.Intent, error)
 	Intents(ctx context.Context, userID string, limit int) ([]store.Intent, error)
 	SetIntentState(ctx context.Context, key, state string) error
+	SetOrderRef(ctx context.Context, key, orderID string, slot *int) error
 	RecordExecution(ctx context.Context, e store.Execution) error
 	Execution(ctx context.Context, key string) (store.Execution, error)
 	Executions(ctx context.Context, userID string, limit int) ([]store.Execution, error)
@@ -98,6 +99,10 @@ func (s *Server) Routes() http.Handler {
 	authed.HandleFunc("POST /v1/schedules", s.createSchedule)
 	authed.HandleFunc("GET /v1/schedules/{id}", s.getSchedule)
 	authed.HandleFunc("DELETE /v1/schedules/{id}", s.cancelSchedule)
+	authed.HandleFunc("GET /v1/perpl/account", s.getPerplAccount)
+	authed.HandleFunc("POST /v1/perpl/deposit", s.perplDeposit)
+	authed.HandleFunc("POST /v1/perpl/withdraw", s.perplWithdraw)
+	authed.HandleFunc("DELETE /v1/perpl/orders/{market_id}/{order_id}", s.cancelPerplOrder)
 
 	// the scheduler reads a delegation and dispatches slices for a user it
 	// cannot hold a token for; every other route stays token-only

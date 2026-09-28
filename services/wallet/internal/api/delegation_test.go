@@ -13,7 +13,7 @@ func TestPutDelegationValidation(t *testing.T) {
 	tests := []struct{ name, body, says string }{
 		{"no signer", `{"venues":["kuru"],"markets":["MON-USDC"],"max_notional_per_slice":"1","max_notional_total":"2","expires_at":"EXP"}`, "signer_id"},
 		{"empty allowlist", `{"signer_id":"s","venues":[],"markets":[],"max_notional_per_slice":"1","max_notional_total":"2","expires_at":"EXP"}`, "at least one"},
-		{"unknown venue", `{"signer_id":"s","venues":["perpl"],"markets":["MON-USDC"],"max_notional_per_slice":"1","max_notional_total":"2","expires_at":"EXP"}`, "venue"},
+		{"unknown venue", `{"signer_id":"s","venues":["binance"],"markets":["MON-USDC"],"max_notional_per_slice":"1","max_notional_total":"2","expires_at":"EXP"}`, "venue"},
 		{"fractional cap", `{"signer_id":"s","venues":["kuru"],"markets":["MON-USDC"],"max_notional_per_slice":"1.5","max_notional_total":"2","expires_at":"EXP"}`, "base units"},
 		{"slice cap above total", `{"signer_id":"s","venues":["kuru"],"markets":["MON-USDC"],"max_notional_per_slice":"3","max_notional_total":"2","expires_at":"EXP"}`, "larger than"},
 		{"already expired", `{"signer_id":"s","venues":["kuru"],"markets":["MON-USDC"],"max_notional_per_slice":"1","max_notional_total":"2","expires_at":"2020-01-01T00:00:00Z"}`, "future"},

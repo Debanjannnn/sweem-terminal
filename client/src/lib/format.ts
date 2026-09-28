@@ -26,3 +26,14 @@ export const formatSize = (n: number, digits = 4) =>
 
 export const truncateAddress = (a: string) =>
   a.length > 14 ? `${a.slice(0, 8)}…${a.slice(-6)}` : a;
+
+// a price at the market's own precision, so header, chart and legend agree digit for digit
+export const formatPrice = (n: number, decimals?: number) =>
+  decimals === undefined
+    ? formatUsd(n)
+    : n.toLocaleString("en-US", {
+        style: "currency",
+        currency: "USD",
+        minimumFractionDigits: decimals,
+        maximumFractionDigits: decimals,
+      });

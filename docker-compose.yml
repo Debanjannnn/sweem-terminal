@@ -101,6 +101,7 @@ services:
       REDIS_URL: *redis
       INTERNAL_SECRET: ${INTERNAL_SECRET}
       EXECUTOR_URL: http://executor:8083
+      KURU_GATEWAY_URL: ${KURU_GATEWAY_URL:-https://gateway.testnet.kuru.io}
 
   # sole signer; reachable only on the compose network
   executor:

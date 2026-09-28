@@ -1,4 +1,4 @@
-.PHONY: deps abi test test-integration up down logs infra e2e
+.PHONY: deps abi client-abi test test-integration up down logs infra e2e
 
 BINDINGS := internal/chain/bindings
 
@@ -10,6 +10,11 @@ abi:
 	mkdir -p $(BINDINGS)/factory $(BINDINGS)/basket
 	go tool abigen --abi abi/SweemBasketFactory.json --pkg factory --type SweemBasketFactory --out $(BINDINGS)/factory/factory.go
 	go tool abigen --abi abi/SweemBasket.json --pkg basket --type SweemBasket --out $(BINDINGS)/basket/basket.go
+
+client-abi:
+	mkdir -p client/src/abi
+	cp abi/SweemBasketFactory.json abi/SweemBasket.json client/src/abi/
+	cp contracts/deployments/10143.json client/src/abi/deployments.json
 
 test:
 	go test ./...

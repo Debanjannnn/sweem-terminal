@@ -18,7 +18,7 @@ const (
 	dupWindow = 2 * time.Hour
 )
 
-var streamSubjects = []string{"execution.>", "risk.>", "oracle.>", "schedule.>"}
+var streamSubjects = []string{"execution.>"}
 
 type Bus struct {
 	nc *nats.Conn

@@ -6,8 +6,7 @@ import (
 	"testing"
 )
 
-// The executor's own request structs, mirrored in Go the way scheduler mirrors
-// wallet's intentKey. Every field name and unit is copied from
+// The executor's own request structs, mirrored in Go. Every field name and unit is copied from
 // executor/src/route.rs; if either side renames or rescales one, this goes red
 // instead of a swap going out at 1e8 times the intended size.
 type (

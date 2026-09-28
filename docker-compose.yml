@@ -67,49 +67,7 @@ services:
         done
     networks: [backend]
 
-  market-data:
-    <<: *go-build
-    build:
-      context: .
-      dockerfile: Dockerfile.golang
-      args: {CMD_PATH: services/market-data/cmd/api}
-    environment:
-      <<: *chain-env
-      DATABASE_URL: postgres://sweem:sweem@postgres:5432/sweem?sslmode=disable
-      REDIS_URL: redis://redis:6379
-      NATS_URL: nats://nats:4222
-      INDEXER_URL: ${INDEXER_URL:-http://host.docker.internal:8090/v1/graphql}
-      KURU_API_URL: ${KURU_API_URL}
-      PERPL_API_URL: ${PERPL_API_URL}
-      PERPL_WS_URL: ${PERPL_WS_URL}
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
-    ports: ["8081:8081", "8082:8082"]
-    depends_on:
-      postgres: {condition: service_healthy}
-      redis: {condition: service_healthy}
-      migrate: {condition: service_completed_successfully}
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8081/health"]
-      <<: *health
-    networks: [edge, backend]
 
-  market-data-ingest:
-    build:
-      context: .
-      dockerfile: Dockerfile.golang
-      args: {CMD_PATH: services/market-data/cmd/ingest}
-    environment:
-      <<: *chain-env
-      DATABASE_URL: postgres://sweem:sweem@postgres:5432/sweem?sslmode=disable
-      REDIS_URL: redis://redis:6379
-      NATS_URL: nats://nats:4222
-      KURU_API_URL: ${KURU_API_URL}
-      PERPL_API_URL: ${PERPL_API_URL}
-      PERPL_WS_URL: ${PERPL_WS_URL}
-    depends_on:
-      redis: {condition: service_healthy}
-      nats: {condition: service_healthy}
-    networks: [backend]
 
   wallet:
     build:
@@ -120,8 +78,6 @@ services:
       <<: *chain-env
       DATABASE_URL: postgres://sweem:sweem@postgres:5432/sweem?sslmode=disable
       NATS_URL: nats://nats:4222
-      INDEXER_URL: ${INDEXER_URL:-http://host.docker.internal:8090/v1/graphql}
-      MARKET_DATA_URL: http://market-data:8081
       EXECUTOR_URL: http://executor:8083
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
       # deliberately NOT given PRIVY_APP_SECRET — wallet refuses to boot with it
@@ -131,7 +87,6 @@ services:
     depends_on:
       postgres: {condition: service_healthy}
       migrate: {condition: service_completed_successfully}
-      market-data: {condition: service_healthy}
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
       <<: *health
@@ -151,60 +106,6 @@ services:
       <<: *health
     networks: [backend]
 
-  scheduler:
-    build:
-      context: .
-      dockerfile: Dockerfile.golang
-      args: {CMD_PATH: services/scheduler/cmd/scheduler}
-    environment:
-      <<: *chain-env
-      DATABASE_URL: postgres://sweem:sweem@postgres:5432/sweem?sslmode=disable
-      NATS_URL: nats://nats:4222
-      WALLET_URL: http://wallet:8080
-      MARKET_DATA_URL: http://market-data:8081
-      INTERNAL_SECRET: ${INTERNAL_SECRET:?set INTERNAL_SECRET}
-      PRIVY_APP_ID: ${PRIVY_APP_ID:?set PRIVY_APP_ID}
-    depends_on:
-      wallet: {condition: service_healthy}
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8084/health"]
-      <<: *health
-    networks: [backend]
-
-  reconciler:
-    build:
-      context: .
-      dockerfile: Dockerfile.golang
-      args: {CMD_PATH: services/reconciler/cmd/reconciler}
-    environment:
-      <<: *chain-env
-      DATABASE_URL: postgres://sweem:sweem@postgres:5432/sweem?sslmode=disable
-      REDIS_URL: redis://redis:6379
-      NATS_URL: nats://nats:4222
-      INDEXER_URL: ${INDEXER_URL:-http://host.docker.internal:8090/v1/graphql}
-      MARKET_IDS: ${MARKET_IDS:-}
-    depends_on:
-      postgres: {condition: service_healthy}
-      redis: {condition: service_healthy}
-      migrate: {condition: service_completed_successfully}
-      nats: {condition: service_healthy}
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8085/health"]
-      <<: *health
-    networks: [backend]
-
-  oracle:
-    build:
-      context: ./oracle
-    env_file: [.env.oracle]
-    environment:
-      <<: *chain-env
-      DATABASE_URL: postgres://sweem:sweem@postgres:5432/sweem?sslmode=disable
-      NATS_URL: nats://nats:4222
-    depends_on:
-      postgres: {condition: service_healthy}
-      nats: {condition: service_healthy}
-    networks: [backend]
 
 # client runs outside compose on purpose: NEXT_PUBLIC_* bakes at build time,
 # so `cd client && bun dev` beats rebuilding an image per change.

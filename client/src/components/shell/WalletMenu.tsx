@@ -127,7 +127,7 @@ export function WalletMenu() {
           ) : (
             <>
               <p className="text-xs text-muted-foreground">
-                TWAP, DCA and grid run while you are logged out, so they need a delegated
+                Automation rules run while you are logged out, so they need a delegated
                 signer. Your keys stay with Privy; the limits below cap what it may spend.
               </p>
               {!session.signerConfigured && (

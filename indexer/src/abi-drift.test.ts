@@ -13,14 +13,9 @@ import { describe, expect, it } from "vitest";
 
 const root = (p: string) => fileURLToPath(new URL(`../../contracts/${p}`, import.meta.url));
 
-// SweemVault emits no deposit/withdraw events of its own: it is an ERC-4626 and
-// inherits OpenZeppelin's, so its ground truth spans two files.
-const SOURCES: Record<string, string[]> = {
-  SweemVault: ["src/SweemVault.sol", "lib/openzeppelin-contracts/contracts/interfaces/IERC4626.sol"],
-  MarketRegistry: ["src/MarketRegistry.sol"],
-  IndexOracle: ["src/IndexOracle.sol"],
-  IndexPerpEngine: ["src/IndexPerpEngine.sol"],
-};
+// contract name in config.yaml -> the Solidity files that declare its events,
+// relative to contracts/. Empty until contracts/src declares an indexed event.
+const SOURCES: Record<string, string[]> = {};
 
 // Kuru has no Solidity in this repo, so its ground truth is the topic0 the
 // deployed contracts actually emit, read off HyperSync on Monad testnet

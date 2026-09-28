@@ -19,7 +19,6 @@ enum Venue {
   VENUE_UNSPECIFIED = 0;
   VENUE_KURU = 1;
   VENUE_PERPL = 2;
-  VENUE_SWEEM = 3; // our IndexPerpEngine markets
 }
 
 enum Side {
@@ -32,13 +31,6 @@ enum OrderType {
   ORDER_TYPE_UNSPECIFIED = 0;
   ORDER_TYPE_MARKET = 1;
   ORDER_TYPE_LIMIT = 2;
-}
-
-enum ScheduleKind {
-  SCHEDULE_KIND_UNSPECIFIED = 0;
-  SCHEDULE_KIND_TWAP = 1;
-  SCHEDULE_KIND_DCA = 2;
-  SCHEDULE_KIND_GRID = 3;
 }
 
 // monad confirmation tiers: latest / safe / finalized

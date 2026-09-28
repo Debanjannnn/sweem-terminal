@@ -17,9 +17,6 @@ const toWad = (v: string, ctx: z.RefinementCtx): bigint => {
 const wad = (fallback: string) => z.string().default(fallback).transform(toWad);
 
 const schema = z.object({
-  ORACLE_PORT: z.coerce.number().int().default(8086),
-  LOG_LEVEL: z.string().default("info"),
-
   CHAIN_ID: z.coerce.number().int().default(10143),
   // pyth is a pull oracle: freshness is a property of the chain, not the feed.
   // monad mainnet updates every 5-7s, testnet is ~68h stale. so we read the price
@@ -44,28 +41,6 @@ const schema = z.object({
   // riskmetrics daily default. half-life ~11 samples, calibrated to a fixed interval.
   ORACLE_LAMBDA: wad("0.94"),
   ORACLE_WARMUP_SAMPLES: z.coerce.number().int().positive().default(30),
-  ORACLE_POWER_EXPONENTS: z
-    .string()
-    .default("2,0.5")
-    .transform((s, ctx) => s.split(",").map((k) => toWad(k, ctx))),
-  // empty -> the first observed sample
-  ORACLE_PRICE0: z
-    .string()
-    .default("")
-    .transform((s, ctx) => (s.trim() === "" ? null : toWad(s, ctx))),
-
-  ORACLE_MAX_DEVIATION: wad("0.10"),
-  // republish unchanged values this often, so IndexOracle.read()'s staleness guard
-  // (1h at deploy) never trips on a quiet market.
-  ORACLE_HEARTBEAT_MS: z.coerce.number().int().positive().default(300_000),
-
-  PROTOCOL_SIGNER_KEY: bytes32.optional(),
-  VOL_INDEX_ORACLE: address.optional(),
-  POWER2_INDEX_ORACLE: address.optional(),
-  POWER_HALF_INDEX_ORACLE: address.optional(),
-
-  DATABASE_URL: z.string(),
-  NATS_URL: z.string().optional(),
 });
 
 export type OracleEnv = z.infer<typeof schema>;
@@ -91,7 +66,3 @@ export const pythFeedId = (env: OracleEnv): `0x${string}` =>
     "MON/USD": env.PYTH_FEED_MON_USD,
     "BTC/USD": env.PYTH_FEED_BTC_USD,
   })[env.ORACLE_UNDERLYING] as `0x${string}`;
-
-// mirrored in contracts/script/Deploy.s.sol; feedId = keccak256(bytes(these))
-export const volMarketId = (underlying: string) => `sweem:vol:${underlying}`;
-export const powerMarketId = (underlying: string, k: bigint) => `sweem:pow:${underlying}:k=${k}`;

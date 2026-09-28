@@ -27,7 +27,6 @@ import {
   type PerplAccount,
   type Portfolio,
   type Quote,
-  type Schedule,
 } from "./api";
 
 // the ws pushes books, ticks and candles, so nothing here polls them
@@ -112,14 +111,6 @@ export const useExecutions = () =>
 
 export const usePortfolio = () => useAuthedQuery<Portfolio>(["portfolio"], "/v1/portfolio");
 
-export const useSchedules = () =>
-  useAuthedQuery<{ schedules: Schedule[] }>(["schedules"], "/v1/schedules");
-
-// the list omits slices; only the single-schedule read carries them
-export const useSchedule = (id: string | null) =>
-  useAuthedQuery<Schedule>(["schedule", id], `/v1/schedules/${id}`, { enabled: !!id });
-
-// 404 here means "not delegated", which is a state, not a failure to retry
 export const useDelegation = () =>
   useAuthedQuery<Delegation>(["delegation"], "/v1/delegation", { retry: false });
 
@@ -270,44 +261,6 @@ export function useCancelPerplOrder() {
       qc.invalidateQueries({ queryKey: ["executions"] });
       qc.invalidateQueries({ queryKey: ["perpl-account"] });
     },
-  });
-}
-
-export type ScheduleInput = {
-  kind: "twap" | "dca" | "grid";
-  market_id: string;
-  venue: string;
-  side: "buy" | "sell";
-  total: string;
-  slice_count?: number;
-  window_seconds?: number;
-  cadence_seconds?: number;
-  levels?: unknown;
-  idempotency_key: string;
-};
-
-export function useCreateSchedule() {
-  const { token } = useSession();
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: async (input: ScheduleInput) =>
-      walletFetch<Schedule>("/v1/schedules", await token(), {
-        method: "POST",
-        body: JSON.stringify(input),
-      }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["schedules"] }),
-  });
-}
-
-export function useCancelSchedule() {
-  const { token } = useSession();
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: async (id: string) =>
-      walletFetch<{ cancelled: boolean }>(`/v1/schedules/${id}`, await token(), {
-        method: "DELETE",
-      }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["schedules"] }),
   });
 }
 

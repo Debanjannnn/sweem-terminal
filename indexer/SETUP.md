@@ -73,19 +73,10 @@ cd main/indexer && ln -s ../.env .env
 |---|---|
 | `ENVIO_API_TOKEN` | preflight throws. Nothing indexes. |
 | `ENVIO_START_BLOCK` | defaults to `0`; correct but rescans the chain. |
-| `SWEEM_VAULT` | zero address; no LP curve, no share price. |
-| `MARKET_REGISTRY` | zero address; no markets — **and no oracles**, since feeds are discovered from `MarketAdded`. |
-| `INDEX_PERP_ENGINE` | zero address; no positions, no funding/borrow. |
 | `KURU_MARKETS` | falls back to the four live testnet markets. Format is a YAML flow list: `["0xaa..","0xbb.."]`. A bare comma list fails codegen with `invalid address`. |
 | `KURU_ACCOUNT_CORE` | falls back to `0x6384e9b2Bf3b65e1535403a0A543b5FDA905eE22`. Absent from `.env` is the normal case. |
 | `HASURA_EXTERNAL_PORT` | GraphQL lands on 8080 and collides with `wallet`. Set `8090`. |
 | `ENVIO_BLOCK_LAG` | **do not set.** Config default `5` = FINALITY_DEPTH. Only blocks ≥5 behind head are indexed, which is what makes `rollback_on_reorg: false` correct rather than reckless. `bun run test` sets `0` because the test framework's synthetic block source never advances past the last simulated block and a non-zero lag hangs forever. Nothing else may lower it. |
-
-There is no `INDEX_ORACLE` var. The deployment has three oracle contracts and
-every one is registered dynamically by `contractRegister` on `MarketAdded`,
-which carries both an `indexOracle` and a `volOracle` per market. Markets
-sharing a vol oracle hand the same address to `IndexOracle.add` twice; envio's
-address store dedupes it.
 
 Postgres and runtime vars are envio's own defaults (`ENVIO_PG_*`, `ENVIO_TUI`,
 `ENVIO_HASURA`, `ENVIO_INDEXER_PORT` — `/healthz` and `/metrics` on 9898).
@@ -96,7 +87,7 @@ Postgres and runtime vars are envio's own defaults (`ENVIO_PG_*`, `ENVIO_TUI`,
 cd main/indexer
 bun install
 bunx envio codegen     # regenerates .envio/types.d.ts
-bun run test           # abi drift + scale + vault reducer, no network
+bun run test           # abi drift + scale + kuru decoder, no network
 bunx envio local docker up   # envio-postgres (ENVIO_PG_PORT) + envio-hasura (8090)
 bunx envio start             # codegen + migrate + track Hasura + index
 ```
@@ -119,19 +110,13 @@ bun installs the `envio-darwin-arm64` native addon and runs `codegen` fine.
 
 ```sh
 docker exec envio-postgres psql -U postgres -d envio-dev \
-  -c 'select "totalAssets","totalShares","sharePrice","lpCount" from public."Vault";' \
-  -c 'select kind,assets from public."VaultFlow";' \
-  -c 'select count(*) from public."Market";' \
-  -c 'select id,"publicationCount" from public."IndexFeed" order by id;' \
   -c 'select count(*) from public."KuruFill";' \
   -c 'select count(*) from public."KuruSlot";' \
   -c 'select id,free,reserved from public."KuruBalance" limit 5;'
 ```
 
-Everything stored is WAD, widened once in `src/scale.ts`: a 250,000 USDC seed
-deposit whose raw log says `250000000000` (6dp) reads back as
-`250000000000000000000000`. Zero rows means the bindings are wrong — run the
-drift test.
+Kuru rows stay in raw venue units (see schema.graphql). Zero rows means the
+bindings are wrong — run the drift test.
 
 Sync health:
 

@@ -6,7 +6,6 @@ solc = "0.8.28"
 optimizer = true
 optimizer_runs = 200
 via_ir = true
-fs_permissions = [{ access = "read-write", path = "./deployments" }]
 
 [profile.default.fuzz]
 runs = 256
@@ -18,3 +17,4 @@ fail_on_revert = false
 
 [rpc_endpoints]
 monad_testnet = "${MONAD_RPC_URL}"
+monadt = "https://testnet-rpc.monad.xyz"  # test/spikes/perpl

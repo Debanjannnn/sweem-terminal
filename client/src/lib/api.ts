@@ -137,12 +137,6 @@ export type Tick = {
   side: string;
   ts: number;
 };
-export type IndexFrame = {
-  marketId: string;
-  value: string;
-  roundId?: string;
-  publishedAt?: number;
-};
 export type Quote = {
   marketId: string;
   venue: string;
@@ -251,37 +245,6 @@ export type Portfolio = {
   positions: PortfolioPosition[];
   degraded: string[];
   updated_at: string;
-};
-
-export type SliceState = "pending" | "dispatched" | "filled" | "failed" | "skipped";
-
-export type Slice = {
-  schedule_id: string;
-  slice_index: number;
-  due_at: string;
-  amount: string;
-  state: SliceState;
-  intent_key?: string;
-  skip_reason?: string;
-  generation: number;
-};
-
-export type Schedule = {
-  id: string;
-  user_id: string;
-  kind: "twap" | "dca" | "grid";
-  market_id: string;
-  venue: string;
-  side: string;
-  total: string;
-  slice_count: number;
-  window_seconds: number;
-  cadence_seconds: number;
-  levels?: unknown;
-  state: string;
-  idempotency_key: string;
-  created_at: string;
-  slices?: Slice[];
 };
 
 export type Delegation = {

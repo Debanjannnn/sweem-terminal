@@ -29,7 +29,7 @@ type delegationView struct {
 	Live bool `json:"live"`
 }
 
-// getDelegation also answers the scheduler, which passes ?user= alongside its
+// getDelegation also answers an internal caller (keeper), which passes ?user= alongside its
 // internal secret because it holds no token for that user.
 func (s *Server) getDelegation(w http.ResponseWriter, r *http.Request) {
 	did, ok := privyauth.DIDFromContext(r.Context())

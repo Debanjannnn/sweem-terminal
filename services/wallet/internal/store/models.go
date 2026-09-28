@@ -1,7 +1,6 @@
 package store
 
 import (
-	"encoding/json"
 	"time"
 )
 
@@ -70,34 +69,4 @@ type Execution struct {
 	Error        string     `json:"error,omitempty"`
 	SubmittedAt  time.Time  `json:"submitted_at"`
 	SettledAt    *time.Time `json:"settled_at,omitempty"`
-}
-
-type Schedule struct {
-	ID             string          `json:"id"`
-	UserID         string          `json:"user_id"`
-	Kind           string          `json:"kind"`
-	MarketID       string          `json:"market_id"`
-	Venue          string          `json:"venue"`
-	Side           string          `json:"side"`
-	Total          string          `json:"total"`
-	SliceCount     int             `json:"slice_count"`
-	WindowSeconds  int64           `json:"window_seconds"`
-	CadenceSeconds int64           `json:"cadence_seconds"`
-	Levels         json.RawMessage `json:"levels,omitempty"`
-	State          string          `json:"state"`
-	IdempotencyKey string          `json:"idempotency_key"`
-	CreatedAt      time.Time       `json:"created_at"`
-	Slices         []Slice         `json:"slices,omitempty"`
-}
-
-type Slice struct {
-	ScheduleID string    `json:"schedule_id"`
-	Index      int       `json:"slice_index"`
-	DueAt      time.Time `json:"due_at"`
-	Amount     string    `json:"amount"`
-	State      string    `json:"state"`
-	IntentKey  string    `json:"intent_key,omitempty"`
-	SkipReason string    `json:"skip_reason,omitempty"`
-	// grid levels re-arm and fire again on the same index; twap/dca stay at 0
-	Generation int `json:"generation"`
 }

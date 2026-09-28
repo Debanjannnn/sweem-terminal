@@ -3,14 +3,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "bun run src/index.ts",
-    "dev": "bun --watch src/index.ts",
     "build": "tsc -p tsconfig.json",
     "test": "bun test"
   },
   "dependencies": {
-    "nats": "^2.29.3",
-    "postgres": "^3.4.9",
     "viem": "^2.56.8",
     "zod": "^4.6.5"
   },

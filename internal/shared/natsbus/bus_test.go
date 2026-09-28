@@ -27,9 +27,6 @@ func TestBackoff(t *testing.T) {
 func TestSubjectsCoveredByStream(t *testing.T) {
 	subjects := []string{
 		SubjExecutionPending, SubjExecutionSettled, SubjExecutionFailed,
-		SubjOracleIndexPublished,
-		SubjRiskLiquidationCandidate, SubjRiskBreakerTripped,
-		SubjScheduleSliceDue,
 	}
 	for _, s := range subjects {
 		if !covered(s) {

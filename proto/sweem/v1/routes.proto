@@ -7,7 +7,6 @@ enum ServiceOwner {
   SERVICE_OWNER_WALLET = 1;
   SERVICE_OWNER_MARKET_DATA = 2;
   SERVICE_OWNER_EXECUTOR = 3;
-  SERVICE_OWNER_SCHEDULER = 4;
   SERVICE_OWNER_RECONCILER = 5;
 }
 
@@ -25,10 +24,6 @@ enum RouteName {
   ROUTE_NAME_LIST_ORDERS = 8; // GET /v1/orders
   ROUTE_NAME_GET_PORTFOLIO = 9; // GET /v1/portfolio
   ROUTE_NAME_LIST_EXECUTIONS = 10; // GET /v1/executions
-  ROUTE_NAME_LIST_SCHEDULES = 11; // GET /v1/schedules
-  ROUTE_NAME_CREATE_SCHEDULE = 12; // POST /v1/schedules
-  ROUTE_NAME_GET_SCHEDULE = 13; // GET /v1/schedules/{id}
-  ROUTE_NAME_CANCEL_SCHEDULE = 14; // DELETE /v1/schedules/{id}
   ROUTE_NAME_CANCEL_ORDER = 15; // DELETE /v1/orders/{market_id}/{slot_idx}
   ROUTE_NAME_GET_KURU_ACCOUNT = 16; // GET /v1/account
   ROUTE_NAME_KURU_DEPOSIT = 17; // POST /v1/account/deposit
@@ -51,7 +46,6 @@ enum RouteName {
   ROUTE_NAME_EXECUTOR_ACCOUNT_AUTHORIZE = 36; // POST /account/authorize, internal only
   ROUTE_NAME_EXECUTOR_ACCOUNT_REVOKE = 37; // POST /account/revoke, internal only
 
-  ROUTE_NAME_SCHEDULER_HEALTH = 40; // GET /health
   ROUTE_NAME_RECONCILER_HEALTH = 50; // GET /health
 }
 

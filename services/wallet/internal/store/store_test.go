@@ -1,7 +1,6 @@
 package store
 
 import (
-	"encoding/json"
 	"slices"
 	"testing"
 )
@@ -32,14 +31,5 @@ func TestClampLimit(t *testing.T) {
 		if got := clampLimit(tt.in); got != tt.want {
 			t.Errorf("clampLimit(%d) = %d, want %d", tt.in, got, tt.want)
 		}
-	}
-}
-
-func TestNullableJSON(t *testing.T) {
-	if nullableJSON(nil) != nil || nullableJSON(json.RawMessage("null")) != nil {
-		t.Error("an absent levels document must be stored as SQL NULL")
-	}
-	if nullableJSON(json.RawMessage(`[{"price":"1"}]`)) == nil {
-		t.Error("a real levels document was dropped")
 	}
 }

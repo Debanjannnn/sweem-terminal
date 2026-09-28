@@ -8,7 +8,6 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -39,8 +38,6 @@ type fakeStore struct {
 	delegations map[string]policy.Delegation
 	intents     map[string]store.Intent
 	execs       map[string]store.Execution
-	schedules   map[string]store.Schedule
-	slices      map[string]store.Slice
 	kuru        map[string]store.KuruAccount
 
 	insertAttempts int
@@ -53,13 +50,9 @@ func newFakeStore() *fakeStore {
 		delegations: map[string]policy.Delegation{},
 		intents:     map[string]store.Intent{},
 		execs:       map[string]store.Execution{},
-		schedules:   map[string]store.Schedule{},
-		slices:      map[string]store.Slice{},
 		kuru:        map[string]store.KuruAccount{},
 	}
 }
-
-func sliceKey(id string, i int) string { return id + ":" + strconv.Itoa(i) }
 
 func (f *fakeStore) Ping(context.Context) error { return f.pingErr }
 
@@ -220,80 +213,6 @@ func (f *fakeStore) Executions(_ context.Context, userID string, _ int) ([]store
 		}
 	}
 	return out, nil
-}
-
-func (f *fakeStore) CreateSchedule(_ context.Context, sc store.Schedule, slices []store.Slice) (store.Schedule, error) {
-	for _, existing := range f.schedules {
-		if existing.UserID == sc.UserID && existing.IdempotencyKey == sc.IdempotencyKey {
-			return existing, nil
-		}
-	}
-	sc.ID = fmt.Sprintf("00000000-0000-4000-8000-%012d", len(f.schedules)+1)
-	sc.State, sc.CreatedAt = "active", time.Now()
-	for _, sl := range slices {
-		sl.ScheduleID, sl.State = sc.ID, "pending"
-		f.slices[sliceKey(sc.ID, sl.Index)] = sl
-		sc.Slices = append(sc.Slices, sl)
-	}
-	f.schedules[sc.ID] = sc
-	return sc, nil
-}
-
-func (f *fakeStore) Schedule(_ context.Context, id, userID string) (store.Schedule, error) {
-	sc, ok := f.schedules[id]
-	if !ok || sc.UserID != userID {
-		return store.Schedule{}, store.ErrNotFound
-	}
-	return sc, nil
-}
-
-func (f *fakeStore) Schedules(_ context.Context, userID string) ([]store.Schedule, error) {
-	out := []store.Schedule{}
-	for _, sc := range f.schedules {
-		if sc.UserID == userID {
-			out = append(out, sc)
-		}
-	}
-	return out, nil
-}
-
-func (f *fakeStore) CancelSchedule(_ context.Context, id, userID string) error {
-	sc, ok := f.schedules[id]
-	if !ok || sc.UserID != userID || sc.State == "cancelled" {
-		return store.ErrNotFound
-	}
-	sc.State = "cancelled"
-	f.schedules[id] = sc
-	return nil
-}
-
-func (f *fakeStore) PauseScheduleRevoked(_ context.Context, id string) error {
-	sc, ok := f.schedules[id]
-	if !ok {
-		return store.ErrNotFound
-	}
-	sc.State = "paused_revoked"
-	f.schedules[id] = sc
-	return nil
-}
-
-func (f *fakeStore) DispatchTarget(_ context.Context, id string, index int, userID string) (store.Schedule, store.Slice, error) {
-	sc, ok := f.schedules[id]
-	sl, hasSlice := f.slices[sliceKey(id, index)]
-	if !ok || !hasSlice || sc.UserID != userID {
-		return store.Schedule{}, store.Slice{}, store.ErrNotFound
-	}
-	return sc, sl, nil
-}
-
-func (f *fakeStore) MarkSlice(_ context.Context, id string, index int, state, intentKey, skipReason string) error {
-	sl, ok := f.slices[sliceKey(id, index)]
-	if !ok {
-		return store.ErrNotFound
-	}
-	sl.State, sl.IntentKey, sl.SkipReason = state, intentKey, skipReason
-	f.slices[sliceKey(id, index)] = sl
-	return nil
 }
 
 // fakeExecutor records every write call and the path it arrived on, so a test
@@ -528,10 +447,6 @@ func TestRoutesRequireAuth(t *testing.T) {
 		{http.MethodDelete, "/v1/account/authorize"},
 		{http.MethodGet, "/v1/portfolio"},
 		{http.MethodGet, "/v1/executions"},
-		{http.MethodGet, "/v1/schedules"},
-		{http.MethodPost, "/v1/schedules"},
-		{http.MethodGet, "/v1/schedules/00000000-0000-4000-8000-000000000001"},
-		{http.MethodDelete, "/v1/schedules/00000000-0000-4000-8000-000000000001"},
 		{http.MethodPost, "/v1/internal/slices/00000000-0000-4000-8000-000000000001/0/dispatch"},
 	}
 	for _, rt := range routes {
@@ -564,7 +479,6 @@ func TestInternalSecretOpensOnlyItsOwnRoutes(t *testing.T) {
 		{http.MethodPost, "/v1/account/authorize"},
 		{http.MethodGet, "/v1/me"},
 		{http.MethodPut, "/v1/delegation"},
-		{http.MethodPost, "/v1/schedules"},
 		{http.MethodGet, "/v1/portfolio"},
 	}
 	for _, rt := range closed {

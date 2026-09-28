@@ -4,9 +4,8 @@ export const WAD = 10n ** 18n;
 
 export const USDC_DECIMALS = 6;
 
-// SweemVault overrides _decimalsOffset() to 12 on a 6-decimal asset, so shares
-// are already 18dp and sharesToWad is the identity. explicit so the assumption
-// is visible; if the offset changes, this constant changes.
+// 18dp shares make sharesToWad the identity. explicit so the assumption is
+// visible; if a share token's decimals change, this constant changes.
 export const SHARE_DECIMALS = 18;
 
 export const SECONDS_PER_YEAR = 365n * 24n * 60n * 60n;

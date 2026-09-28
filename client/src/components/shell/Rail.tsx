@@ -14,7 +14,7 @@ export function Rail() {
   return (
     <aside className="flex w-[var(--rail-width)] shrink-0 flex-col items-center gap-1.5 border-r border-border bg-card py-4">
       <Link
-        href="/spot"
+        href="/"
         aria-label="sweem"
         className="mb-4 grid size-10 place-items-center rounded-xl bg-primary text-sm font-semibold text-primary-foreground"
       >

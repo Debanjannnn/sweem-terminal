@@ -1,14 +1,13 @@
-# sweem-terminal
+# sweem baskets
 
-A trading terminal on Monad. Spot, perps, and two markets that exist nowhere else.
+Tokenized crypto baskets on Monad. Deposit USDC, the basket contract market-buys
+its components (MON / WETH / cbBTC) on Kuru, and you get ERC-20 shares back.
+Redeem sells at NAV. A protected variant also holds a Perpl short as a synthetic put.
 
 **Make your money sweem.**
 
-Your Privy embedded wallet holds the funds and is the master wallet. A delegated signer
-executes trades on your behalf — including while you are logged out, which is what makes
-TWAP, DCA and grid possible at all. Privy is the technical custodian of the key material;
-our backend never holds a private key, only an authorization key that instructs Privy's
-enclave to sign within a policy you granted. Revocation is one button.
+> Mid-pivot from sweem-terminal. The services below are kept infra; the basket
+> contract, keepers and basket UI are not written yet.
 
 ---
 
@@ -21,7 +20,7 @@ enclave to sign within a policy you granted. Revocation is one button.
                                  |  access token (ES256)
                                  v
   +------------------------------------------------------------------+
-  | client        Next.js :3000   spot · perp · twap · dca · grid     |
+  | client        Next.js :3000   Privy shell, portfolio              |
   +------------------------------------------------------------------+
         |  HTTP, Bearer JWT                    |  WS, unauthenticated
         v                                      v
@@ -29,30 +28,25 @@ enclave to sign within a policy you granted. Revocation is one button.
   | wallet    Go :8080     |        | market-data   Go :8081 / ws 8082|
   | auth, delegation,      |<-------| kuru + perpl ingest, ticks,     |
   | policy, intents,       |  read  | candles, L2 book, quotes        |
-  | schedules, portfolio   |        +--------------------------------+
+  | portfolio              |        +--------------------------------+
   | ONLY client of executor|                   ^        |
   +-----------+------------+                   |        | redis / nats
         |     | postgres                       |        v
         |     v                          +-----+----+  +------------+
         |  users, delegations,           | indexer  |  | reconciler |
-        |  intents, schedules,           | envio    |  | Go :8085   |
-        |  slices, executions            | finalized|  | D+2 truth  |
-        |                                +----------+  +------------+
-        | POST /route                          ^              |
-        v                                      |              v
-  +------------------------+            +------+------+   execution.settled
-  | executor   Rust :8083  |            |  oracle     |
-  | NO HOST PORT           |            |  vol + power|
-  | the ONLY thing         |            +------+------+
-  | that signs             |                   | pushIndex
-  +-----------+------------+                   v
-        |                              IndexOracle (ours)
-        v                                      |
-   Privy -> your wallet -> Kuru / Perpl / IndexPerpEngine
-
-  +-------------------+
-  | scheduler Go :8084|  decides WHEN. never signs.
-  +-------------------+
+        |  intents, executions           | envio    |  | Go :8085   |
+        |                                | finalized|  | D+2 truth  |
+        | POST /route                    +----------+  +------------+
+        v                                                     |
+  +------------------------+                                  v
+  | executor   Rust :8083  |                          execution.settled
+  | NO HOST PORT           |
+  | the ONLY thing         |
+  | that signs             |
+  +-----------+------------+
+        |
+        v
+   Privy -> your wallet -> Kuru / Perpl
 ```
 
 Two invariants the whole design rests on:
@@ -61,31 +55,19 @@ Two invariants the whole design rests on:
 
 > **Signing authority lives in exactly one process.**
 
-The scheduler's decision is a *trigger*, not an authorization. It can be crashed,
+Any automated caller (a keeper) is a *trigger*, not an authorization. It can be crashed,
 restarted, or accidentally run twice without risking funds, because `wallet` re-checks
 delegation, caps, policy and balance before the executor is ever called.
 
 | service | lang | port | does | never does |
 |---|---|---|---|---|
 | `client` | TS/Next 15 | 3000 | render, hold the Privy session, grant/revoke delegation | talk to the executor |
-| `wallet` | Go | 8080 | auth, delegation, policy, intents, schedules, portfolio | sign, derive market data |
+| `wallet` | Go | 8080 | auth, delegation, policy, intents, portfolio | sign, derive market data |
 | `executor` | Rust | 8083 internal | build calldata, sign via Privy, submit | decide *whether* to trade |
 | `market-data` | Go | 8081/8082 | venue ingest, candles, book, browser fanout | sign, write chain |
-| `scheduler` | Go | 8084 | tick TWAP/DCA/grid, decide when | sign, bypass wallet |
 | `reconciler` | Go | 8085 | chain truth, D+2 finality, settle executions | sign, serve the browser |
-| `oracle` | TS | — | sample price, EWMA vol, power index, publish | trade |
+| `oracle` | TS | — | library only: Pyth/Chainlink price reads + EWMA vol (prices protection) | run, publish |
 | `indexer` | TS/Envio | 8090 | finalized events → GraphQL | read speculative state |
-
----
-
-## The three products
-
-**Spot** routes to Kuru, Monad's CLOB.
-
-**Perps** routes to Perpl. **Power** and **Velocity** are ours — they do not exist on any
-other Monad venue. `oracle` samples a price, computes realized volatility by EWMA, and
-publishes σ as the Velocity index; the Power markets' funding rate `k(k-1)/2·σ²` is
-derived from that same σ. One service, one sample, two products, mechanically coupled.
 
 ---
 
@@ -125,7 +107,8 @@ which nothing else may read — `PRIVY_APP_SECRET` and `PRIVY_AUTHORIZATION_PRIV
 `ENVIO_API_TOKEN` is required for the indexer; HyperSync has no unauthenticated mode.
 
 ```sh
-make test     # go + cargo + forge
+make test     # go + cargo + forge (spikes excluded) + oracle math
+make test-spikes  # contracts/test/spikes: live-fork Kuru + Perpl probes, slow
 make check    # vet + clippy + client build
 make routes   # replay every client-built URL against the owning service
 ```
@@ -142,11 +125,11 @@ instead, generated into each consumer and committed.
 ```
 proto/            buf: routes, domain types, NATS events -> Go, Rust, TS
 internal/shared/  Go packages every service imports
-services/         wallet, market-data, scheduler, reconciler
+services/         wallet, market-data, reconciler
 executor/         Rust, its own cargo workspace
-contracts/        Foundry
+contracts/        Foundry (src/ empty; test/spikes/ = Kuru + Perpl fork probes)
 client/           Next.js       (bun)
-oracle/           TS            (bun)
+oracle/           TS, EWMA vol math + price sources (bun)
 indexer/          Envio         (bun)
 infra/            terraform + ansible
 ```
@@ -161,11 +144,6 @@ owning service's mux and fails on a miss.
 
 ## Status
 
-Kuru is currently blocked on one unknown address: the Router documented by Kuru is not
-paired with the markets its own API serves (`verifiedMarket()` is false for all four, and
-`anyToAnySwap` reverts `InvalidMarket()`). The executor fails safely — the revert happens
-in the quote simulation, before anything is signed — and `KURU_ROUTER` is an env
-override, so resolving it is a config change. See `../tasks/kuru-abi-findings.md`.
-
-Everything else — Perpl, Power, Velocity, the oracle, delegation, scheduling — is
-independent of that.
+Pivoting. Contracts for the old power/velocity perps, the scheduler (TWAP/DCA/grid)
+and the oracle publisher are removed. Next: basket contract on Kuru mainnet v1
+(`placeAndExecuteMarketBuy/Sell`), Perpl hedge, keepers, basket UI.

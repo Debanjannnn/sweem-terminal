@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/sweem-terminal/sweem-terminal/internal/shared/config"
-	"github.com/sweem-terminal/sweem-terminal/internal/shared/indexerclient"
 	"github.com/sweem-terminal/sweem-terminal/services/wallet/internal/executor"
 	"github.com/sweem-terminal/sweem-terminal/services/wallet/internal/marketdata"
 	"github.com/sweem-terminal/sweem-terminal/services/wallet/internal/store"
@@ -45,7 +44,6 @@ func liveHarness(t *testing.T) (*harness, string) {
 		Store:              db,
 		Market:             marketdata.New(config.GetEnv("MARKET_DATA_URL", "http://localhost:8081")),
 		Executor:           executor.New(config.GetEnv("EXECUTOR_URL", "http://localhost:8083")),
-		Indexer:            indexerclient.New(),
 		Auth:               h.auth,
 		Log:                slog.New(slog.NewTextHandler(io.Discard, nil)),
 		ChainID:            int64(config.GetEnvInt("CHAIN_ID", 10143)),
@@ -159,12 +157,6 @@ func TestLiveSpotJourney(t *testing.T) {
 	}
 	if code, p := h.as(t, user, "GET", "/v1/portfolio", ""); code != http.StatusOK {
 		t.Fatalf("portfolio: %d %v", code, p)
-	}
-
-	// a schedule is refused for the same reason the order was
-	if code, _ := h.as(t, user, "POST", "/v1/schedules",
-		`{"kind":"twap","market_id":"`+market+`","venue":"kuru","side":"buy","total":"100000000","slice_count":4,"window_seconds":3600,"idempotency_key":"it-s"}`); code != http.StatusPreconditionFailed {
-		t.Fatalf("schedule without a kuru account: %d, want 412", code)
 	}
 
 	// a perp order for a wallet the executor cannot prove is refused before signing

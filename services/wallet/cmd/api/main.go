@@ -13,7 +13,6 @@ import (
 	"github.com/sweem-terminal/sweem-terminal/internal/shared/chains"
 	"github.com/sweem-terminal/sweem-terminal/internal/shared/config"
 	"github.com/sweem-terminal/sweem-terminal/internal/shared/httpx"
-	"github.com/sweem-terminal/sweem-terminal/internal/shared/indexerclient"
 	"github.com/sweem-terminal/sweem-terminal/internal/shared/natsbus"
 	"github.com/sweem-terminal/sweem-terminal/internal/shared/privyauth"
 	"github.com/sweem-terminal/sweem-terminal/services/wallet/internal/api"
@@ -64,7 +63,6 @@ func run(log *slog.Logger) error {
 		Store:              db,
 		Market:             marketdata.New(config.GetEnv("MARKET_DATA_URL", "http://localhost:8081")),
 		Executor:           executor.New(config.GetEnv("EXECUTOR_URL", "http://localhost:8083")),
-		Indexer:            indexerclient.New(),
 		Auth:               verifier,
 		Internal:           privyauth.InternalAuth{Secret: config.GetEnv("INTERNAL_SECRET", "")},
 		Bus:                bus,

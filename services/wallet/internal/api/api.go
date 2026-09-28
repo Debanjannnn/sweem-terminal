@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/sweem-terminal/sweem-terminal/internal/shared/httpx"
-	"github.com/sweem-terminal/sweem-terminal/internal/shared/indexerclient"
 	"github.com/sweem-terminal/sweem-terminal/internal/shared/natsbus"
 	"github.com/sweem-terminal/sweem-terminal/internal/shared/privyauth"
 	"github.com/sweem-terminal/sweem-terminal/services/wallet/internal/executor"
@@ -42,21 +41,12 @@ type Store interface {
 	RecordExecution(ctx context.Context, e store.Execution) error
 	Execution(ctx context.Context, key string) (store.Execution, error)
 	Executions(ctx context.Context, userID string, limit int) ([]store.Execution, error)
-
-	CreateSchedule(ctx context.Context, sc store.Schedule, slices []store.Slice) (store.Schedule, error)
-	Schedule(ctx context.Context, id, userID string) (store.Schedule, error)
-	Schedules(ctx context.Context, userID string) ([]store.Schedule, error)
-	CancelSchedule(ctx context.Context, id, userID string) error
-	PauseScheduleRevoked(ctx context.Context, id string) error
-	DispatchTarget(ctx context.Context, scheduleID string, index int, userID string) (store.Schedule, store.Slice, error)
-	MarkSlice(ctx context.Context, scheduleID string, index int, state, intentKey, skipReason string) error
 }
 
 type Server struct {
 	Store    Store
 	Market   *marketdata.Client
 	Executor *executor.Client
-	Indexer  *indexerclient.Client
 	Auth     *privyauth.Verifier
 	Internal privyauth.InternalAuth
 	Bus      *natsbus.Bus
@@ -95,22 +85,17 @@ func (s *Server) Routes() http.Handler {
 	authed.HandleFunc("DELETE /v1/orders/{market_id}/{slot_idx}", s.cancelOrder)
 	authed.HandleFunc("GET /v1/portfolio", s.portfolio)
 	authed.HandleFunc("GET /v1/executions", s.listExecutions)
-	authed.HandleFunc("GET /v1/schedules", s.listSchedules)
-	authed.HandleFunc("POST /v1/schedules", s.createSchedule)
-	authed.HandleFunc("GET /v1/schedules/{id}", s.getSchedule)
-	authed.HandleFunc("DELETE /v1/schedules/{id}", s.cancelSchedule)
 	authed.HandleFunc("GET /v1/perpl/account", s.getPerplAccount)
 	authed.HandleFunc("POST /v1/perpl/deposit", s.perplDeposit)
 	authed.HandleFunc("POST /v1/perpl/withdraw", s.perplWithdraw)
 	authed.HandleFunc("DELETE /v1/perpl/orders/{market_id}/{order_id}", s.cancelPerplOrder)
 
-	// the scheduler reads a delegation and dispatches slices for a user it
-	// cannot hold a token for; every other route stays token-only
+	// an internal caller (keeper) reads a delegation for a user it cannot hold
+	// a token for; every other route stays token-only
 	internal := func(h http.HandlerFunc) http.Handler {
 		return s.Auth.MiddlewareAllowingInternal(s.Internal, h)
 	}
 	mux.Handle("GET /v1/delegation", internal(s.getDelegation))
-	mux.Handle("POST /v1/internal/slices/{schedule_id}/{slice_index}/dispatch", internal(s.dispatchSlice))
 
 	mux.Handle("/v1/", s.Auth.Middleware(authed))
 	return httpx.Logging(s.log(), mux)

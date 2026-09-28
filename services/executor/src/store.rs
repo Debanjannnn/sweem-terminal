@@ -45,7 +45,8 @@ pub async fn load(db: &Db, id: &str) -> Result<Option<Execution>, String> {
     let row = conn(db)
             .await?
         .query_opt(
-            "select e.status, e.kind, e.amount::text, e.min_out::text, s.active, s.basket,
+            // the scheduler deactivates a stop-loss when it claims the fire, so its one execution still counts as active
+            "select e.status, e.kind, e.amount::text, e.min_out::text, s.active or s.kind = 'stop_loss', s.basket,
                     coalesce(e.amount <= s.max_per_run_usdc * 1000000, false),
                     d.privy_wallet_id, d.wallet_address
              from executions e

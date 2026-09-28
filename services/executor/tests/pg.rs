@@ -92,6 +92,15 @@ async fn execution_state_machine() {
     let id = exec(&inactive, "mint", "1000000").await;
     assert_eq!(call(&app, "scheduler", &secret, "/api/v1/user/mint", &body(&id)).await.1["error"], "schedule_inactive");
 
+    // a fired stop-loss is inactive by design (scheduler's fire-once claim); its redeem must still pass
+    let sl: String = db.query_one(
+        "insert into schedules(user_id,basket,kind,stop_nav_per_share,redeem_bps,max_slippage_bps,max_per_run_usdc,active)
+         values ($1,'0xe0b3baafa8edd1db95b49e62ea0fb18c04353870','stop_loss',1,5000,50,10,false) returning id::text",
+        &[&user],
+    ).await.unwrap().get(0);
+    let id = exec(&sl, "redeem", "1").await;
+    assert!(store::load(&app.db, &id).await.unwrap().unwrap().schedule_active);
+
     // conditional transitions: the path a real send takes
     let id = exec(&active, "mint", "1000000").await;
     assert!(store::transition(&app.db, &id, "pending", "submitted", None).await.unwrap());

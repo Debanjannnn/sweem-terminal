@@ -59,11 +59,15 @@ async fn indexes_from_start_block_idempotently() {
 
     run_to_head(&cfg).await;
     let blue = db
-        .query_one("select symbol, jsonb_array_length(components) from baskets where address = '0xe0b3baafa8edd1db95b49e62ea0fb18c04353870'", &[])
+        .query_one("select symbol, jsonb_array_length(components), creator from baskets where address = '0xe0b3baafa8edd1db95b49e62ea0fb18c04353870'", &[])
         .await
         .unwrap();
     assert_eq!(blue.get::<_, String>(0), "BLUE");
     assert!(blue.get::<_, i32>(1) > 0);
+    assert_eq!(
+        blue.get::<_, Option<String>>(2).as_deref(),
+        Some("0x6a8846d4c910911181a73cae3910cc981354ef74")
+    );
     let n: i64 = db
         .query_one("select count(*) from market_allowlist where allowed", &[])
         .await

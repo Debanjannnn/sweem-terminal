@@ -24,7 +24,7 @@ var (
 type Store interface {
 	EnsureUser(ctx context.Context, did string) error
 	User(ctx context.Context, did string) (User, error)
-	Baskets(ctx context.Context) ([]Basket, error)
+	Baskets(ctx context.Context, creator string) ([]Basket, error)
 	Basket(ctx context.Context, addr string) (Basket, error)
 	NavHistory(ctx context.Context, addr string, from, to time.Time) ([]NavPoint, error)
 	Positions(ctx context.Context, did string) ([]Position, error)
@@ -113,7 +113,12 @@ func reply[T any](w http.ResponseWriter, what string, v T, err error) {
 func addr(r *http.Request) string { return strings.ToLower(r.PathValue("address")) }
 
 func (s *Server) baskets(w http.ResponseWriter, r *http.Request) {
-	v, err := s.Store.Baskets(r.Context())
+	creator := r.URL.Query().Get("creator")
+	if creator != "" && !isAddress(creator) {
+		httpx.Error(w, http.StatusBadRequest, "invalid_creator")
+		return
+	}
+	v, err := s.Store.Baskets(r.Context(), strings.ToLower(creator))
 	reply(w, "baskets", v, err)
 }
 
@@ -326,6 +331,7 @@ type Basket struct {
 	Components   json.RawMessage `json:"components"`
 	CreatedBlock int64           `json:"createdBlock"`
 	CreatedTx    string          `json:"createdTx"`
+	Creator      *string         `json:"creator"`
 	Nav          *Nav            `json:"nav"`
 	Stats        *BasketStats    `json:"stats,omitempty"`
 }

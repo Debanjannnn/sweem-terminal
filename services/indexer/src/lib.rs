@@ -24,6 +24,7 @@ impl Indexer {
     /// `name` keys the row in `indexer_cursor`.
     pub async fn new(cfg: &config::Config, name: &str) -> Result<Self> {
         let db = store::connect(&cfg.database_url).await?;
+        store::backfill_creators(&db, name).await?;
         let (baskets, markets) = store::known(&db).await?;
         Ok(Indexer {
             name: name.into(),
@@ -78,6 +79,7 @@ impl Indexer {
                     log_index: l.log_index,
                     block: l.block as i64,
                     ts: l.ts,
+                    from: l.from,
                     event,
                 });
             }

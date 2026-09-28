@@ -39,7 +39,7 @@ func scanDelegation(row pgx.CollectableRow) (Delegation, error) {
 	return d, err
 }
 
-const basketSQL = `select b.address, b.name, b.symbol, b.components, b.created_block, b.created_tx,
+const basketSQL = `select b.address, b.name, b.symbol, b.components, b.created_block, b.created_tx, b.creator,
   n.nav_per_share::text, n.total_nav::text, n.supply::text, n.ts
 from baskets b left join lateral (
   select * from nav_points where basket=b.address order by ts desc limit 1) n on true`
@@ -48,15 +48,16 @@ func scanBasket(row pgx.CollectableRow) (Basket, error) {
 	var b Basket
 	var nps, tn, sup *string
 	var ts *time.Time
-	err := row.Scan(&b.Address, &b.Name, &b.Symbol, &b.Components, &b.CreatedBlock, &b.CreatedTx, &nps, &tn, &sup, &ts)
+	err := row.Scan(&b.Address, &b.Name, &b.Symbol, &b.Components, &b.CreatedBlock, &b.CreatedTx, &b.Creator, &nps, &tn, &sup, &ts)
 	if nps != nil {
 		b.Nav = &Nav{NavPerShare: *nps, TotalNav: *tn, Supply: *sup, Ts: *ts}
 	}
 	return b, err
 }
 
-func (p PG) Baskets(ctx context.Context) ([]Basket, error) {
-	rows, _ := p.DB.Query(ctx, basketSQL+` order by b.created_block, b.address`)
+// Baskets lists all baskets, or only creator's when creator != "".
+func (p PG) Baskets(ctx context.Context, creator string) ([]Basket, error) {
+	rows, _ := p.DB.Query(ctx, basketSQL+` where $1 = '' or b.creator = $1 order by b.created_block, b.address`, creator)
 	return collect(rows, scanBasket)
 }
 

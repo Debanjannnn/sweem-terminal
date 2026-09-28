@@ -8,6 +8,7 @@ pub struct Row {
     pub log_index: i32,
     pub block: i64,
     pub ts: i64,
+    pub from: Option<String>,
     pub event: Event,
 }
 
@@ -36,6 +37,16 @@ pub async fn known(db: &Client) -> Result<(BTreeSet<String>, BTreeSet<String>)> 
     ))
 }
 
+/// Rewinds `name` to startBlock while any basket lacks a creator; re-processing is idempotent and fills it.
+pub async fn backfill_creators(db: &Client, name: &str) -> Result<()> {
+    db.execute(
+        "delete from indexer_cursor where name = $1 and exists (select 1 from baskets where creator is null)",
+        &[&name],
+    )
+    .await?;
+    Ok(())
+}
+
 /// Writes rows (in chain order) and advances the cursor atomically.
 pub async fn write(db: &mut Client, name: &str, rows: &[Row], cursor: u64) -> Result<()> {
     let tx = db.transaction().await?;
@@ -58,9 +69,10 @@ pub async fn write(db: &mut Client, name: &str, rows: &[Row], cursor: u64) -> Re
                 components,
             } => {
                 tx.execute(
-                    "insert into baskets (address, name, symbol, components, created_block, created_tx)
-                     values ($1, $2, $3, $4, $5, $6) on conflict do nothing",
-                    &[basket, name, symbol, components, b, h],
+                    "insert into baskets (address, name, symbol, components, created_block, created_tx, creator)
+                     values ($1, $2, $3, $4, $5, $6, $7)
+                     on conflict (address) do update set creator = coalesce(excluded.creator, baskets.creator)",
+                    &[basket, name, symbol, components, b, h, &r.from],
                 )
                 .await?;
             }

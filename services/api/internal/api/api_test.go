@@ -106,7 +106,10 @@ func (f *fakeStore) CreateSchedule(_ context.Context, did string, in ScheduleInp
 	return Schedule{ID: "s1", Basket: in.Basket}, f.err
 }
 func (f *fakeStore) DeactivateSchedule(_ context.Context, did, id string) error { return f.err }
-func (f *fakeStore) Baskets(context.Context) ([]Basket, error)                  { return []Basket{}, f.err }
+func (f *fakeStore) Baskets(_ context.Context, creator string) ([]Basket, error) {
+	f.calls = append(f.calls, "baskets "+creator)
+	return []Basket{}, f.err
+}
 
 func TestHandlers(t *testing.T) {
 	const wallet = `0x00000000000000000000000000000000000000Bb`
@@ -118,6 +121,8 @@ func TestHandlers(t *testing.T) {
 		bodyHas                       string
 	}{
 		{"public baskets", "GET", "/api/v1/baskets", "", "", nil, nil, 200, "[]"},
+		{"baskets by creator", "GET", "/api/v1/baskets?creator=" + wallet, "", "", nil, nil, 200, "[]"},
+		{"baskets bad creator", "GET", "/api/v1/baskets?creator=0x1", "", "", nil, nil, 400, "invalid_creator"},
 		{"no token", "GET", "/api/v1/me", "", "", nil, nil, 401, "unauthorized"},
 		{"bad token", "GET", "/api/v1/me/schedules", "nope", "", nil, nil, 401, "unauthorized"},
 		{"delegation ok", "POST", "/api/v1/me/delegation", "good", `{"walletId":"w1","walletAddress":"` + wallet + `"}`, nil, nil, 200, `"walletAddress":"0x00000000000000000000000000000000000000bb"`},
@@ -148,6 +153,9 @@ func TestHandlers(t *testing.T) {
 		body, _ := io.ReadAll(w.Body)
 		if w.Code != tc.code || !strings.Contains(string(body), tc.bodyHas) {
 			t.Errorf("%s: %d %s", tc.name, w.Code, body)
+		}
+		if tc.name == "baskets by creator" && st.calls[0] != "baskets 0x00000000000000000000000000000000000000bb" {
+			t.Errorf("creator arg: %v", st.calls)
 		}
 		if tc.name == "delegation ok" && st.calls[1] != "put did:privy:u1 w1 0x00000000000000000000000000000000000000bb q1" {
 			t.Errorf("put args: %v", st.calls)

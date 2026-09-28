@@ -61,8 +61,8 @@ func TestFlow(t *testing.T) {
 		wallet = "0x00000000000000000000000000000000000000bb"
 	)
 	seed := `
-insert into baskets values ('` + b1 + `','Blue','BLU','[{"market":"0xm","token":"0xt","weightBps":10000}]',10,'0xc1'),
-                           ('` + b2 + `','Red','RED','[]',11,'0xc2');
+insert into baskets values ('` + b1 + `','Blue','BLU','[{"market":"0xm","token":"0xt","weightBps":10000}]',10,'0xc1','` + wallet + `'),
+                           ('` + b2 + `','Red','RED','[]',11,'0xc2',null);
 insert into mints values ('0x1',0,'` + b1 + `','` + wallet + `',10000000,10000000000000000000,100,now()-interval '3 min'),
                          ('0x2',0,'` + b1 + `','` + wallet + `',5000000,5000000000000000000,101,now()-interval '2 min'),
                          ('0x3',0,'` + b1 + `','0xother',1000000,1000000000000000000,101,now()-interval '2 min'),
@@ -97,10 +97,21 @@ insert into nav_points values ('` + b1 + `',now()-interval '2 min',1.0,16,16),('
 	if len(baskets) != 2 || baskets[0].Nav == nil || baskets[0].Nav.NavPerShare != "1.25" || baskets[1].Nav != nil {
 		t.Fatalf("baskets: %+v", baskets)
 	}
+	if baskets[0].Creator == nil || *baskets[0].Creator != wallet || baskets[1].Creator != nil {
+		t.Fatalf("creators: %+v", baskets)
+	}
+	call("GET", "/api/v1/baskets?creator=0x00000000000000000000000000000000000000BB", "", 200, &baskets)
+	if len(baskets) != 1 || baskets[0].Address != b1 {
+		t.Fatalf("by creator: %+v", baskets)
+	}
+	call("GET", "/api/v1/baskets?creator=nope", "", 400, nil)
 	var bd Basket
 	call("GET", "/api/v1/baskets/0x00000000000000000000000000000000000000A1", "", 200, &bd)
 	if s := bd.Stats; s == nil || s.Mints != 3 || s.Redeems != 1 || s.UsdcInRaw != "16000000" || s.SharesRaw != "13000000000000000000" || s.Holders != 2 {
 		t.Fatalf("stats: %+v", bd.Stats)
+	}
+	if bd.Creator == nil || *bd.Creator != wallet {
+		t.Fatalf("detail creator: %+v", bd.Creator)
 	}
 	call("GET", "/api/v1/baskets/0xnope", "", 404, nil)
 	var nav []NavPoint

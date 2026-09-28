@@ -46,7 +46,7 @@ export default function BasketPage() {
         <Panel className="mx-auto max-w-md p-8 text-center">
           <p className="text-lg font-medium">Basket not found</p>
           <p className="mt-2 text-sm text-muted-foreground">No basket lives at {shortHash(address)}.</p>
-          <Link href="/invest" className="mt-5 inline-block">
+          <Link href="/" className="mt-5 inline-block">
             <Button variant="ghost">All baskets</Button>
           </Link>
         </Panel>
@@ -68,7 +68,7 @@ export default function BasketPage() {
     <main className="w-full px-4 pb-24 pt-8">
       <Reveal className="mx-auto w-full max-w-6xl space-y-6">
         <Link
-          href="/invest"
+          href="/"
           className="inline-flex items-center gap-2 text-sm text-muted-foreground transition-colors hover:text-foreground"
         >
           <ArrowLeft className="size-4" />

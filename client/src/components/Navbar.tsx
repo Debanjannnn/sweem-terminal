@@ -16,7 +16,7 @@ import { cn } from "@/lib/utils";
 import { Spinner, useDismissable } from "./ui";
 
 const NAV = [
-  { label: "Invest", href: "/invest" },
+  { label: "Invest", href: "/" },
   { label: "Create", href: "/create" },
   { label: "Portfolio", href: "/portfolio" },
 ] as const;
@@ -47,7 +47,7 @@ export function Navbar() {
           </Link>
           <nav className="flex items-center gap-0.5">
             {NAV.map((item) => {
-              const active = pathname.startsWith(item.href);
+              const active = item.href === "/" ? pathname === "/" || pathname.startsWith("/baskets") : pathname.startsWith(item.href);
               return (
                 <Link
                   key={item.href}

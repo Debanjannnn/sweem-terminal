@@ -94,7 +94,7 @@ export default function PortfolioPage() {
             ) : held.length === 0 ? (
               <div className="flex items-center justify-between p-5 text-sm">
                 <span className="text-muted-foreground">No positions yet.</span>
-                <Link href="/invest" className="underline underline-offset-4 hover:no-underline">
+                <Link href="/" className="underline underline-offset-4 hover:no-underline">
                   Browse baskets
                 </Link>
               </div>

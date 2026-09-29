@@ -44,7 +44,7 @@ export default function PortfolioPage() {
 
   if (ready && !authenticated) {
     return (
-      <main className="w-full px-4 pb-24 pt-16">
+      <main className="w-full px-4 pb-24 pt-16 md:px-6">
         <Panel className="mx-auto w-full max-w-md p-8 text-center">
           <h1 className="text-lg font-medium">Your portfolio</h1>
           <p className="mt-2 text-sm text-muted-foreground">Log in to see your holdings, baskets and automations.</p>
@@ -105,7 +105,7 @@ export default function PortfolioPage() {
   const total = rows.reduce((s, r) => s + (r.value ?? 0), 0) + (mon ? Number(formatUnits(mon, 18)) * monPx : 0);
 
   return (
-    <main className="w-full px-4 pb-24 pt-8">
+    <main className="w-full px-4 pb-24 pt-8 md:px-6">
       <div className="mx-auto w-full space-y-6">
         <header className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-3">

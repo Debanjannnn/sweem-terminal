@@ -49,7 +49,7 @@ export default function BasketPage() {
 
   if (basket.error === "not_found")
     return (
-      <main className="w-full px-4 pb-24 pt-8">
+      <main className="w-full px-4 pb-24 pt-8 md:px-6">
         <Panel className="mx-auto max-w-md p-8 text-center">
           <p className="text-lg font-medium">Basket not found</p>
           <p className="mt-2 text-sm text-muted-foreground">No basket lives at {shortHash(address)}.</p>

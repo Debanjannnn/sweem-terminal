@@ -79,7 +79,7 @@ export function CreateBasket() {
   }
 
   return (
-    <main className="w-full px-4 pt-8 pb-24">
+    <main className="w-full px-4 pt-8 pb-24 md:px-6">
       <div className="mx-auto w-full space-y-6">
         <div>
           <h1 className="text-xl font-medium sm:text-2xl">Create a basket</h1>

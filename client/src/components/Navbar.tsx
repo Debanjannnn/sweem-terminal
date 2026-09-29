@@ -3,7 +3,7 @@
 import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Check, Copy, Menu, Wallet as WalletIcon } from "lucide-react";
 import { zeroAddress } from "viem";
 import { errMsg, fmtTime, shortHash } from "@/lib/api";
@@ -25,6 +25,13 @@ export function Navbar() {
   const pathname = usePathname();
   const { ready, authenticated, login } = useSession();
   const { open: menuOpen, setOpen: setMenuOpen, ref: menuRef } = useDismissable();
+  const [scrolled, setScrolled] = useState(false);
+  useEffect(() => {
+    const on = () => setScrolled(window.scrollY > 4);
+    on();
+    window.addEventListener("scroll", on, { passive: true });
+    return () => window.removeEventListener("scroll", on);
+  }, []);
   const isActive = (href: string) =>
     href === "/" ? pathname === "/" || pathname.startsWith("/baskets") : pathname.startsWith(href);
   const links = (cls: string) =>
@@ -44,9 +51,14 @@ export function Navbar() {
     ));
 
   return (
-    // solid + hairline unless the home hero search is on screen (html[data-hero], set by HeroSearch)
-    <header className="sticky top-0 z-40 w-full border-b border-border bg-background transition-colors duration-200 [html[data-hero]_&]:border-transparent [html[data-hero]_&]:bg-transparent">
-      <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-4 px-4 py-3 sm:px-6">
+    // transparent at the top of every page; solid + hairline once scrolled
+    <header
+      className={cn(
+        "sticky top-0 z-40 w-full border-b transition-colors duration-200",
+        scrolled ? "border-border bg-background/90 backdrop-blur-md" : "border-transparent bg-transparent",
+      )}
+    >
+      <div className="mx-auto grid h-16 w-full max-w-[1400px] grid-cols-[1fr_auto_1fr] items-center gap-4 px-4 md:px-6">
         <Link href="/" className="flex items-center gap-2 justify-self-start text-2xl font-semibold tracking-tight">
           <Image src="/sweem-mark.png" alt="" width={26} height={26} priority unoptimized className="size-[26px]" />
           sweem

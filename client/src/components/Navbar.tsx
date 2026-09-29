@@ -58,7 +58,7 @@ export function Navbar() {
         scrolled ? "border-border bg-background/90 backdrop-blur-md" : "border-transparent bg-transparent",
       )}
     >
-      <div className="mx-auto grid h-16 w-full max-w-[1400px] grid-cols-[1fr_auto_1fr] items-center gap-4 px-4 md:px-6">
+      <div className="grid h-16 w-full grid-cols-[1fr_auto_1fr] items-center gap-4 px-4 md:px-6">
         <Link href="/" className="flex items-center gap-2 justify-self-start text-2xl font-semibold tracking-tight">
           <Image src="/sweem-mark.png" alt="" width={26} height={26} priority unoptimized className="size-[26px]" />
           sweem

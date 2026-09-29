@@ -13,7 +13,7 @@ import { TokenIcon } from "@/components/TokenIcon";
 import { IconStack } from "@/components/invest/BasketCard";
 import { symbolOf, useMarkets } from "@/components/invest/extras";
 import { cn } from "@/lib/utils";
-import { evenSplit, pctToBps, weightsError } from "./weights";
+import { evenSplit, pctToBps, setWeight, weightsError } from "./weights";
 
 const FAUCET_URL = "https://faucet.monad.xyz";
 const LOW_GAS = 10n ** 16n; // 0.01 MON
@@ -53,7 +53,10 @@ export function CreateBasket() {
   };
   const toggle = (m: string) =>
     resplit(picks.some((p) => p.market === m) ? picks.filter((p) => p.market !== m).map((p) => p.market) : [...picks.map((p) => p.market), m]);
-  const setBps = (i: number, bps: number) => setPicks(picks.map((p, j) => (j === i ? { ...p, bps } : p)));
+  const setBps = (i: number, bps: number) => {
+    const w = setWeight(picks.map((p) => p.bps), i, bps);
+    setPicks(picks.map((p, j) => ({ ...p, bps: w[j] })));
+  };
 
   const wErr = weightsError(picks.map((p) => p.bps));
   const sum = picks.reduce((s, p) => s + p.bps, 0);

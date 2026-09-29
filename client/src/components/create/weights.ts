@@ -11,6 +11,12 @@ export function pctToBps(s: string): number | null {
   return bps <= TOTAL_BPS ? bps : null;
 }
 
+// sets w[i] to bps, capped at what the other legs leave of 100%
+export const setWeight = (w: number[], i: number, bps: number): number[] => {
+  const others = w.reduce((a, b, j) => (j === i ? a : a + b), 0);
+  return w.map((x, j) => (j === i ? Math.max(0, Math.min(bps, TOTAL_BPS - others)) : x));
+};
+
 export const weightsError = (w: number[]): string | null => {
   if (w.length === 0) return "Pick at least one market";
   if (w.some((x) => x <= 0)) return "Every weight must be above 0%";

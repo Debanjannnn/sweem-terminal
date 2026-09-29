@@ -84,13 +84,14 @@ export function BasketSearch() {
       <button
         type="button"
         onClick={() => setOpen(true)}
-        className="group flex w-[320px] cursor-pointer items-center justify-between gap-2 rounded-full border border-white/10 bg-card px-3 py-1.5 text-sm text-muted-foreground transition-[opacity,translate,border-color] duration-200 hover:border-white/15 hover:text-foreground [html[data-hero]_&]:pointer-events-none [html[data-hero]_&]:translate-y-1 [html[data-hero]_&]:opacity-0"
+        aria-label="Search baskets"
+        className="group flex size-9 cursor-pointer items-center justify-center gap-2 rounded-full border border-white/10 bg-card text-sm text-muted-foreground transition-[opacity,translate,border-color] duration-200 hover:border-white/15 hover:text-foreground md:w-[320px] md:justify-between md:px-3 [html[data-hero]_&]:pointer-events-none [html[data-hero]_&]:translate-y-1 [html[data-hero]_&]:opacity-0"
       >
         <span className="flex items-center gap-2">
           <Search className="size-4" />
-          Find baskets…
+          <span className="hidden md:inline">Find baskets…</span>
         </span>
-        <span className="flex gap-1">
+        <span className="hidden gap-1 md:flex">
           <Kbd className="h-5 min-w-5 text-[11px]">⌘</Kbd>
           <Kbd className="h-5 min-w-5 text-[11px]">K</Kbd>
         </span>

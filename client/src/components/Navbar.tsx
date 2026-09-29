@@ -3,8 +3,8 @@
 import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useState } from "react";
-import { Check, Copy, Wallet as WalletIcon } from "lucide-react";
+import { useState } from "react";
+import { Check, Copy, Menu, Wallet as WalletIcon } from "lucide-react";
 import { zeroAddress } from "viem";
 import { errMsg, fmtTime, shortHash } from "@/lib/api";
 import { addressUrl, USDC } from "@/lib/config";
@@ -13,7 +13,6 @@ import { fmtUnits, tokenOf } from "@/lib/tokens";
 import { readBalance, readNextClaimAt, useTx } from "@/lib/tx";
 import { cn } from "@/lib/utils";
 import { BasketSearch } from "./BasketSearch";
-import { TabPill } from "./motion";
 import { Spinner, useDismissable } from "./ui";
 
 const NAV = [
@@ -25,52 +24,55 @@ const NAV = [
 export function Navbar() {
   const pathname = usePathname();
   const { ready, authenticated, login } = useSession();
-  const [scrolled, setScrolled] = useState(false);
-  useEffect(() => {
-    const on = () => setScrolled(window.scrollY > 4);
-    on();
-    window.addEventListener("scroll", on, { passive: true });
-    return () => window.removeEventListener("scroll", on);
-  }, []);
-
-  return (
-    <header className="sticky top-0 z-40 w-full px-3 pt-3 sm:px-6">
-      <div
+  const { open: menuOpen, setOpen: setMenuOpen, ref: menuRef } = useDismissable();
+  const isActive = (href: string) =>
+    href === "/" ? pathname === "/" || pathname.startsWith("/baskets") : pathname.startsWith(href);
+  const links = (cls: string) =>
+    NAV.map((item) => (
+      <Link
+        key={item.href}
+        href={item.href}
+        onClick={() => setMenuOpen(false)}
         className={cn(
-          "mx-auto grid w-full max-w-[1400px] grid-cols-[1fr_auto] items-center gap-4 rounded-2xl bg-card/60 py-2 pr-2 pl-4 backdrop-blur-xl transition-shadow duration-300 md:grid-cols-[1fr_minmax(0,360px)_1fr]",
-          scrolled && "shadow-[0_8px_30px_-8px_rgb(0_0_0/0.6)]",
+          cls,
+          "font-medium transition-colors duration-150",
+          isActive(item.href) ? "text-foreground" : "text-muted-foreground hover:text-foreground",
         )}
       >
-        <div className="flex items-center gap-5">
-          <Link href="/" className="flex items-center gap-2 text-lg font-semibold tracking-tight">
-            <Image src="/sweem-mark.png" alt="" width={26} height={26} priority unoptimized className="size-[26px]" />
-            sweem
-          </Link>
-          <nav className="hidden items-center gap-1 sm:flex">
-            {NAV.map((item) => {
-              const active = item.href === "/" ? pathname === "/" || pathname.startsWith("/baskets") : pathname.startsWith(item.href);
-              return (
-                <Link
-                  key={item.href}
-                  href={item.href}
-                  className={cn(
-                    "relative rounded-full px-3.5 py-1.5 text-sm font-medium transition-colors",
-                    active ? "text-foreground" : "text-muted-foreground hover:text-foreground",
-                  )}
-                >
-                  {active && <TabPill id="navbar" className="rounded-full bg-secondary" />}
-                  <span className="relative">{item.label}</span>
-                </Link>
-              );
-            })}
+        {item.label}
+      </Link>
+    ));
+
+  return (
+    // solid + hairline unless the home hero search is on screen (html[data-hero], set by HeroSearch)
+    <header className="sticky top-0 z-40 w-full border-b border-border bg-background transition-colors duration-200 [html[data-hero]_&]:border-transparent [html[data-hero]_&]:bg-transparent">
+      <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-4 px-4 py-3 sm:px-6">
+        <Link href="/" className="flex items-center gap-2 justify-self-start text-2xl font-semibold tracking-tight">
+          <Image src="/sweem-mark.png" alt="" width={26} height={26} priority unoptimized className="size-[26px]" />
+          sweem
+        </Link>
+
+        <BasketSearch />
+
+        <div className="flex items-center justify-end gap-2 sm:gap-6">
+          <nav aria-label="Main navigation" className="hidden items-center gap-6 md:flex">
+            {links("inline-flex h-10 items-center px-2 text-[15px]")}
           </nav>
-        </div>
-
-        <div className="hidden justify-center md:flex">
-          <BasketSearch />
-        </div>
-
-        <div className="flex items-center justify-end gap-2">
+          <div className="relative md:hidden" ref={menuRef}>
+            <button
+              onClick={() => setMenuOpen((o) => !o)}
+              aria-expanded={menuOpen}
+              aria-label="Menu"
+              className="grid size-9 place-items-center rounded-full text-muted-foreground transition-colors hover:text-foreground"
+            >
+              <Menu className="size-5" />
+            </button>
+            {menuOpen && (
+              <nav className="absolute right-0 top-full z-50 mt-2 flex w-44 flex-col rounded-xl border border-border bg-popover p-1 shadow-xl">
+                {links("rounded-lg px-3 py-2 text-sm hover:bg-secondary")}
+              </nav>
+            )}
+          </div>
           {!ready ? (
             <Spinner />
           ) : authenticated ? (
@@ -78,9 +80,10 @@ export function Navbar() {
           ) : (
             <button
               onClick={login}
-              className="rounded-xl bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+              className="inline-flex h-9 items-center rounded-full bg-primary px-3.5 text-sm font-semibold whitespace-nowrap text-primary-foreground transition-[background-color,scale] duration-150 hover:bg-primary/90 active:scale-[0.96]"
             >
-              Sign up / Log in
+              <span className="sm:hidden">Log in</span>
+              <span className="hidden sm:inline">Sign up / Log in</span>
             </button>
           )}
         </div>
@@ -110,7 +113,7 @@ function WalletMenu() {
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
         aria-label="Wallet"
-        className="tnum inline-flex items-center gap-2 rounded-xl bg-secondary px-3.5 py-2 text-sm font-medium transition-colors hover:bg-accent"
+        className="tnum inline-flex h-9 items-center gap-2 rounded-full bg-secondary px-3.5 text-sm font-medium transition-colors hover:bg-accent"
       >
         <WalletIcon className="size-4 text-muted-foreground" />
         {address ? shortHash(address) : "Connected"}

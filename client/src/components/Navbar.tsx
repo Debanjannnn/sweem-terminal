@@ -2,9 +2,9 @@
 
 import Image from "next/image";
 import Link from "next/link";
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { usePathname } from "next/navigation";
 import { useState } from "react";
-import { Check, Copy, Search, Wallet as WalletIcon } from "lucide-react";
+import { Check, Copy, Wallet as WalletIcon } from "lucide-react";
 import { zeroAddress } from "viem";
 import { errMsg, fmtTime, shortHash } from "@/lib/api";
 import { addressUrl, USDC } from "@/lib/config";
@@ -12,6 +12,7 @@ import { useAsync, useSession } from "@/lib/session";
 import { fmtUnits, tokenOf } from "@/lib/tokens";
 import { readBalance, readNextClaimAt, useTx } from "@/lib/tx";
 import { cn } from "@/lib/utils";
+import { BasketSearch } from "./BasketSearch";
 import { Spinner, useDismissable } from "./ui";
 
 const NAV = [
@@ -22,15 +23,7 @@ const NAV = [
 
 export function Navbar() {
   const pathname = usePathname();
-  const router = useRouter();
-  const q = useSearchParams().get("q") ?? "";
   const { ready, authenticated, login } = useSession();
-  // live-filter on /, otherwise jump to / on Enter
-  const go = (v: string, replace: boolean) => {
-    const url = v.trim() ? `/?q=${encodeURIComponent(v.trim())}` : "/";
-    if (replace) router.replace(url, { scroll: false });
-    else router.push(url);
-  };
 
   return (
     <header className="sticky top-0 z-40 w-full border-b border-border bg-background/85 backdrop-blur">
@@ -59,27 +52,9 @@ export function Navbar() {
           </nav>
         </div>
 
-        <form
-          role="search"
-          className="hidden md:block"
-          onSubmit={(e) => {
-            e.preventDefault();
-            go(new FormData(e.currentTarget).get("q") as string, false);
-          }}
-        >
-          <label className="flex items-center gap-2 rounded-xl bg-secondary/70 px-3 py-2">
-            <Search className="size-4 shrink-0 text-muted-foreground" />
-            <span className="sr-only">Search baskets</span>
-            <input
-              key={pathname === "/" ? "home" : pathname}
-              name="q"
-              defaultValue={pathname === "/" ? q : ""}
-              onChange={(e) => pathname === "/" && go(e.target.value, true)}
-              placeholder="Search baskets"
-              className="w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
-            />
-          </label>
-        </form>
+        <div className="hidden justify-center md:flex">
+          <BasketSearch />
+        </div>
 
         <div className="flex items-center justify-end gap-2">
           {!ready ? (

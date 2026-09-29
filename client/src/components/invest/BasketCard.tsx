@@ -17,13 +17,15 @@ export function IconStack({ symbols, size, ring }: { symbols: string[]; size: nu
   );
 }
 
-export function ChangeText({ value, className }: { value: number | null | undefined; className?: string }) {
+// usd: absolute $ change (4dp) instead of %
+export function ChangeText({ value, usd, className }: { value: number | null | undefined; usd?: boolean; className?: string }) {
   if (value === null || value === undefined) return <span className={cn("text-muted-foreground", className)}>—</span>;
-  const up = Number(value.toFixed(2)) >= 0;
+  const d = usd ? 4 : 2;
+  const up = Number(value.toFixed(d)) >= 0;
   return (
     <span className={cn("inline-flex items-center gap-1 font-mono", up ? "text-positive" : "text-destructive", className)}>
       <span aria-hidden className={cn("text-[0.6em]", !up && "rotate-180")}>▲</span>
-      {Math.abs(value).toFixed(2)}%
+      {usd ? `$${Math.abs(value).toFixed(d)}` : `${Math.abs(value).toFixed(d)}%`}
     </span>
   );
 }

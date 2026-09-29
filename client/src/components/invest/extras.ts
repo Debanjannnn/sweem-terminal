@@ -3,8 +3,8 @@ import { useAsync } from "@/lib/session";
 import { baseToken } from "@/lib/tokens";
 import type { Basket, Market } from "@/lib/types";
 
-// liquid: false = mint quote unavailable (a component book has no asks), null = unknown
-export type Extras = { change: number | null; liquid: boolean | null };
+// hist: 24h navPerShare series; liquid: false = mint quote unavailable (a component book has no asks), null = unknown
+export type Extras = { hist: number[]; change: number | null; liquid: boolean | null };
 
 export function change24h(hist: { navPerShare: string }[]): number | null {
   if (hist.length < 2) return null;
@@ -14,8 +14,9 @@ export function change24h(hist: { navPerShare: string }[]): number | null {
 }
 
 async function extrasOf(address: string): Promise<Extras> {
-  const [hist, quote] = await Promise.allSettled([getNavHistory(address), getQuote(address, "mint", 1_000_000n)]);
+  const [hist, quote] = await Promise.allSettled([getNavHistory(address, new Date(Date.now() - 864e5), new Date()), getQuote(address, "mint", 1_000_000n)]);
   return {
+    hist: hist.status === "fulfilled" ? hist.value.map((h) => Number(h.navPerShare)) : [],
     change: hist.status === "fulfilled" ? change24h(hist.value) : null,
     liquid:
       quote.status === "fulfilled"

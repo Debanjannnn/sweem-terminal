@@ -14,8 +14,8 @@ const list: Token[] = [
   { address: "0xee0722ead54f1b4fe97be399be43bc0226a6f97e", symbol: "USDC", name: "USD Coin", decimals: 6, icon: "/tokens/usdc.png" },
   { address: "0x8b6c5fafef85b030bb1e71ae7ac085cc2380aaf8", symbol: "WETH", name: "Wrapped Ether", decimals: 18, icon: "/tokens/eth.svg" },
   { address: "0xef2a20a161ac9ed1117d721336226b6399f15b4d", symbol: "cbBTC", name: "Coinbase wrapped BTC", decimals: 8, icon: "/tokens/cbbtc.png" },
-  { address: "0xee1dce135a9ab598bca8cf3a28bdef6892100740", symbol: "XAUT", name: "Tether Gold", decimals: 6, color: "#D4AF37" },
-  { address: zeroAddress, symbol: "MON", name: "Monad", decimals: 18, color: "#836EF9" },
+  { address: "0xee1dce135a9ab598bca8cf3a28bdef6892100740", symbol: "XAUT", name: "Tether Gold", decimals: 6, color: "#D4AF37", icon: "/tokens/xaut.png" },
+  { address: zeroAddress, symbol: "MON", name: "Monad", decimals: 18, color: "#836EF9", icon: "/tokens/mon.png" },
 ];
 
 // keyed by lowercase address

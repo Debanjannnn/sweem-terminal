@@ -191,7 +191,7 @@ export default function BasketPage() {
         </div>
 
         <aside className="space-y-3 lg:sticky lg:top-24 lg:self-start">
-          <div role="tablist" className="grid grid-cols-2 gap-1 rounded-2xl border border-border bg-secondary/60 p-1">
+          <div role="tablist" className="grid grid-cols-2 gap-1 rounded-full border border-border bg-secondary/60 p-1">
             {(["buy", "automate"] as const).map((t) => (
               <button
                 key={t}
@@ -199,7 +199,7 @@ export default function BasketPage() {
                 aria-selected={tab === t}
                 onClick={() => setTab(t)}
                 className={cn(
-                  "truncate rounded-xl px-4 py-2 text-[15px] font-medium transition-colors",
+                  "truncate rounded-full px-4 py-2 text-[15px] font-medium transition-colors",
                   tab === t ? "bg-background text-foreground" : "text-muted-foreground hover:text-foreground",
                 )}
               >

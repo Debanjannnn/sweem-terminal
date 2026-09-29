@@ -37,6 +37,10 @@ export function InvestPage() {
         <h1 className="text-balance text-[40px] leading-[1.05] font-medium tracking-tight md:text-[54px]">
           Tradable token baskets on Monad
         </h1>
+        <p className="mx-auto mt-5 max-w-xl text-pretty text-lg text-muted-foreground">
+          Own a whole portfolio in one trade. Every basket fills on Kuru order books, and you can put it on autopilot
+          with recurring buys and stop-losses.
+        </p>
       </section>
 
       {(all.error || markets.error || own.error) && <ErrorBox message={all.error ?? markets.error ?? own.error ?? ""} />}

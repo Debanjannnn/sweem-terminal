@@ -1,5 +1,6 @@
 import { useId } from "react";
 import { cn } from "@/lib/utils";
+import { motion } from "motion/react";
 
 // green when last >= first, red otherwise; flat/empty series → muted line
 export function Sparkline({ data, area, className }: { data: number[]; area?: boolean; className?: string }) {
@@ -20,7 +21,15 @@ export function Sparkline({ data, area, className }: { data: number[]; area?: bo
 
   return (
     <div aria-hidden className={cn("relative", up ? "text-positive" : "text-destructive", className)}>
-      <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="size-full overflow-visible">
+      {/* draw-in left→right once on mount; clip not pathLength (non-scaling-stroke skews dashes) */}
+      <motion.svg
+        viewBox="0 0 100 100"
+        preserveAspectRatio="none"
+        className="size-full overflow-visible"
+        initial={{ clipPath: "inset(-10% 100% -10% 0)" }}
+        animate={{ clipPath: "inset(-10% 0% -10% 0)" }}
+        transition={{ duration: 0.6, ease: "easeOut" }}
+      >
         {area && (
           <>
             <defs>
@@ -40,9 +49,12 @@ export function Sparkline({ data, area, className }: { data: number[]; area?: bo
           strokeLinejoin="round"
           vectorEffect="non-scaling-stroke"
         />
-      </svg>
+      </motion.svg>
       {/* html dot so it stays round under preserveAspectRatio=none */}
-      <span
+      <motion.span
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        transition={{ duration: 0.2, delay: 0.5 }}
         className="absolute size-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-current"
         style={{ left: `${ex}%`, top: `${ey}%` }}
       />

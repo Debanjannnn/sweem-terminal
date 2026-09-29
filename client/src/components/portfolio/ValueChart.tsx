@@ -6,6 +6,7 @@ import { Triangle } from "lucide-react";
 import { fmtPctSigned, fmtUsd } from "@/lib/api";
 import { Panel, Skeleton } from "@/components/ui";
 import { cn } from "@/lib/utils";
+import { Flash, TabPill } from "@/components/motion";
 import { dummySeries, RANGES, type Range } from "./series";
 
 const usd2 = (n: number) => n.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -30,10 +31,10 @@ export function ValueChart({ address, total, loading }: { address: string; total
           <Skeleton className="h-12 w-48" />
         ) : (
           <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-            <span className="tnum text-4xl font-medium tracking-tight sm:text-5xl">
+            <Flash value={total} className="tnum text-4xl font-medium tracking-tight sm:text-5xl">
               {whole}
               <span className="text-muted-foreground/60">.{cents}</span>
-            </span>
+            </Flash>
             <span className={cn("inline-flex items-center gap-1 font-mono text-sm", up ? "text-positive" : "text-destructive")}>
               <Triangle className={cn("size-2.5 fill-current", !up && "rotate-180")} />
               {usd2(Math.abs(diff))} ({fmtPctSigned(first > 0 ? (diff / first) * 100 : 0).replace(/^[+-]/, "")}) {range}
@@ -48,11 +49,12 @@ export function ValueChart({ address, total, loading }: { address: string; total
               aria-selected={r === range}
               onClick={() => setRange(r)}
               className={cn(
-                "rounded-md px-2.5 py-1 text-xs font-medium transition-colors sm:px-3",
-                r === range ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
+                "relative rounded-md px-2.5 py-1 text-xs font-medium transition-colors sm:px-3",
+                r === range ? "text-foreground" : "text-muted-foreground hover:text-foreground",
               )}
             >
-              {r}
+              {r === range && <TabPill id="pf-range" className="rounded-md bg-card shadow-sm" />}
+              <span className="relative">{r}</span>
             </button>
           ))}
         </div>

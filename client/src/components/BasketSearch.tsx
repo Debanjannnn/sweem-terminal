@@ -9,6 +9,8 @@ import { tokenBySymbol } from "@/lib/tokens";
 import { cn } from "@/lib/utils";
 import { IconStack } from "@/components/invest/BasketCard";
 import { symbolOf, useMarkets } from "@/components/invest/extras";
+import { EASE } from "@/components/motion";
+import { AnimatePresence, motion, useIsPresent } from "motion/react";
 
 const OPEN = "sweem:open-search";
 const openSearch = () => document.dispatchEvent(new Event(OPEN));
@@ -93,7 +95,7 @@ export function BasketSearch() {
           <Kbd className="h-5 min-w-5 text-[11px]">K</Kbd>
         </span>
       </button>
-      {open && <SearchDialog onClose={() => setOpen(false)} />}
+      <AnimatePresence>{open && <SearchDialog onClose={() => setOpen(false)} />}</AnimatePresence>
     </>
   );
 }
@@ -106,6 +108,7 @@ function SearchDialog({ onClose }: { onClose: () => void }) {
   const [active, setActive] = useState(0);
   const baskets = useAsync("baskets", () => getBaskets());
   const markets = useMarkets();
+  const present = useIsPresent();
 
   useEffect(() => ref.current?.showModal(), []);
 
@@ -136,11 +139,20 @@ function SearchDialog({ onClose }: { onClose: () => void }) {
   };
 
   return (
-    <dialog
+    // Esc/backdrop → unmount via state (not dialog.close) so the exit animation plays while still modal
+    <motion.dialog
       ref={ref}
       onClose={onClose}
-      onClick={(e) => e.target === e.currentTarget && ref.current?.close()}
-      className="mx-auto mt-[12vh] w-[calc(100%-2rem)] max-w-xl overflow-hidden rounded-2xl border border-border bg-popover p-0 text-foreground shadow-2xl backdrop:bg-black/60 backdrop:backdrop-blur-sm"
+      onCancel={(e) => (e.preventDefault(), onClose())}
+      onClick={(e) => e.target === e.currentTarget && onClose()}
+      initial={{ opacity: 0, scale: 0.98 }}
+      animate={{ opacity: 1, scale: 1 }}
+      exit={{ opacity: 0, scale: 0.98 }}
+      transition={{ duration: 0.18, ease: EASE }}
+      className={cn(
+        "mx-auto mt-[12vh] w-[calc(100%-2rem)] max-w-xl overflow-hidden rounded-2xl border border-border bg-popover p-0 text-foreground shadow-2xl backdrop:bg-black/60 backdrop:backdrop-blur-sm backdrop:transition-opacity backdrop:duration-200 starting:backdrop:opacity-0",
+        !present && "pointer-events-none backdrop:opacity-0",
+      )}
     >
       <label className="flex items-center gap-3 border-b border-border px-4">
         <Search className="size-4 shrink-0 text-muted-foreground" />
@@ -175,7 +187,7 @@ function SearchDialog({ onClose }: { onClose: () => void }) {
               aria-selected={i === idx}
               onMouseMove={() => setActive(i)}
               onClick={() => go(b.address)}
-              className="flex w-full cursor-pointer items-center gap-3 rounded-2xl px-3 py-2 text-left aria-selected:bg-secondary"
+              className="flex w-full cursor-pointer items-center gap-3 rounded-2xl px-3 py-2 text-left transition-colors duration-150 aria-selected:bg-secondary"
             >
               <IconStack symbols={symbols} size={28} ring="ring-popover" />
               <span className="flex min-w-0 flex-1 flex-col">
@@ -211,6 +223,6 @@ function SearchDialog({ onClose }: { onClose: () => void }) {
           </span>
         ))}
       </div>
-    </dialog>
+    </motion.dialog>
   );
 }

@@ -8,7 +8,6 @@ import { useAsync, useSession } from "@/lib/session";
 import { SHARE_DECIMALS, txUrl, USDC_DECIMALS } from "@/lib/config";
 import { fmtUnits } from "@/lib/tokens";
 import { Button, ErrorBox, Panel, Skeleton } from "@/components/ui";
-import { Reveal } from "@/components/motion";
 import { cn } from "@/lib/utils";
 import { FaucetCard, LOW_GAS, useBalances, useNow } from "@/components/portfolio/Wallet";
 import { pnlByBasket } from "@/components/portfolio/pnl";
@@ -107,7 +106,7 @@ export default function PortfolioPage() {
 
   return (
     <main className="w-full px-4 pb-24 pt-8">
-      <Reveal className="mx-auto w-full space-y-6">
+      <div className="mx-auto w-full space-y-6">
         <header className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-3">
             <Avatar address={address ?? ""} />
@@ -184,7 +183,7 @@ export default function PortfolioPage() {
             )}
           </Panel>
         </section>
-      </Reveal>
+      </div>
     </main>
   );
 }

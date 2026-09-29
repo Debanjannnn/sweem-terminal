@@ -22,6 +22,8 @@ import { TradePanel } from "@/components/basket/TradePanel";
 import { ScheduleForm } from "@/components/automation/ScheduleForm";
 import { ScheduleList } from "@/components/automation/ScheduleList";
 import { cn } from "@/lib/utils";
+import { AutoHeight, Flash, TabPill } from "@/components/motion";
+import { motion } from "motion/react";
 
 export default function BasketPage() {
   const address = useParams<{ address: string }>().address.toLowerCase() as Address;
@@ -146,7 +148,7 @@ export default function BasketPage() {
 
           <Card title="Statistics">
             <dl className="grid grid-cols-2 gap-x-6 gap-y-6 md:grid-cols-4">
-              <Stat label="TVL" value={nav ? fmtUsdCompact(Number(nav.totalNav)) : null} />
+              <Stat label="TVL" value={nav ? <Flash value={Number(nav.totalNav)}>{fmtUsdCompact(Number(nav.totalNav))}</Flash> : null} />
               <Stat label="Supply" value={nav ? Number(nav.supply).toLocaleString("en-US", { maximumFractionDigits: 2 }) : null} />
               <Stat label="24h high" value={day.data ? (dayNavs.length ? fmtUsd(Math.max(...dayNavs)) : "—") : null} />
               <Stat label="24h low" value={day.data ? (dayNavs.length ? fmtUsd(Math.min(...dayNavs)) : "—") : null} />
@@ -199,15 +201,19 @@ export default function BasketPage() {
                 aria-selected={tab === t}
                 onClick={() => setTab(t)}
                 className={cn(
-                  "truncate rounded-full px-4 py-2 text-[15px] font-medium transition-colors",
-                  tab === t ? "bg-background text-foreground" : "text-muted-foreground hover:text-foreground",
+                  "relative truncate rounded-full px-4 py-2 text-[15px] font-medium transition-colors",
+                  tab === t ? "text-foreground" : "text-muted-foreground hover:text-foreground",
                 )}
               >
-                {t === "buy" ? "Buy" : "Automate"} {b?.symbol ?? ""}
+                {tab === t && <TabPill id="basket-side-tab" className="rounded-full bg-background" />}
+                <span className="relative">
+                  {t === "buy" ? "Buy" : "Automate"} {b?.symbol ?? ""}
+                </span>
               </button>
             ))}
           </div>
-          <div className="overflow-hidden rounded-[28px] border border-border bg-secondary/60">
+          <AutoHeight className="rounded-[28px] border border-border bg-secondary/60">
+            <motion.div key={tab} initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.2 }}>
             {tab === "buy" ? (
               <TradePanel basket={address} symbol={symbol} markets={markets.data} balances={balances.data} onTraded={refresh} />
             ) : (
@@ -216,7 +222,8 @@ export default function BasketPage() {
                 <ScheduleList key={schedulesKey} basket={address} />
               </div>
             )}
-          </div>
+            </motion.div>
+          </AutoHeight>
         </aside>
       </div>
     </main>

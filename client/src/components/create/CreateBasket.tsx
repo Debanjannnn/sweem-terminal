@@ -8,7 +8,6 @@ import { fmtBps, getBook } from "@/lib/api";
 import { useAsync, useSession } from "@/lib/session";
 import { readBalance, useTx } from "@/lib/tx";
 import { Button, Divider, ErrorBox, Label, Panel, Skeleton, Tooltip } from "@/components/ui";
-import { Reveal } from "@/components/motion";
 import { TokenIcon } from "@/components/TokenIcon";
 import { IconStack } from "@/components/invest/BasketCard";
 import { symbolOf, useMarkets } from "@/components/invest/extras";
@@ -81,7 +80,7 @@ export function CreateBasket() {
 
   return (
     <main className="w-full px-4 pt-8 pb-24">
-      <Reveal className="mx-auto w-full space-y-6">
+      <div className="mx-auto w-full space-y-6">
         <div>
           <h1 className="text-xl font-medium sm:text-2xl">Create a basket</h1>
           <p className="mt-1 text-sm text-muted-foreground">
@@ -309,7 +308,7 @@ export function CreateBasket() {
             </p>
           </div>
         </div>
-      </Reveal>
+      </div>
     </main>
   );
 }

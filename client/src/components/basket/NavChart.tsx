@@ -7,6 +7,7 @@ import { useAsync } from "@/lib/session";
 import { ErrorBox, Skeleton } from "@/components/ui";
 import { ChangeText } from "@/components/invest/BasketCard";
 import { cn } from "@/lib/utils";
+import { Flash, TabPill } from "@/components/motion";
 
 const D = 86400e3;
 const RANGES = { "1D": D, "1W": 7 * D, "1M": 30 * D, "3M": 90 * D, "1Y": 365 * D, ALL: 0 } as const;
@@ -33,7 +34,7 @@ export function NavChart({ basket, price }: { basket: string; price: number | nu
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <div className="tnum text-5xl font-medium tracking-tight">
-            {last !== undefined && last !== null ? fmtUsd(last) : <Skeleton className="h-12 w-48" />}
+            {last !== undefined && last !== null ? <Flash value={last}>{fmtUsd(last)}</Flash> : <Skeleton className="h-12 w-48" />}
           </div>
           <div className="mt-2 text-sm">
             {change !== null && delta !== null ? (
@@ -57,11 +58,12 @@ export function NavChart({ basket, price }: { basket: string; price: number | nu
               aria-selected={r === range}
               onClick={() => setRange(r)}
               className={cn(
-                "rounded-md px-2.5 py-1 text-sm font-medium transition-colors",
-                r === range ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
+                "relative rounded-md px-2.5 py-1 text-sm font-medium transition-colors",
+                r === range ? "text-foreground" : "text-muted-foreground hover:text-foreground",
               )}
             >
-              {r}
+              {r === range && <TabPill id="nav-range" className="rounded-md bg-card shadow-sm" />}
+              <span className="relative">{r}</span>
             </button>
           ))}
         </div>

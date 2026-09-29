@@ -13,6 +13,8 @@ import type { Basket, LiveNav } from "@/lib/types";
 import { ErrorBox, Skeleton } from "@/components/ui";
 import { HeroSearch } from "@/components/BasketSearch";
 import { Sparkline } from "@/components/Sparkline";
+import { EASE, Flash, Reveal, TabPill } from "@/components/motion";
+import { motion } from "motion/react";
 import { ChangeText, IconStack, LiquidityBadge } from "@/components/invest/BasketCard";
 import { symbolOf, useBasketExtras, useMarkets } from "@/components/invest/extras";
 
@@ -106,14 +108,20 @@ export function HomePage() {
       )}
 
       <section className="mx-auto grid max-w-7xl grid-cols-1 gap-4 pb-16 md:grid-cols-2 md:pb-24 lg:grid-cols-3">
-        <Highlight title="Latest Added" row={latest} value={(r) => (r.price ? fmtUsd(r.price) : "—")} />
-        <Highlight title="Highest TVL" row={topTvl} value={(r) => fmtUsdCompact(r.tvl)} />
-        <Highlight
-          title="Biggest Gainer (24H)"
-          row={gainer}
-          loading={!extras}
-          value={(r) => <ChangeText value={r.chg} className="gap-1.5" />}
-        />
+        <Reveal>
+          <Highlight title="Latest Added" row={latest} value={(r) => (r.price ? <Flash value={r.price}>{fmtUsd(r.price)}</Flash> : "—")} />
+        </Reveal>
+        <Reveal delay={0.05}>
+          <Highlight title="Highest TVL" row={topTvl} value={(r) => fmtUsdCompact(r.tvl)} />
+        </Reveal>
+        <Reveal delay={0.1}>
+          <Highlight
+            title="Biggest Gainer (24H)"
+            row={gainer}
+            loading={!extras}
+            value={(r) => <ChangeText value={r.chg} className="gap-1.5" />}
+          />
+        </Reveal>
       </section>
 
       <section className="mx-auto max-w-7xl space-y-4">
@@ -125,11 +133,14 @@ export function HomePage() {
               aria-selected={active === t}
               onClick={() => setTab(t)}
               className={cn(
-                "rounded-full px-3 py-1 text-[22px] transition-colors",
-                active === t ? "bg-secondary text-foreground" : "text-muted-foreground hover:text-foreground",
+                "relative rounded-full px-3 py-1 text-[22px] transition-colors",
+                active === t ? "text-foreground" : "text-muted-foreground hover:text-foreground",
               )}
             >
-              {t === "all" ? "All" : t === "mine" ? "Created by me" : (LABEL[t] ?? tokenBySymbol(t)?.name ?? t)}
+              {active === t && <TabPill id="home-cat" className="rounded-full bg-secondary" />}
+              <span className="relative">
+                {t === "all" ? "All" : t === "mine" ? "Created by me" : (LABEL[t] ?? tokenBySymbol(t)?.name ?? t)}
+              </span>
             </button>
           ))}
         </div>
@@ -177,7 +188,7 @@ function Highlight({
   const body = (
     <article className="rounded-[22px] bg-secondary/40">
       <p className="px-6 pt-2.5 text-[15px] text-muted-foreground">{title}</p>
-      <div className="mt-3 rounded-[22px] border border-white/10 bg-card p-6 transition-[box-shadow,scale] duration-150 hover:ring-2 hover:ring-white/10 active:scale-[0.98]">
+      <div className="mt-3 rounded-[22px] border border-white/10 bg-card p-6 transition-[box-shadow,scale,translate,border-color] duration-200 ease-out hover:-translate-y-0.5 hover:border-white/15 hover:ring-2 hover:ring-white/10 active:scale-[0.98]">
         {row && !loading ? (
           <>
             <Sparkline data={row.series} className="h-32 w-full" />
@@ -273,15 +284,18 @@ function BasketTable({
                 </tr>
               ))
             ) : rows.length > 0 ? (
-              rows.map((r) => {
+              rows.map((r, i) => {
                 const open = () => router.push(`/baskets/${r.b.address}`);
                 return (
-                  <tr
+                  <motion.tr
                     key={r.b.address}
+                    initial={{ opacity: 0, y: 4 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ duration: 0.25, delay: Math.min(i, 10) * 0.03, ease: EASE }}
                     tabIndex={0}
                     onClick={open}
                     onKeyDown={(e) => e.key === "Enter" && open()}
-                    className="h-16 cursor-pointer text-sm transition-colors hover:bg-secondary/40 focus-visible:bg-secondary/40 focus-visible:outline-none"
+                    className="h-16 cursor-pointer text-sm transition-colors duration-150 hover:bg-secondary/40 focus-visible:bg-secondary/40 focus-visible:outline-none"
                   >
                     <td className={cn("px-4", COLS[0].c)}>
                       <div className="flex items-center gap-3">
@@ -290,7 +304,7 @@ function BasketTable({
                         <span className="shrink-0 text-muted-foreground">${r.b.symbol}</span>
                       </div>
                     </td>
-                    <td className={cn("tnum px-4 font-medium", COLS[1].c)}>{r.price ? fmtUsd(r.price) : "—"}</td>
+                    <td className={cn("tnum px-4 font-medium", COLS[1].c)}>{r.price ? <Flash value={r.price}>{fmtUsd(r.price)}</Flash> : "—"}</td>
                     <td className={cn("px-4", COLS[2].c)}>
                       <ChangeText value={r.chgUsd} usd className="justify-end" />
                     </td>
@@ -304,7 +318,7 @@ function BasketTable({
                     <td className={cn("px-4", COLS[6].c)}>
                       <LiquidityBadge liquid={r.liquid} />
                     </td>
-                  </tr>
+                  </motion.tr>
                 );
               })
             ) : (

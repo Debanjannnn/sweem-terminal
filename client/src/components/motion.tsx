@@ -1,29 +1,34 @@
 "use client";
 
-import { motion, useReducedMotion } from "motion/react";
+import { useEffect, useRef, useState } from "react";
+import { MotionConfig, motion } from "motion/react";
 import { cn } from "@/lib/utils";
 
-const EASE = [0.16, 1, 0.3, 1] as const;
+export const EASE = [0.16, 1, 0.3, 1] as const;
+const SPRING = { type: "spring", stiffness: 500, damping: 40 } as const;
+
+// root: honours prefers-reduced-motion (drops transform/layout anims)
+export function MotionRoot({ children }: { children: React.ReactNode }) {
+  return <MotionConfig reducedMotion="user">{children}</MotionConfig>;
+}
 
 export function Reveal({
   children,
   delay = 0,
   className,
-  y = 10,
+  y = 6,
 }: {
   children: React.ReactNode;
   delay?: number;
   className?: string;
   y?: number;
 }) {
-  const reduced = useReducedMotion();
-  if (reduced) return <div className={className}>{children}</div>;
   return (
     <motion.div
       className={className}
       initial={{ opacity: 0, y }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.4, delay, ease: EASE }}
+      transition={{ duration: 0.3, delay, ease: EASE }}
     >
       {children}
     </motion.div>
@@ -43,7 +48,6 @@ export function Segmented<T extends string>({
   id: string;
   className?: string;
 }) {
-  const reduced = useReducedMotion();
   return (
     <div
       role="tablist"
@@ -65,20 +69,50 @@ export function Segmented<T extends string>({
               on ? "text-foreground" : "text-muted-foreground hover:text-foreground",
             )}
           >
-            {on &&
-              (reduced ? (
-                <span className="absolute inset-0 rounded-md bg-card shadow-sm" />
-              ) : (
-                <motion.span
-                  layoutId={`segmented-${id}`}
-                  className="absolute inset-0 rounded-md bg-card shadow-sm"
-                  transition={{ type: "spring", stiffness: 400, damping: 34 }}
-                />
-              ))}
+            {on && <TabPill id={`segmented-${id}`} className="rounded-md bg-card shadow-sm" />}
             <span className="relative">{o.label}</span>
           </button>
         );
       })}
     </div>
+  );
+}
+
+// sliding active-tab background; render inside a `relative` tab, label needs `relative` too
+export function TabPill({ id, className }: { id: string; className?: string }) {
+  return <motion.span aria-hidden layoutId={id} transition={SPRING} className={cn("absolute inset-0", className)} />;
+}
+
+// flashes green/red when a live number moves; colour only so width never shifts
+export function Flash({ value, children, className }: { value: number | null | undefined; children: React.ReactNode; className?: string }) {
+  const ref = useRef<HTMLSpanElement>(null);
+  const prev = useRef(value);
+  useEffect(() => {
+    const p = prev.current;
+    prev.current = value;
+    if (p == null || value == null || p === value || !ref.current) return;
+    ref.current.animate([{ color: `var(--${value > p ? "positive" : "destructive"})`, offset: 0 }], { duration: 700, easing: "ease-out" });
+  }, [value]);
+  return (
+    <span ref={ref} className={className}>
+      {children}
+    </span>
+  );
+}
+
+// animates its height to follow content (tab switches, quote rows appearing)
+export function AutoHeight({ children, className }: { children: React.ReactNode; className?: string }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [h, setH] = useState<number | "auto">("auto");
+  useEffect(() => {
+    const el = ref.current!;
+    const ro = new ResizeObserver(() => setH(el.offsetHeight));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  return (
+    <motion.div className={cn("overflow-hidden", className)} initial={false} animate={{ height: h }} transition={{ duration: 0.25, ease: EASE }}>
+      <div ref={ref}>{children}</div>
+    </motion.div>
   );
 }

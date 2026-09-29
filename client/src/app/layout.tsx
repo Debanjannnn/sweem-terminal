@@ -3,6 +3,7 @@ import { Geist_Mono, Inter } from "next/font/google";
 import "./globals.css";
 import { SessionProvider } from "@/lib/session";
 import { Toaster } from "@/components/Toaster";
+import { MotionRoot } from "@/components/motion";
 
 const inter = Inter({ variable: "--font-inter", subsets: ["latin"] });
 const mono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"] });
@@ -19,8 +20,10 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       className={`dark ${inter.variable} ${mono.variable} h-full`}
     >
       <body className={`min-h-full font-sans bg-background text-foreground antialiased`}>
-        <SessionProvider>{children}</SessionProvider>
-        <Toaster />
+        <MotionRoot>
+          <SessionProvider>{children}</SessionProvider>
+          <Toaster />
+        </MotionRoot>
       </body>
     </html>
   );

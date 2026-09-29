@@ -73,7 +73,7 @@ export function Button({
     <button
       {...rest}
       className={cn(
-        "inline-flex items-center justify-center gap-2 rounded-2xl px-4 py-2 text-sm font-medium transition-[background-color,border-radius,color] duration-200 hover:rounded-3xl disabled:cursor-not-allowed",
+        "inline-flex items-center justify-center gap-2 rounded-2xl px-4 py-2 text-sm font-medium transition-[background-color,border-radius,color,scale] duration-200 hover:rounded-3xl enabled:active:scale-[0.98] disabled:cursor-not-allowed",
         styles,
         className,
       )}

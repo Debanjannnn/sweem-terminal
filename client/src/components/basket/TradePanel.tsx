@@ -12,6 +12,8 @@ import { ArrowDown } from "lucide-react";
 import { Button, Spinner } from "@/components/ui";
 import { TokenIcon } from "@/components/TokenIcon";
 import { cn } from "@/lib/utils";
+import { Flash, TabPill } from "@/components/motion";
+import { motion } from "motion/react";
 
 export type Balances = { usdc: bigint; shares: bigint; mon: bigint };
 type Side = "mint" | "redeem";
@@ -121,11 +123,12 @@ export function TradePanel({
               aria-selected={side === s}
               onClick={() => (setSide(s), setAmount(""))}
               className={cn(
-                "rounded-md px-3 py-1 text-sm font-medium transition-colors",
-                side === s ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
+                "relative rounded-md px-3 py-1 text-sm font-medium transition-colors",
+                side === s ? "text-foreground" : "text-muted-foreground hover:text-foreground",
               )}
             >
-              {s === "mint" ? "Buy" : "Sell"}
+              {side === s && <TabPill id="trade-side" className="rounded-md bg-card shadow-sm" />}
+              <span className="relative">{s === "mint" ? "Buy" : "Sell"}</span>
             </button>
           ))}
         </div>
@@ -137,11 +140,12 @@ export function TradePanel({
               type="button"
               onClick={() => setSlippage(s)}
               className={cn(
-                "rounded-md px-2 py-1 font-medium transition-colors",
-                s === slippage ? "bg-card text-foreground shadow-sm" : "hover:text-foreground",
+                "relative rounded-md px-2 py-1 font-medium transition-colors",
+                s === slippage ? "text-foreground" : "hover:text-foreground",
               )}
             >
-              {s / 100}%
+              {s === slippage && <TabPill id="trade-slippage" className="rounded-md bg-card shadow-sm" />}
+              <span className="relative">{s / 100}%</span>
             </button>
           ))}
         </div>
@@ -185,7 +189,7 @@ export function TradePanel({
               {quote.loading && debounced !== null ? (
                 <Spinner />
               ) : q ? (
-                fmtUnits(q.expectedOut, outDecimals)
+                <Flash value={Number(q.expectedOut)}>{fmtUnits(q.expectedOut, outDecimals)}</Flash>
               ) : (
                 <span className="text-muted-foreground/50">0</span>
               )}
@@ -196,14 +200,14 @@ export function TradePanel({
       </div>
 
       {q && (
-        <dl className="space-y-1.5 px-1 text-xs">
+        <motion.dl initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.2 }} className="space-y-1.5 px-1 text-xs">
           <Row label="Minimum received">{`${fmtUnits(q.minOut, outDecimals)} ${outSym}`}</Row>
           {q.legs.map((l) => (
             <Row key={l.market} label={`${baseToken(l.market, markets)?.symbol ?? "leg"} price impact`}>
               <span className={l.impactBps > 100 ? "text-warning" : undefined}>{(l.impactBps / 100).toFixed(2)}%</span>
             </Row>
           ))}
-        </dl>
+        </motion.dl>
       )}
 
       {!authenticated && ready ? (

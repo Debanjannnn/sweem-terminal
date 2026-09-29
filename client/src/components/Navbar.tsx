@@ -3,7 +3,7 @@
 import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Check, Copy, Wallet as WalletIcon } from "lucide-react";
 import { zeroAddress } from "viem";
 import { errMsg, fmtTime, shortHash } from "@/lib/api";
@@ -13,6 +13,7 @@ import { fmtUnits, tokenOf } from "@/lib/tokens";
 import { readBalance, readNextClaimAt, useTx } from "@/lib/tx";
 import { cn } from "@/lib/utils";
 import { BasketSearch } from "./BasketSearch";
+import { TabPill } from "./motion";
 import { Spinner, useDismissable } from "./ui";
 
 const NAV = [
@@ -24,16 +25,28 @@ const NAV = [
 export function Navbar() {
   const pathname = usePathname();
   const { ready, authenticated, login } = useSession();
+  const [scrolled, setScrolled] = useState(false);
+  useEffect(() => {
+    const on = () => setScrolled(window.scrollY > 4);
+    on();
+    window.addEventListener("scroll", on, { passive: true });
+    return () => window.removeEventListener("scroll", on);
+  }, []);
 
   return (
-    <header className="sticky top-0 z-40 w-full border-b border-border bg-background/85 backdrop-blur">
-      <div className="mx-auto grid w-full max-w-[1400px] grid-cols-[1fr_auto] items-center gap-4 px-6 py-3 md:grid-cols-[1fr_minmax(0,360px)_1fr]">
-        <div className="flex items-center gap-8">
+    <header className="sticky top-0 z-40 w-full px-3 pt-3 sm:px-6">
+      <div
+        className={cn(
+          "mx-auto grid w-full max-w-[1400px] grid-cols-[1fr_auto] items-center gap-4 rounded-2xl bg-card/60 py-2 pr-2 pl-4 backdrop-blur-xl transition-shadow duration-300 md:grid-cols-[1fr_minmax(0,360px)_1fr]",
+          scrolled && "shadow-[0_8px_30px_-8px_rgb(0_0_0/0.6)]",
+        )}
+      >
+        <div className="flex items-center gap-5">
           <Link href="/" className="flex items-center gap-2 text-lg font-semibold tracking-tight">
             <Image src="/sweem-mark.png" alt="" width={26} height={26} priority unoptimized className="size-[26px]" />
             sweem
           </Link>
-          <nav className="hidden items-center gap-6 sm:flex">
+          <nav className="hidden items-center gap-1 sm:flex">
             {NAV.map((item) => {
               const active = item.href === "/" ? pathname === "/" || pathname.startsWith("/baskets") : pathname.startsWith(item.href);
               return (
@@ -41,11 +54,12 @@ export function Navbar() {
                   key={item.href}
                   href={item.href}
                   className={cn(
-                    "text-sm font-medium transition-colors",
+                    "relative rounded-full px-3.5 py-1.5 text-sm font-medium transition-colors",
                     active ? "text-foreground" : "text-muted-foreground hover:text-foreground",
                   )}
                 >
-                  {item.label}
+                  {active && <TabPill id="navbar" className="rounded-full bg-secondary" />}
+                  <span className="relative">{item.label}</span>
                 </Link>
               );
             })}

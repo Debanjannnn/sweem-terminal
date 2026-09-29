@@ -190,24 +190,24 @@ export default function BasketPage() {
           )}
         </div>
 
-        <aside className="lg:sticky lg:top-24 lg:self-start">
-          <div className="overflow-hidden rounded-[28px] bg-secondary/60">
-            <div role="tablist" className="grid grid-cols-2 border-b border-border">
-              {(["buy", "automate"] as const).map((t) => (
-                <button
-                  key={t}
-                  role="tab"
-                  aria-selected={tab === t}
-                  onClick={() => setTab(t)}
-                  className={cn(
-                    "-mb-px truncate border-b-2 px-5 py-4 text-left text-[15px] font-medium transition-colors",
-                    tab === t ? "border-foreground text-foreground" : "border-transparent text-muted-foreground hover:text-foreground",
-                  )}
-                >
-                  {t === "buy" ? "Buy" : "Automate"} {b?.symbol ?? ""}
-                </button>
-              ))}
-            </div>
+        <aside className="space-y-3 lg:sticky lg:top-24 lg:self-start">
+          <div role="tablist" className="grid grid-cols-2 gap-1 rounded-2xl border border-border bg-secondary/60 p-1">
+            {(["buy", "automate"] as const).map((t) => (
+              <button
+                key={t}
+                role="tab"
+                aria-selected={tab === t}
+                onClick={() => setTab(t)}
+                className={cn(
+                  "truncate rounded-xl px-4 py-2 text-[15px] font-medium transition-colors",
+                  tab === t ? "bg-background text-foreground" : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                {t === "buy" ? "Buy" : "Automate"} {b?.symbol ?? ""}
+              </button>
+            ))}
+          </div>
+          <div className="overflow-hidden rounded-[28px] border border-border bg-secondary/60">
             {tab === "buy" ? (
               <TradePanel basket={address} symbol={symbol} markets={markets.data} balances={balances.data} onTraded={refresh} />
             ) : (

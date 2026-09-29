@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useMemo, useState } from "react";
-import { fmtUsdCompact, getBaskets } from "@/lib/api";
+import { getBaskets } from "@/lib/api";
 import { useAsync, useSession } from "@/lib/session";
 import { ErrorBox } from "@/components/ui";
 import { cn } from "@/lib/utils";
@@ -31,23 +31,12 @@ export function InvestPage() {
       .sort((a, b) => Number(b.nav?.totalNav ?? 0) - Number(a.nav?.totalNav ?? 0));
   }, [list.data, search]);
 
-  const tvl = (all.data ?? []).reduce((s, b) => s + Number(b.nav?.totalNav ?? 0), 0);
-
   return (
     <main className="w-full space-y-10 px-4 pb-24 md:px-6">
       <section className="mx-auto max-w-3xl pt-20 text-center">
         <h1 className="text-balance text-[40px] leading-[1.05] font-medium tracking-tight md:text-[54px]">
           Tradable token baskets on Monad
         </h1>
-        <p className="mx-auto mt-5 max-w-xl text-pretty text-muted-foreground">
-          Each basket is an ERC-20 holding a fixed-weight mix of tokens. Buy with USDC and every slice fills on a Kuru
-          order book in the same transaction.
-        </p>
-        <dl className="mt-8 flex items-center justify-center gap-8 text-sm">
-          <Stat value={all.data ? String(all.data.length) : "—"} label="Baskets" />
-          <Stat value={all.data ? fmtUsdCompact(tvl) : "—"} label="Total value locked" />
-          <Stat value={markets.data ? String(markets.data.length) : "—"} label="Kuru markets" />
-        </dl>
       </section>
 
       {(all.error || markets.error || own.error) && <ErrorBox message={all.error ?? markets.error ?? own.error ?? ""} />}
@@ -94,14 +83,5 @@ export function InvestPage() {
         />
       </section>
     </main>
-  );
-}
-
-function Stat({ value, label }: { value: string; label: string }) {
-  return (
-    <div>
-      <dt className="text-muted-foreground">{label}</dt>
-      <dd className="tnum mt-1 text-xl font-medium text-foreground">{value}</dd>
-    </div>
   );
 }

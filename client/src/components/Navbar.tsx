@@ -2,10 +2,9 @@
 
 import Image from "next/image";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useState } from "react";
-import { Check, Copy } from "lucide-react";
-import { motion, useReducedMotion } from "motion/react";
+import { Check, Copy, Search, Wallet as WalletIcon } from "lucide-react";
 import { zeroAddress } from "viem";
 import { errMsg, fmtTime, shortHash } from "@/lib/api";
 import { addressUrl, USDC } from "@/lib/config";
@@ -16,36 +15,32 @@ import { cn } from "@/lib/utils";
 import { Spinner, useDismissable } from "./ui";
 
 const NAV = [
-  { label: "Invest", href: "/" },
-  { label: "Create", href: "/create" },
+  { label: "Explore", href: "/" },
   { label: "Portfolio", href: "/portfolio" },
+  { label: "Create", href: "/create" },
 ] as const;
 
 export function Navbar() {
   const pathname = usePathname();
-  const reduced = useReducedMotion();
+  const router = useRouter();
+  const q = useSearchParams().get("q") ?? "";
   const { ready, authenticated, login } = useSession();
+  // live-filter on /, otherwise jump to / on Enter
+  const go = (v: string, replace: boolean) => {
+    const url = v.trim() ? `/?q=${encodeURIComponent(v.trim())}` : "/";
+    if (replace) router.replace(url, { scroll: false });
+    else router.push(url);
+  };
 
   return (
-    <header className="w-full">
-      <div className="w-full flex flex-wrap items-center justify-between gap-3 px-4 py-5 sm:px-10">
-        <div className="flex items-center gap-1">
-          <Link
-            href="/"
-            className="mr-6 flex items-center gap-2 text-lg font-semibold tracking-tight"
-          >
-            <Image
-              src="/sweem-mark.png"
-              alt=""
-              width={26}
-              height={26}
-              priority
-              unoptimized
-              className="size-[26px]"
-            />
+    <header className="sticky top-0 z-40 w-full border-b border-border bg-background/85 backdrop-blur">
+      <div className="mx-auto grid w-full max-w-[1400px] grid-cols-[1fr_auto] items-center gap-4 px-6 py-3 md:grid-cols-[1fr_minmax(0,360px)_1fr]">
+        <div className="flex items-center gap-8">
+          <Link href="/" className="flex items-center gap-2 text-lg font-semibold tracking-tight">
+            <Image src="/sweem-mark.png" alt="" width={26} height={26} priority unoptimized className="size-[26px]" />
             sweem
           </Link>
-          <nav className="flex items-center gap-0.5">
+          <nav className="hidden items-center gap-6 sm:flex">
             {NAV.map((item) => {
               const active = item.href === "/" ? pathname === "/" || pathname.startsWith("/baskets") : pathname.startsWith(item.href);
               return (
@@ -53,30 +48,40 @@ export function Navbar() {
                   key={item.href}
                   href={item.href}
                   className={cn(
-                    "relative rounded-full px-5 py-2.5 text-sm font-medium transition-colors",
-                    active
-                      ? "text-foreground"
-                      : "text-muted-foreground hover:text-foreground",
+                    "text-sm font-medium transition-colors",
+                    active ? "text-foreground" : "text-muted-foreground hover:text-foreground",
                   )}
                 >
-                  {active &&
-                    (reduced ? (
-                      <span className="absolute inset-0 rounded-full bg-secondary" />
-                    ) : (
-                      <motion.span
-                        layoutId="nav-pill"
-                        className="absolute inset-0 rounded-full bg-secondary"
-                        transition={{ type: "spring", stiffness: 400, damping: 34 }}
-                      />
-                    ))}
-                  <span className="relative">{item.label}</span>
+                  {item.label}
                 </Link>
               );
             })}
           </nav>
         </div>
 
-        <div className="flex items-center gap-2">
+        <form
+          role="search"
+          className="hidden md:block"
+          onSubmit={(e) => {
+            e.preventDefault();
+            go(new FormData(e.currentTarget).get("q") as string, false);
+          }}
+        >
+          <label className="flex items-center gap-2 rounded-xl bg-secondary/70 px-3 py-2">
+            <Search className="size-4 shrink-0 text-muted-foreground" />
+            <span className="sr-only">Search baskets</span>
+            <input
+              key={pathname === "/" ? "home" : pathname}
+              name="q"
+              defaultValue={pathname === "/" ? q : ""}
+              onChange={(e) => pathname === "/" && go(e.target.value, true)}
+              placeholder="Search baskets"
+              className="w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+            />
+          </label>
+        </form>
+
+        <div className="flex items-center justify-end gap-2">
           {!ready ? (
             <Spinner />
           ) : authenticated ? (
@@ -84,9 +89,9 @@ export function Navbar() {
           ) : (
             <button
               onClick={login}
-              className="rounded-full bg-primary px-6 py-2.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+              className="rounded-xl bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
             >
-              Connect
+              Sign up / Log in
             </button>
           )}
         </div>
@@ -116,8 +121,9 @@ function WalletMenu() {
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
         aria-label="Wallet"
-        className="rounded-full bg-primary px-6 py-2.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+        className="tnum inline-flex items-center gap-2 rounded-xl bg-secondary px-3.5 py-2 text-sm font-medium transition-colors hover:bg-accent"
       >
+        <WalletIcon className="size-4 text-muted-foreground" />
         {address ? shortHash(address) : "Connected"}
       </button>
       {open && (

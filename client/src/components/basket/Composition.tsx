@@ -5,7 +5,7 @@ import { useAsync } from "@/lib/session";
 import { baseToken } from "@/lib/tokens";
 import { useTopic } from "@/lib/ws";
 import type { Book, Component, LiveNav, Market } from "@/lib/types";
-import { Label, Panel, Skeleton } from "@/components/ui";
+import { Panel, Skeleton } from "@/components/ui";
 import { TokenIcon } from "@/components/TokenIcon";
 
 const num = (s: string | undefined) => (s === undefined ? null : Number(s));
@@ -22,13 +22,11 @@ export function Composition({
   const total = Number(nav?.totalNav ?? 0);
   return (
     <Panel>
-      <div className="px-5 py-5">
-        <Label>Composition</Label>
-      </div>
+      <h2 className="px-6 pb-4 pt-6 text-2xl font-medium">Composition</h2>
       <div className="overflow-x-auto border-t border-border">
         <table className="w-full min-w-[640px] text-sm">
           <thead className="text-left text-xs text-muted-foreground">
-            <tr className="[&>th]:px-5 [&>th]:py-3 [&>th]:font-normal">
+            <tr className="[&>th]:px-6 [&>th]:py-3 [&>th]:font-normal">
               <th>Token</th>
               <th className="text-right">Target / actual</th>
               <th className="text-right">Holdings</th>
@@ -42,7 +40,7 @@ export function Composition({
               const sym = baseToken(c.market, markets)?.symbol;
               const value = num(live?.value);
               return (
-                <tr key={c.market} className="[&>td]:px-5 [&>td]:py-4">
+                <tr key={c.market} className="[&>td]:px-6 [&>td]:py-4">
                   <td>
                     <span className="inline-flex items-center gap-2 font-medium">
                       {sym ? <TokenIcon symbol={sym} size={20} /> : <Skeleton className="size-5 rounded-full" />}

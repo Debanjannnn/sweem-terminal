@@ -8,8 +8,8 @@ import { useAsync, useSession } from "@/lib/session";
 import { baseToken, fmtUnits, parseAmount } from "@/lib/tokens";
 import { useTx } from "@/lib/tx";
 import type { Market } from "@/lib/types";
-import { Button, Divider, Label, Panel, Spinner } from "@/components/ui";
-import { Segmented } from "@/components/motion";
+import { ArrowDown } from "lucide-react";
+import { Button, Spinner } from "@/components/ui";
 import { TokenIcon } from "@/components/TokenIcon";
 import { cn } from "@/lib/utils";
 
@@ -103,107 +103,137 @@ export function TradePanel({
     }
   }
 
+  const pill = (sym: string) => (
+    <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-secondary py-1.5 pl-1.5 pr-3 text-sm font-medium">
+      <TokenIcon symbol={sym === "USDC" ? "USDC" : sym} size={20} />
+      {sym}
+    </span>
+  );
+
   return (
-    <Panel>
-      <div className="p-5">
-        <Segmented
-          id="trade-side"
-          value={side}
-          onChange={(s) => {
-            setSide(s);
-            setAmount("");
-          }}
-          options={[
-            { value: "mint", label: "Buy" },
-            { value: "redeem", label: "Sell" },
-          ]}
-        />
-      </div>
-      <Divider />
-      <div className="p-5">
-        <div className="flex items-center justify-between">
-          <Label>{side === "mint" ? "You pay" : "You sell"}</Label>
-          {balance !== null && (
+    <div className="space-y-4 p-5">
+      <div className="flex items-center justify-between gap-3">
+        <div role="tablist" className="flex rounded-lg bg-foreground/[0.05] p-0.5">
+          {(["mint", "redeem"] as const).map((s) => (
             <button
-              type="button"
-              onClick={() => setAmount(formatUnits(balance, decimals))}
-              className="tnum text-sm text-muted-foreground transition-colors hover:text-foreground"
+              key={s}
+              role="tab"
+              aria-selected={side === s}
+              onClick={() => (setSide(s), setAmount(""))}
+              className={cn(
+                "rounded-md px-3 py-1 text-sm font-medium transition-colors",
+                side === s ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
+              )}
             >
-              Max {fmtUnits(balance, decimals)} {inSym}
+              {s === "mint" ? "Buy" : "Sell"}
             </button>
-          )}
+          ))}
         </div>
-        <div className="mt-4 flex items-center gap-3">
-          <input
-            value={amount}
-            onChange={(e) => setAmount(e.target.value)}
-            inputMode="decimal"
-            aria-label={`Amount in ${inSym}`}
-            placeholder="0"
-            className="tnum w-full min-w-0 bg-transparent text-4xl font-medium tracking-tight outline-none placeholder:text-muted-foreground/40"
-          />
-          <span className="inline-flex shrink-0 items-center gap-2 rounded-full bg-secondary/70 py-2 pl-3 pr-4 text-sm font-medium">
-            {side === "mint" && <TokenIcon symbol="USDC" size={20} />}
-            {inSym}
-          </span>
+        <div className="flex items-center gap-1 text-xs text-muted-foreground">
+          Slippage
+          {SLIPPAGES.map((s) => (
+            <button
+              key={s}
+              type="button"
+              onClick={() => setSlippage(s)}
+              className={cn(
+                "rounded-md px-2 py-1 font-medium transition-colors",
+                s === slippage ? "bg-card text-foreground shadow-sm" : "hover:text-foreground",
+              )}
+            >
+              {s / 100}%
+            </button>
+          ))}
         </div>
       </div>
-      <Divider />
-      <dl className="space-y-2 px-5 py-4 text-sm">
-        <Row label="Expected">
-          {quote.loading && debounced !== null ? (
-            <Spinner />
-          ) : q ? (
-            `${fmtUnits(q.expectedOut, outDecimals)} ${outSym}`
-          ) : (
-            "—"
-          )}
-        </Row>
-        <Row label="Minimum out">{q ? `${fmtUnits(q.minOut, outDecimals)} ${outSym}` : "—"}</Row>
-        <Row label="Max slippage">
-          <span className="inline-flex gap-1">
-            {SLIPPAGES.map((s) => (
+
+      <div className="relative rounded-2xl bg-card">
+        <div className="p-4">
+          <div className="flex items-center justify-between text-sm text-muted-foreground">
+            Spend
+            {balance !== null && (
               <button
-                key={s}
                 type="button"
-                onClick={() => setSlippage(s)}
-                className={cn(
-                  "rounded-md px-2 py-0.5 text-xs transition-colors",
-                  s === slippage ? "bg-secondary text-foreground" : "text-muted-foreground hover:text-foreground",
-                )}
+                onClick={() => setAmount(formatUnits(balance, decimals))}
+                className="tnum text-xs transition-colors hover:text-foreground"
               >
-                {s / 100}%
+                Max {fmtUnits(balance, decimals)}
               </button>
-            ))}
+            )}
+          </div>
+          <div className="mt-2 flex items-center gap-3">
+            <input
+              value={amount}
+              onChange={(e) => setAmount(e.target.value)}
+              inputMode="decimal"
+              aria-label={`Amount in ${inSym}`}
+              placeholder="0"
+              className="tnum w-full min-w-0 bg-transparent text-3xl font-medium tracking-tight outline-none placeholder:text-muted-foreground/50"
+            />
+            {pill(inSym)}
+          </div>
+        </div>
+        <div className="relative h-px bg-border">
+          <span className="absolute left-1/2 top-1/2 grid size-8 -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full border border-border bg-card">
+            <ArrowDown className="size-4" />
           </span>
-        </Row>
-        {q?.legs.map((l) => (
-          <Row key={l.market} label={`${baseToken(l.market, markets)?.symbol ?? "leg"} impact`}>
-            <span className={l.impactBps > 100 ? "text-warning" : undefined}>{(l.impactBps / 100).toFixed(2)}%</span>
-          </Row>
-        ))}
-      </dl>
-      <Divider />
-      <div className="space-y-3 p-5">
-        {!authenticated && ready ? (
-          <Button className="w-full py-3" onClick={login}>
-            Log in to trade
-          </Button>
-        ) : (
-          <Button className="w-full py-3" pending={busy} disabled={reason !== null} onClick={() => void submit()}>
-            {busy ? (side === "mint" ? "Buying…" : "Selling…") : (reason ?? `${side === "mint" ? "Buy" : "Sell"} ${symbol}`)}
-          </Button>
-        )}
-        {balances?.mon === BigInt(0) && (
-          <p className="text-xs text-warning">
-            Your wallet has no MON for gas.{" "}
-            <a href="https://faucet.monad.xyz" target="_blank" rel="noreferrer" className="underline underline-offset-2">
-              Get testnet MON
-            </a>
-          </p>
-        )}
+        </div>
+        <div className="p-4">
+          <div className="text-sm text-muted-foreground">Receive</div>
+          <div className="mt-2 flex items-center gap-3">
+            <div className="tnum w-full min-w-0 truncate text-3xl font-medium tracking-tight">
+              {quote.loading && debounced !== null ? (
+                <Spinner />
+              ) : q ? (
+                fmtUnits(q.expectedOut, outDecimals)
+              ) : (
+                <span className="text-muted-foreground/50">0</span>
+              )}
+            </div>
+            {pill(outSym)}
+          </div>
+        </div>
       </div>
-    </Panel>
+
+      {q && (
+        <dl className="space-y-1.5 px-1 text-xs">
+          <Row label="Minimum received">{`${fmtUnits(q.minOut, outDecimals)} ${outSym}`}</Row>
+          {q.legs.map((l) => (
+            <Row key={l.market} label={`${baseToken(l.market, markets)?.symbol ?? "leg"} price impact`}>
+              <span className={l.impactBps > 100 ? "text-warning" : undefined}>{(l.impactBps / 100).toFixed(2)}%</span>
+            </Row>
+          ))}
+        </dl>
+      )}
+
+      {!authenticated && ready ? (
+        <Button className="w-full rounded-xl py-3.5 text-base hover:rounded-xl" onClick={login}>
+          Log in to trade
+        </Button>
+      ) : (
+        <Button
+          className="w-full rounded-xl py-3.5 text-base hover:rounded-xl"
+          pending={busy}
+          disabled={reason !== null}
+          onClick={() => void submit()}
+        >
+          {busy ? (side === "mint" ? "Buying…" : "Selling…") : (reason ?? `${side === "mint" ? "Buy" : "Sell"} ${symbol}`)}
+        </Button>
+      )}
+      {balances?.mon === BigInt(0) && (
+        <p className="text-xs text-warning">
+          Your wallet has no MON for gas.{" "}
+          <a href="https://faucet.monad.xyz" target="_blank" rel="noreferrer" className="underline underline-offset-2">
+            Get testnet MON
+          </a>
+        </p>
+      )}
+      <p className="text-[11px] leading-4 text-muted-foreground">
+        Monad testnet only; tokens have no real value. Each order fills every component on its Kuru order book in one
+        transaction. Prices move between quote and fill; the trade reverts if you receive less than the minimum at your
+        slippage setting.
+      </p>
+    </div>
   );
 }
 

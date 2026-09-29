@@ -78,9 +78,9 @@ export function CreateBasket() {
 
   return (
     <main className="w-full px-4 pt-8 pb-24">
-      <Reveal className="mx-auto w-full max-w-5xl space-y-6">
+      <Reveal className="mx-auto w-full space-y-6">
         <div>
-          <h1 className="text-lg font-medium">Create a basket</h1>
+          <h1 className="text-xl font-medium sm:text-2xl">Create a basket</h1>
           <p className="mt-1 text-sm text-muted-foreground">
             Pick Kuru markets, set weights, and deploy an ERC-20 basket anyone can buy.
           </p>
@@ -100,7 +100,10 @@ export function CreateBasket() {
 
         <div className="grid gap-6 lg:grid-cols-[1fr_340px] lg:items-start">
           <Panel>
-            <div className="grid gap-5 p-5 sm:grid-cols-[1fr_160px]">
+            <div className="px-5 pt-5 sm:px-6 sm:pt-6">
+              <Step n={1}>Name it</Step>
+            </div>
+            <div className="grid gap-5 p-5 sm:grid-cols-[1fr_160px] sm:p-6">
               <div>
                 <Label>Name</Label>
                 <input
@@ -127,8 +130,8 @@ export function CreateBasket() {
 
             <Divider />
 
-            <div className="p-5">
-              <Label>Markets</Label>
+            <div className="p-5 sm:p-6">
+              <Step n={2}>Pick markets</Step>
               {markets.loading ? (
                 <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
                   {[0, 1, 2, 3].map((i) => (
@@ -181,9 +184,9 @@ export function CreateBasket() {
             {picks.length > 0 && (
               <>
                 <Divider />
-                <div className="space-y-3 p-5">
+                <div className="space-y-3 p-5 sm:p-6">
                   <div className="flex items-center justify-between">
-                    <Label>Weights</Label>
+                    <Step n={3}>Set weights</Step>
                     <div className="flex items-center gap-3 text-xs">
                       <span className={cn("tnum", sum === 10000 ? "text-muted-foreground" : "text-warning")}>
                         {fmtBps(sum)} / 100%
@@ -247,7 +250,7 @@ export function CreateBasket() {
               </>
             )}
 
-            <div className="space-y-3 p-5 pt-0">
+            <div className="space-y-3 p-5 pt-0 sm:p-6 sm:pt-0">
               {picks.length > 0 && invalid && <p className="text-xs text-warning">{invalid}</p>}
               <Button
                 className="w-full py-3"
@@ -262,7 +265,7 @@ export function CreateBasket() {
           </Panel>
 
           <div className="space-y-3 lg:sticky lg:top-6">
-            <Panel className="p-5">
+            <Panel className="p-5 sm:p-6">
               <Label>Preview</Label>
               <div className="mt-4 flex items-start gap-3">
                 {picks.length > 0 ? (
@@ -305,5 +308,14 @@ export function CreateBasket() {
         </div>
       </Reveal>
     </main>
+  );
+}
+
+function Step({ n, children }: { n: number; children: React.ReactNode }) {
+  return (
+    <h2 className="flex items-center gap-2 text-base font-medium">
+      <span className="grid size-6 place-items-center rounded-full bg-primary/15 text-xs text-primary">{n}</span>
+      {children}
+    </h2>
   );
 }

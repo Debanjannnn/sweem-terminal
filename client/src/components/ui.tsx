@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Check, ChevronDown, TriangleAlert } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { ExecutionStatus } from "@/lib/types";
 
@@ -99,7 +98,7 @@ export function Panel({
   return (
     <div
       className={cn(
-        "overflow-hidden rounded-2xl border border-border bg-card",
+        "overflow-hidden rounded-3xl border border-border bg-card",
         className,
       )}
     >
@@ -112,78 +111,6 @@ export const Divider = () => <div className="h-px bg-border" />;
 
 export function Label({ children }: { children: React.ReactNode }) {
   return <span className="text-sm text-muted-foreground">{children}</span>;
-}
-
-export function Picker<T extends string>({
-  value,
-  onChange,
-  options,
-  placeholder = "none",
-  disabled,
-  ariaLabel,
-  className,
-}: {
-  value: T | null;
-  onChange: (v: T) => void;
-  options: readonly { value: T; label: string; hint?: string }[];
-  placeholder?: string;
-  disabled?: boolean;
-  ariaLabel: string;
-  className?: string;
-}) {
-  const { open, setOpen, ref } = useDismissable();
-
-  const current = options.find((o) => o.value === value);
-
-  return (
-    <div className={cn("relative shrink-0", className)} ref={ref}>
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        disabled={disabled || options.length === 0}
-        aria-label={ariaLabel}
-        aria-expanded={open}
-        className="inline-flex max-w-56 items-center gap-2 rounded-full bg-secondary/70 py-2 pl-4 pr-3 text-sm font-medium transition-colors hover:bg-secondary disabled:cursor-not-allowed disabled:text-muted-foreground"
-      >
-        <span className="truncate">{current?.label ?? placeholder}</span>
-        <ChevronDown className="size-4 shrink-0 text-muted-foreground" />
-      </button>
-      {open && (
-        <ul className="absolute right-0 z-30 mt-2 max-h-72 w-60 overflow-y-auto rounded-xl border border-border bg-popover p-1 shadow-xl">
-          {options.map((o) => (
-            <li key={o.value}>
-              <button
-                type="button"
-                onClick={() => {
-                  onChange(o.value);
-                  setOpen(false);
-                }}
-                className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-secondary/70"
-              >
-                <span className="truncate">{o.label}</span>
-                {o.hint && (
-                  <span className="ml-auto tnum text-xs text-positive">
-                    {o.hint}
-                  </span>
-                )}
-                {o.value === value && (
-                  <Check className={cn("size-4 text-foreground", o.hint ? "" : "ml-auto")} />
-                )}
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
-
-export function WarningMark({ label }: { label: string }) {
-  return (
-    <Tooltip label={label}>
-      <TriangleAlert aria-label={label} className="size-3.5 shrink-0 text-warning" />
-    </Tooltip>
-  );
 }
 
 export function Tooltip({

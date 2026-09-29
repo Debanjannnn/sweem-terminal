@@ -46,7 +46,7 @@ const pos = (s: string) => DEC.test(s.trim()) && Number(s) > 0;
 const STOP_LOSS_CAP = "1000000000";
 
 export const inputCls =
-  "tnum w-full rounded-xl border border-border bg-secondary/40 px-3 py-2 text-sm outline-none transition-colors placeholder:text-muted-foreground/60 focus:border-ring";
+  "tnum w-full rounded-xl border border-border bg-card px-3 py-2.5 text-sm outline-none transition-colors placeholder:text-muted-foreground/60 focus:border-ring";
 
 function Field({ label, hint, children }: { label: string; hint?: React.ReactNode; children: React.ReactNode }) {
   return (

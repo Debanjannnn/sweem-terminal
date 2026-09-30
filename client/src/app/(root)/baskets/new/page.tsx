@@ -1,5 +1,5 @@
 import { CreateBasket } from "@/components/create/CreateBasket";
 
-export default function Page() {
+export default function NewBasketPage() {
   return <CreateBasket />;
 }

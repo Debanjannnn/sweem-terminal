@@ -3,12 +3,11 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { Search } from "lucide-react";
-import { fmtUsd, getBaskets } from "@/lib/api";
+import { getBaskets, getStrategies } from "@/lib/api";
 import { useAsync } from "@/lib/session";
-import { tokenBySymbol } from "@/lib/tokens";
+import { MARKETS } from "@/lib/tokens";
 import { cn } from "@/lib/utils";
 import { IconStack } from "@/components/invest/BasketCard";
-import { symbolOf, useMarkets } from "@/components/invest/extras";
 import { EASE } from "@/components/motion";
 import { AnimatePresence, motion, useIsPresent } from "motion/react";
 
@@ -51,7 +50,7 @@ export function HeroSearch() {
       className="group mx-auto flex w-full max-w-[580px] cursor-pointer items-center gap-3 rounded-full border-2 border-white/10 bg-card py-3.5 pr-5 pl-5 text-left text-muted-foreground ring-white/5 transition-[box-shadow,border-color] hover:border-white/15 hover:ring-4 md:py-4"
     >
       <Search className="size-5 shrink-0 transition-colors group-hover:text-foreground" />
-      <span className="flex-1 text-[15px] md:text-[17px]">Search baskets on Monad</span>
+      <span className="flex-1 text-[15px] md:text-[17px]">Search tokens, baskets and strategies</span>
       <span className="hidden gap-1 sm:flex">
         <Kbd>⌘</Kbd>
         <Kbd>K</Kbd>
@@ -84,12 +83,12 @@ export function BasketSearch() {
       <button
         type="button"
         onClick={() => setOpen(true)}
-        aria-label="Search baskets"
+        aria-label="Search"
         className="group flex size-9 cursor-pointer items-center justify-center gap-2 rounded-full border border-white/10 bg-card text-sm text-muted-foreground transition-[opacity,translate,border-color] duration-200 hover:border-white/15 hover:text-foreground md:w-[320px] md:justify-between md:px-3 [html[data-hero]_&]:pointer-events-none [html[data-hero]_&]:translate-y-1 [html[data-hero]_&]:opacity-0"
       >
         <span className="flex items-center gap-2">
           <Search className="size-4" />
-          <span className="hidden md:inline">Find baskets…</span>
+          <span className="hidden md:inline">Search…</span>
         </span>
         <span className="hidden gap-1 md:flex">
           <Kbd className="h-5 min-w-5 text-[11px]">⌘</Kbd>
@@ -108,30 +107,41 @@ function SearchDialog({ onClose }: { onClose: () => void }) {
   const [q, setQ] = useState("");
   const [active, setActive] = useState(0);
   const baskets = useAsync("baskets", () => getBaskets());
-  const markets = useMarkets();
+  const strategies = useAsync("strategies", () => getStrategies());
   const present = useIsPresent();
 
   useEffect(() => ref.current?.showModal(), []);
 
   const s = q.trim().toLowerCase();
-  const items = (baskets.data ?? [])
-    .map((b) => ({ b, symbols: b.components.map((c) => symbolOf(c.market, markets.data)) }))
-    .filter(
-      ({ b, symbols }) =>
-        !s ||
-        [b.name, b.symbol, ...symbols, ...symbols.map((x) => tokenBySymbol(x)?.name ?? "")].some((v) =>
-          v.toLowerCase().includes(s),
-        ),
-    );
+  const all = [
+    ...MARKETS.map((m) => ({ key: m.symbol, href: `/trade/${m.symbol}`, title: m.token.name, tag: `$${m.symbol}`, sub: "Token · Kuru / USDC", icons: [m.symbol] })),
+    ...(baskets.data ?? []).map((b) => ({
+      key: b.id,
+      href: `/baskets/${b.id}`,
+      title: b.name,
+      tag: "Basket",
+      sub: b.legs.map((l) => `${l.market} ${l.weightBps / 100}%`).join(" · "),
+      icons: b.legs.map((l) => l.market),
+    })),
+    ...(strategies.data ?? []).map((st) => ({
+      key: st.id,
+      href: `/earn/${st.id}`,
+      title: st.name,
+      tag: "Earn",
+      sub: `${st.asset} · ${st.sources.map((x) => x.kind).join(", ")}`,
+      icons: [st.asset],
+    })),
+  ];
+  const items = all.filter((it) => !s || [it.title, it.tag, it.sub].some((v) => v.toLowerCase().includes(s)));
   const idx = Math.min(active, items.length - 1);
 
-  const go = (address: string) => {
+  const go = (href: string) => {
     onClose();
-    router.push(`/baskets/${address}`);
+    router.push(href);
   };
 
   const onKey = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter" && items[idx]) return go(items[idx].b.address);
+    if (e.key === "Enter" && items[idx]) return go(items[idx].href);
     if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
     e.preventDefault();
     const next = (idx + (e.key === "ArrowDown" ? 1 : -1) + items.length) % Math.max(items.length, 1);
@@ -165,7 +175,7 @@ function SearchDialog({ onClose }: { onClose: () => void }) {
             setActive(0);
           }}
           onKeyDown={onKey}
-          placeholder="Search baskets, symbols or tokens…"
+          placeholder="Search tokens, baskets or strategies…"
           role="combobox"
           aria-expanded
           aria-controls="basket-search-list"
@@ -176,36 +186,32 @@ function SearchDialog({ onClose }: { onClose: () => void }) {
       <div ref={list} id="basket-search-list" role="listbox" className="h-[400px] overflow-y-auto p-2">
         <p className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-muted-foreground">
           <Search className="size-3" />
-          {s ? "Search results" : "All baskets"}
+          {s ? "Search results" : "Explore"}
         </p>
-        {items.map(({ b, symbols }, i) => {
-          const nav = Number(b.nav?.navPerShare ?? 0);
-          return (
-            <button
-              key={b.address}
-              type="button"
-              role="option"
-              aria-selected={i === idx}
-              onMouseMove={() => setActive(i)}
-              onClick={() => go(b.address)}
-              className="flex w-full cursor-pointer items-center gap-3 rounded-2xl px-3 py-2 text-left transition-colors duration-150 aria-selected:bg-secondary"
-            >
-              <IconStack symbols={symbols} size={28} ring="ring-popover" />
-              <span className="flex min-w-0 flex-1 flex-col">
-                <span className="flex items-center gap-2">
-                  <span className="truncate font-medium">{b.name}</span>
-                  <span className="text-sm text-muted-foreground">${b.symbol}</span>
-                </span>
-                <span className="truncate text-xs text-muted-foreground">{symbols.join(" · ")}</span>
+        {items.map((it, i) => (
+          <button
+            key={it.key}
+            type="button"
+            role="option"
+            aria-selected={i === idx}
+            onMouseMove={() => setActive(i)}
+            onClick={() => go(it.href)}
+            className="flex w-full cursor-pointer items-center gap-3 rounded-2xl px-3 py-2 text-left transition-colors duration-150 aria-selected:bg-secondary"
+          >
+            <IconStack symbols={it.icons} size={28} ring="ring-popover" />
+            <span className="flex min-w-0 flex-1 flex-col">
+              <span className="flex items-center gap-2">
+                <span className="truncate font-medium">{it.title}</span>
+                <span className="text-sm text-muted-foreground">{it.tag}</span>
               </span>
-              <span className="tnum text-sm">{nav > 0 ? fmtUsd(nav) : "—"}</span>
-            </button>
-          );
-        })}
-        {baskets.data && items.length === 0 && (
+              <span className="truncate text-xs text-muted-foreground">{it.sub}</span>
+            </span>
+          </button>
+        ))}
+        {items.length === 0 && (
           <p className="py-10 text-center text-sm text-muted-foreground">No results found.</p>
         )}
-        {baskets.error && <p className="py-10 text-center text-sm text-destructive">Failed to load baskets.</p>}
+        {(baskets.error || strategies.error) && <p className="px-3 py-2 text-xs text-muted-foreground">Some results unavailable (api offline).</p>}
       </div>
 
       <div className="hidden items-center justify-center gap-5 border-t border-border px-3 py-3 text-xs md:flex">

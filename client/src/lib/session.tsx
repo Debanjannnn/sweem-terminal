@@ -178,7 +178,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
           theme: "dark",
           accentColor: "#c4f56a",
           landingHeader: "Sign in to sweem",
-          loginMessage: "Tradable baskets on Monad.",
+          loginMessage: "Trade and earn on Monad.",
           walletChainType: "ethereum-only",
         },
         embeddedWallets: { ethereum: { createOnLogin: "all-users" } },

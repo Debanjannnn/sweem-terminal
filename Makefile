@@ -13,8 +13,7 @@ abi:
 
 client-abi:
 	mkdir -p client/src/abi
-	cp abi/SweemBasketFactory.json abi/SweemBasket.json client/src/abi/
-	cp contracts/deployments/10143.json client/src/abi/deployments.json
+	cp contracts/deployments/143.json client/src/abi/deployments.json
 
 test:
 	go test ./...

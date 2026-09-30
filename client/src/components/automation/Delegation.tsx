@@ -6,7 +6,7 @@ import { Button, ErrorBox, Panel, StatusPill } from "@/components/ui";
 import { fmtTime } from "@/lib/api";
 
 export const POLICY_COPY =
-  "sweem's automation key can only call mint, redeem and approve on sweem baskets from your wallet. It can't transfer funds anywhere else, and you can revoke it at any time.";
+  "The Privy policy on Monad (chain 143) only lets sweem's key: trade on the 4 Kuru order books and margin account, approve those venues, supply/withdraw on Aave, Neverland and listed ERC-4626 vaults, stake/redeem shMON, deposit/withdraw the Kuru ActiveVault, open/close Perpl hedges (via the AUSD 3pool), and send USDC only to the sweem fee treasury. Everything else is denied; funds never leave your wallet's own positions. Revoke any time.";
 
 // Delegation status with enable/revoke; compact = inline prompt used inside ScheduleForm.
 export function DelegationCard({ compact = false }: { compact?: boolean }) {
@@ -29,14 +29,14 @@ export function DelegationCard({ compact = false }: { compact?: boolean }) {
             disabled={!wallet || !signerConfigured}
             onClick={() => void delegate()}
           >
-            Enable automation
+            Enable delegation
           </Button>
         )}
       </div>
       <p className="text-xs leading-5 text-muted-foreground">
         {delegated
           ? `Enabled ${fmtTime(me!.delegation!.createdAt)}. Revoking also stops every schedule.`
-          : "Recurring buys and stop-losses run while you're offline, signed from your Privy wallet."}{" "}
+          : "Trades, baskets, DCA, TP/SL and Earn strategies run from your own Privy wallet via a delegated signer — even while you're offline."}{" "}
         {POLICY_COPY}
       </p>
       {!signerConfigured && <ErrorBox message="NEXT_PUBLIC_PRIVY_SIGNER_ID is not set" />}

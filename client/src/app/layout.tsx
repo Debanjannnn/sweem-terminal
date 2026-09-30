@@ -9,8 +9,8 @@ const inter = Inter({ variable: "--font-inter", subsets: ["latin"] });
 const mono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "sweem — tradable baskets on Monad",
-  description: "Build, buy and automate token baskets on Kuru order books. Monad testnet.",
+  title: "sweem — trade and earn on Monad",
+  description: "Trade Kuru markets and baskets, automate with DCA and TP/SL, and follow yield strategies. Monad mainnet, non-custodial.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

@@ -1,103 +1,79 @@
-// Wire shapes, field names as the backend sends them. Addresses lowercase.
-// Raw* / quote amounts = base-unit integer strings; everything else decimal display strings.
-
-export type Market = {
-  market: string;
-  base: string;
-  quote: string;
-  baseDecimals: number;
-  quoteDecimals: number;
-  pricePrecision: string;
-  sizePrecision: string;
-  tickSize: string;
-  minSize: string;
-  takerFeePps: string;
-};
-
-export type Component = { market: string; weightBps: number };
-
-export type Nav = {
-  navPerShare: string;
-  totalNav: string;
-  supply: string;
-  ts: string;
-};
-
-export type BasketStats = {
-  mints: number;
-  redeems: number;
-  usdcInRaw: string;
-  usdcOutRaw: string;
-  sharesRaw: string;
-  holders: number;
-};
-
-export type Basket = {
-  address: string;
-  name: string;
-  symbol: string;
-  components: Component[];
-  createdBlock: number;
-  createdTx: string;
-  creator: string | null;
-  nav: Nav | null;
-  stats?: BasketStats;
-};
-
-export type NavComponent = {
-  market: string;
-  token: string;
-  balance: string;
-  mid: string;
-  value: string;
-};
-
-// market-data GET /baskets/{addr}/nav and WS topic nav.<basket>; ts unix ms.
-export type LiveNav = {
-  basket: string;
-  block: number;
-  ts: number;
-  supply: string;
-  totalNav: string;
-  navPerShare: string;
-  stale: boolean;
-  components: NavComponent[];
-};
+// Wire shapes (tasks/api-v2.md, market-data, history). Amounts on api = human decimal strings; quotes = raw atoms.
 
 export type Level = [px: string, sz: string];
 
-// GET /books/{market} adds stale; WS book.<market> omits it.
-export type Book = {
-  market: string;
-  seq: number;
-  ts: number;
-  bids: Level[];
-  asks: Level[];
-  stale?: boolean;
-};
+// GET /books/{orderbook} adds stale; WS book.<orderbook> omits it.
+export type Book = { market: string; seq: number; ts: number; bids: Level[]; asks: Level[]; stale?: boolean };
 
-export type Trade = {
-  market: string;
-  ts: number;
-  px: string;
-  sz: string;
-  side: "buy" | "sell";
-};
+export type Trade = { market: string; ts: number; px: string; sz: string; side: "buy" | "sell" };
 
-export type QuoteLeg = {
-  market: string;
-  in: string;
-  out: string;
-  avgPx: string;
-  impactBps: number;
-};
+export type Interval = "1m" | "5m" | "1h" | "1d";
+export type Candle = { market: string; interval: Interval; t: number; o: string; h: string; l: string; c: string; v: string; q: string; n: number };
 
+// market-data GET /quote/{orderbook}: raw atoms (buy in USDC, out base; sell reverse)
 export type Quote = {
+  market: string;
+  side: "buy" | "sell";
+  amount: string;
+  fillable: string;
+  partial: boolean;
   expectedOut: string;
   minOut: string;
-  legs: QuoteLeg[];
-  stale: boolean;
+  orderSize: string;
+  avgPx: string;
+  bestPx: string;
+  impactBps: number;
+  maxSafeAmount: string;
+  maxImpactBps: number;
 };
+
+export type BasketQuote = {
+  side: "buy" | "sell";
+  amountUsdc?: string;
+  fillableUsdc?: string;
+  expectedOutUsdc?: string;
+  minOutUsdc?: string;
+  partial: boolean;
+  ok: boolean;
+  legs: { market: string; weightBps?: number; amountUsdc?: string; amount?: string; quote?: Quote; error?: string }[];
+};
+
+export type RateInfo = { source: string; venue: string; asset: string; address: string; apy: string; kind: string; ts: number };
+export type FundingInfo = { perpId: number; name: string; rate: string; intervalSec: number; aprShort: string; aprShort7d: string; block: number; ts: number };
+export type Rates = { ts: number; rates: RateInfo[]; funding: FundingInfo[]; stale: boolean };
+
+export type Leg = { market: string; weightBps: number };
+export type Basket = { id: string; owner: string; name: string; legs: Leg[]; public: boolean; createdAt: string };
+
+export type SourceKind = "lending" | "staking" | "lp" | "basis";
+export type Source = { kind: SourceKind; venue: string; weightBps: number; params?: { leverage?: string } };
+export type Rules = { driftBps?: number; minRebalanceSeconds?: number; fundingGate?: { apr: string; lookbackDays: number } | null };
+
+export type Strategy = {
+  id: string;
+  creator: string;
+  creatorWallet: string | null;
+  name: string;
+  asset: string;
+  sources: Source[];
+  rules: Rules;
+  public: boolean;
+  createdAt: string;
+  backtest: {
+    from: string;
+    to: string;
+    days: number;
+    apyUsd: string;
+    apyAsset: string;
+    maxDrawdownUsd: string;
+    finalUsd: string;
+    hodlApyUsd: string;
+    ranAt: string;
+  } | null;
+  apy: { estimate: string; sources: { kind: string; venue: string; apy: string | null }[]; stale: boolean } | null;
+};
+
+export type StrategyInput = { name: string; asset: string; sources: Source[]; rules?: Rules; public?: boolean };
 
 export type Delegation = {
   id: string;
@@ -109,73 +85,117 @@ export type Delegation = {
   revokedAt: string | null;
 };
 
-export type Me = {
+export type Me = { id: string; walletAddress: string | null; createdAt: string; delegation: Delegation | null };
+
+export type ExecutionStatus = "pending" | "submitted" | "confirmed" | "failed" | "rejected";
+
+export type Step = { action: string; market?: string; token?: string; amount?: string; side?: string; venue?: string; [k: string]: unknown };
+
+export type Execution = {
   id: string;
-  walletAddress: string | null;
+  kind: string;
+  status: ExecutionStatus;
+  stepDone: number;
+  stepsTotal: number;
+  steps: Step[];
+  txHashes: string[];
+  txHash: string | null;
+  error: string | null;
+  scheduleId: string | null;
+  positionId: string | null;
+  basketId: string | null;
   createdAt: string;
-  delegation: Delegation | null;
+  updatedAt: string;
 };
+
+// 202 body of every execution-creating route
+export type Accepted = { executionId: string; kind: string; steps: Step[]; orderId?: string; positionId?: string; feeUsdc?: string };
+
+export type Holdings = {
+  wallet: string;
+  tokens: { symbol: string; address: string; raw: string; amount: string }[];
+  baskets: { basketId: string; name: string; legs: { market: string; raw: string; amount: string }[] }[];
+};
+
+export type Order = {
+  id: string;
+  market: string;
+  side: "buy" | "sell";
+  price: string;
+  size: string;
+  kuruOrderId: string | null;
+  status: "pending" | "open" | "cancelled" | "failed";
+  executionId: string;
+  createdAt: string;
+};
+
+export type LegState = { kind: string; venue: string; asset: string; collateral?: string; lot?: string; entryPx?: string };
 
 export type Position = {
-  basket: string;
-  sharesRaw: string;
-  navPerShare: string | null;
-  valueUsdc: string | null;
-  navTs: string | null;
+  id: string;
+  strategyId: string;
+  strategyName: string;
+  asset: string;
+  wallet: string;
+  principalUsdc: string;
+  status: "opening" | "open" | "closing" | "closed" | "failed";
+  legs: LegState[];
+  openedAt: string;
+  closedAt: string | null;
+  lastRebalanceAt: string | null;
 };
 
-export type Transfer = {
-  kind: "mint" | "redeem";
-  txHash: string;
-  logIndex: number;
-  basket: string;
-  usdcRaw: string;
-  sharesRaw: string;
-  block: number;
-  ts: string;
-};
-
-export type ScheduleKind = "recurring" | "stop_loss";
+export type ScheduleKind = "dca" | "take_profit" | "stop_loss" | "rebalance";
+export type Target = { type: "market" | "basket" | "position"; id: string };
 
 export type ScheduleInput = {
-  basket: string;
   kind: ScheduleKind;
+  target: Target;
   amountUsdc?: string;
   intervalSeconds?: number;
-  stopNavPerShare?: string;
-  redeemBps?: number;
+  triggerPrice?: string;
+  sellBps?: number;
+  driftBps?: number;
   maxSlippageBps: number;
   maxPerRunUsdc: string;
 };
 
 export type Schedule = {
   id: string;
-  basket: string;
-  kind: ScheduleKind;
+  kind: ScheduleKind | "recurring";
+  target: Target | null;
   amountUsdc: string | null;
   intervalSeconds: number | null;
   nextRunAt: string | null;
-  stopNavPerShare: string | null;
-  redeemBps: number | null;
+  triggerPrice: string | null;
+  sellBps: number | null;
+  driftBps: number | null;
   maxSlippageBps: number;
   maxPerRunUsdc: string;
   active: boolean;
   createdAt: string;
 };
 
-export type ExecutionStatus = "pending" | "submitted" | "confirmed" | "failed" | "rejected";
-
-export type Execution = {
-  id: string;
-  scheduleId: string;
-  basket: string;
-  slot: number;
-  kind: "mint" | "redeem";
-  status: ExecutionStatus;
-  txHash: string | null;
-  error: string | null;
-  amountRaw: string | null;
-  minOutRaw: string | null;
-  createdAt: string;
-  updatedAt: string;
+// history POST /backtest
+export type BacktestPoint = { day: string; usd: string; asset: string; hodlUsd: string; basisActive: boolean };
+export type Backtest = {
+  label: string;
+  asset: string;
+  amount: string;
+  from: string;
+  to: string;
+  days: number;
+  estimated: boolean;
+  coverage: { series: string; first: string; last: string; days: number; note?: string }[];
+  initialUsd: string;
+  finalUsd: string;
+  apyUsd: string;
+  apyAsset: string;
+  maxDrawdownUsd: string;
+  hodl: { finalUsd: string; apyUsd: string; maxDrawdownUsd: string };
+  rebalances: number;
+  costsUsd: string;
+  contributions: Record<string, string>;
+  curve: BacktestPoint[];
+  notes: string[];
 };

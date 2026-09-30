@@ -2,50 +2,41 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
-import { Check, Fuel, Plus, X } from "lucide-react";
-import { zeroAddress } from "viem";
-import { fmtBps, getBook } from "@/lib/api";
+import { Check, Plus, X } from "lucide-react";
+import { createBasket, errText, fmtBps, getBook } from "@/lib/api";
 import { useAsync, useSession } from "@/lib/session";
-import { readBalance, useTx } from "@/lib/tx";
-import { Button, Divider, ErrorBox, Label, Panel, Skeleton, Tooltip } from "@/components/ui";
+import { MARKETS } from "@/lib/tokens";
+import { Button, Divider, ErrorBox, Label, Panel, Tooltip } from "@/components/ui";
 import { TokenIcon } from "@/components/TokenIcon";
 import { IconStack } from "@/components/invest/BasketCard";
-import { symbolOf, useMarkets } from "@/components/invest/extras";
 import { cn } from "@/lib/utils";
 import { evenSplit, pctToBps, setWeight, weightsError } from "./weights";
 
-const FAUCET_URL = "https://faucet.monad.xyz";
-const LOW_GAS = 10n ** 16n; // 0.01 MON
-const COLORS = ["var(--primary)", "var(--chart-1)", "var(--chart-2)", "var(--warning)", "var(--chart-3)", "var(--chart-4)"];
+export const COLORS = ["var(--primary)", "var(--chart-1)", "var(--chart-2)", "var(--warning)", "var(--chart-3)", "var(--chart-4)"];
 
 type Pick = { market: string; bps: number };
 
+// Basket = off-chain definition (api); buying it places one Kuru market order per leg from the user's wallet.
 export function CreateBasket() {
   const router = useRouter();
-  const { ready, authenticated, login, address } = useSession();
-  const { createBasket } = useTx();
-  const markets = useMarkets();
+  const { ready, authenticated, login } = useSession();
   // tradable = both book sides present; unknown (fetch failed) stays selectable
-  const books = useAsync(markets.data ? "create:books" : null, async () => {
-    const list = markets.data ?? [];
-    const res = await Promise.allSettled(list.map((m) => getBook(m.market)));
-    return new Map(
-      list.map((m, i) => {
-        const r = res[i];
-        return [m.market, r.status === "rejected" || (r.value.bids.length > 0 && r.value.asks.length > 0)];
-      }),
-    );
+  const books = useAsync("create:books", async () => {
+    const res = await Promise.allSettled(MARKETS.map((m) => getBook(m.orderbook)));
+    return new Map(MARKETS.map((m, i) => {
+      const r = res[i];
+      return [m.symbol, r.status === "rejected" || (r.value.bids.length > 0 && r.value.asks.length > 0)];
+    }));
   });
-  const gas = useAsync(address ? `mon:${address}` : null, () => readBalance(zeroAddress, address!));
 
   const [picks, setPicks] = useState<Pick[]>([]);
   const [typing, setTyping] = useState<{ i: number; text: string } | null>(null);
   const [name, setName] = useState("");
-  const [symbol, setSymbol] = useState("");
+  const [isPublic, setPublic] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const sym = (m: string) => symbolOf(m, markets.data);
+  const sym = (m: string) => m;
   const resplit = (ms: string[]) => {
     const w = evenSplit(ms.length);
     setPicks(ms.map((market, i) => ({ market, bps: w[i] })));
@@ -59,9 +50,8 @@ export function CreateBasket() {
 
   const wErr = weightsError(picks.map((p) => p.bps));
   const sum = picks.reduce((s, p) => s + p.bps, 0);
-  const nameErr = name.trim() === "" ? "Name your basket" : symbol === "" ? "Add a ticker symbol" : null;
+  const nameErr = name.trim() === "" ? "Name your basket" : null;
   const invalid = wErr ?? nameErr;
-  const lowGas = gas.data !== null && gas.data < LOW_GAS;
 
   async function submit() {
     if (!authenticated) return login();
@@ -69,11 +59,10 @@ export function CreateBasket() {
     setBusy(true);
     setError(null);
     try {
-      const addr = await createBasket(name.trim(), symbol, picks.map((p) => ({ market: p.market, weightBps: p.bps })));
-      if (addr === zeroAddress) throw new Error("Basket created, but its address was not found in the receipt");
-      router.push(`/baskets/${addr}`);
+      const b = await createBasket({ name: name.trim(), legs: picks.map((p) => ({ market: p.market, weightBps: p.bps })), public: isPublic });
+      router.push(`/baskets/${b.id}`);
     } catch (e) {
-      setError(e instanceof Error && e.message.startsWith("Basket created") ? e.message : null);
+      setError(errText(e));
       setBusy(false);
     }
   }
@@ -84,28 +73,16 @@ export function CreateBasket() {
         <div>
           <h1 className="text-xl font-medium sm:text-2xl">Create a basket</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            Pick Kuru markets, set weights, and deploy an ERC-20 basket anyone can buy.
+            Pick Kuru markets and weights. Buying fills each leg on its Kuru book into your own wallet — no share token, no pooled funds.
           </p>
         </div>
-
-        {lowGas && (
-          <div className="flex items-center gap-2 rounded-lg border border-warning/30 bg-warning/10 p-3 text-xs text-warning">
-            <Fuel className="size-4 shrink-0" />
-            <span>
-              Your wallet has almost no MON for gas.{" "}
-              <a href={FAUCET_URL} target="_blank" rel="noreferrer" className="underline underline-offset-2">
-                Get testnet MON
-              </a>
-            </span>
-          </div>
-        )}
 
         <div className="grid gap-6 lg:grid-cols-[1fr_340px] lg:items-start">
           <Panel>
             <div className="px-5 pt-5 sm:px-6 sm:pt-6">
               <Step n={1}>Name it</Step>
             </div>
-            <div className="grid gap-5 p-5 sm:grid-cols-[1fr_160px] sm:p-6">
+            <div className="grid gap-5 p-5 sm:grid-cols-[1fr_auto] sm:p-6">
               <div>
                 <Label>Name</Label>
                 <input
@@ -117,70 +94,49 @@ export function CreateBasket() {
                   className="mt-3 w-full bg-transparent text-2xl font-medium tracking-tight outline-none placeholder:text-muted-foreground/40"
                 />
               </div>
-              <div>
-                <Label>Symbol</Label>
-                <input
-                  value={symbol}
-                  onChange={(e) => setSymbol(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 11))}
-                  placeholder="BLUE"
-                  aria-label="Basket symbol"
-                  disabled={busy}
-                  className="mt-3 w-full bg-transparent text-2xl font-medium tracking-tight outline-none placeholder:text-muted-foreground/40"
-                />
-              </div>
+              <label className="flex items-center gap-2 self-end pb-1 text-sm">
+                <input type="checkbox" checked={isPublic} onChange={(e) => setPublic(e.target.checked)} disabled={busy} className="accent-[var(--primary)]" />
+                Public (listed on Explore)
+              </label>
             </div>
 
             <Divider />
 
             <div className="p-5 sm:p-6">
               <Step n={2}>Pick markets</Step>
-              {markets.loading ? (
-                <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
-                  {[0, 1, 2, 3].map((i) => (
-                    <Skeleton key={i} className="h-14 rounded-xl" />
-                  ))}
-                </div>
-              ) : markets.error ? (
-                <div className="mt-4">
-                  <ErrorBox message={markets.error} />
-                </div>
-              ) : markets.data?.length === 0 ? (
-                <p className="mt-4 text-sm text-muted-foreground">No markets are allowed by the factory yet.</p>
-              ) : (
-                <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
-                  {markets.data?.map((m) => {
-                    const on = picks.some((p) => p.market === m.market);
-                    const dead = books.data?.get(m.market) === false;
-                    const tile = (
-                      <button
-                        type="button"
-                        onClick={() => toggle(m.market)}
-                        disabled={busy || (dead && !on) || books.loading}
-                        aria-pressed={on}
-                        className={cn(
-                          "flex w-full items-center gap-2.5 rounded-xl border p-3 text-left text-sm transition-colors disabled:cursor-not-allowed",
-                          on ? "border-primary/60 bg-primary/10" : "border-border bg-secondary/30 hover:bg-secondary/60",
-                          dead && "opacity-50",
-                        )}
-                      >
-                        <TokenIcon symbol={sym(m.market)} size={24} />
-                        <span className="min-w-0 flex-1">
-                          <span className="block truncate font-medium">{sym(m.market)}</span>
-                          <span className="block text-xs text-muted-foreground">{dead ? "no liquidity" : "/ USDC"}</span>
-                        </span>
-                        {on ? <Check className="size-4 text-primary" /> : !dead && <Plus className="size-4 text-muted-foreground" />}
-                      </button>
-                    );
-                    return dead ? (
-                      <Tooltip key={m.market} label="No bids or asks on this Kuru book right now" className="w-full">
-                        {tile}
-                      </Tooltip>
-                    ) : (
-                      <div key={m.market}>{tile}</div>
-                    );
-                  })}
-                </div>
-              )}
+              <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
+                {MARKETS.map((m) => {
+                  const on = picks.some((p) => p.market === m.symbol);
+                  const dead = books.data?.get(m.symbol) === false;
+                  const tile = (
+                    <button
+                      type="button"
+                      onClick={() => toggle(m.symbol)}
+                      disabled={busy || (dead && !on)}
+                      aria-pressed={on}
+                      className={cn(
+                        "flex w-full items-center gap-2.5 rounded-xl border p-3 text-left text-sm transition-colors disabled:cursor-not-allowed",
+                        on ? "border-primary/60 bg-primary/10" : "border-border bg-secondary/30 hover:bg-secondary/60",
+                        dead && "opacity-50",
+                      )}
+                    >
+                      <TokenIcon symbol={m.symbol} size={24} />
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate font-medium">{m.symbol}</span>
+                        <span className="block text-xs text-muted-foreground">{dead ? "no liquidity" : m.token.name}</span>
+                      </span>
+                      {on ? <Check className="size-4 text-primary" /> : !dead && <Plus className="size-4 text-muted-foreground" />}
+                    </button>
+                  );
+                  return dead ? (
+                    <Tooltip key={m.symbol} label="No bids or asks on this Kuru book right now" className="w-full">
+                      {tile}
+                    </Tooltip>
+                  ) : (
+                    <div key={m.symbol}>{tile}</div>
+                  );
+                })}
+              </div>
             </div>
 
             {picks.length > 0 && (
@@ -279,7 +235,7 @@ export function CreateBasket() {
                 )}
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm font-semibold">{name.trim() || "Untitled basket"}</p>
-                  <p className="truncate text-xs text-muted-foreground">{symbol || "TICKER"}</p>
+                  <p className="truncate text-xs text-muted-foreground">{isPublic ? "Public" : "Private"} basket</p>
                 </div>
               </div>
               <div className="mt-6 flex h-2 overflow-hidden rounded-full bg-secondary">
@@ -303,8 +259,8 @@ export function CreateBasket() {
               </ul>
             </Panel>
             <p className="px-1 text-xs leading-relaxed text-muted-foreground">
-              Weights are fixed at creation. Buyers pay USDC and each leg fills on its Kuru book; you pay only the
-              deploy gas.
+              Anyone can buy a public basket; each buyer&apos;s legs fill on Kuru into their own wallet. Rebalance
+              and TP/SL automations run per holder.
             </p>
           </div>
         </div>

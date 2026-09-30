@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "check": "bun run src/lib/api.check.ts"
+    "check": "for f in src/components/*/*.check.ts; do bun run $f || exit 1; done"
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",

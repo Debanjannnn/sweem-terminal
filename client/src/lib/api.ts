@@ -1,25 +1,34 @@
 import { getAccessToken } from "@privy-io/react-auth";
-import { API_URL, MARKET_DATA_URL } from "./config";
+import { API_URL, HISTORY_URL, MARKET_DATA_URL } from "./config";
+import { marketOf } from "./tokens";
 import type {
+  Accepted,
+  Backtest,
   Basket,
+  BasketQuote,
   Book,
+  Candle,
   Execution,
-  LiveNav,
-  Market,
+  Holdings,
+  Interval,
+  Leg,
   Me,
-  Nav,
+  Order,
   Position,
   Quote,
+  Rates,
   Schedule,
   ScheduleInput,
-  Transfer,
+  Strategy,
+  StrategyInput,
 } from "./types";
 
-// status 0 = network error; message = backend snake_code when it sent one.
+// status 0 = network error; message = backend snake_code when it sent one; detail = planner/history detail.
 export class ApiError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    readonly detail?: string,
   ) {
     super(message);
     this.name = "ApiError";
@@ -41,8 +50,12 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
     body = text;
   }
   if (!res.ok) {
-    const code = (body as { error?: unknown } | null)?.error;
-    throw new ApiError(res.status, typeof code === "string" ? code : `request failed (${res.status})`);
+    const { error: code, detail } = (body ?? {}) as { error?: unknown; detail?: unknown };
+    throw new ApiError(
+      res.status,
+      typeof code === "string" ? code : `request failed (${res.status})`,
+      typeof detail === "string" ? detail : undefined,
+    );
   }
   return body as T;
 }
@@ -67,39 +80,79 @@ const q = (params: Record<string, string | number | undefined>) => {
   return out ? `?${out}` : "";
 };
 
+const json = (body: unknown): RequestInit => ({
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify(body),
+});
+
 // api — public
-export const getBaskets = (creator?: string) =>
-  request<Basket[]>(`${API_URL}/baskets${q({ creator: creator?.toLowerCase() })}`);
-export const getBasket = (address: string) =>
-  request<Basket>(`${API_URL}/baskets/${address.toLowerCase()}`);
-// default window: last 24h
-export const getNavHistory = (address: string, from?: Date, to?: Date) =>
-  request<Nav[]>(
-    `${API_URL}/baskets/${address.toLowerCase()}/nav/history${q({ from: from?.toISOString(), to: to?.toISOString() })}`,
-  );
+// drops rows from an older api (retired ERC-20 baskets have no legs)
+export const getBaskets = () => request<Basket[]>(`${API_URL}/baskets`).then((l) => l.filter((b) => Array.isArray(b?.legs)));
+export const getBasket = (id: string) => request<Basket>(`${API_URL}/baskets/${id}`);
+export const getStrategies = (creator?: string) => request<Strategy[]>(`${API_URL}/strategies${q({ creator })}`);
+// authed when logged in so the creator can see their private strategy
+export const getStrategy = async (id: string) => {
+  const token = await getAccessToken().catch(() => null);
+  return request<Strategy>(`${API_URL}/strategies/${id}`, token ? { headers: { Authorization: `Bearer ${token}` } } : undefined);
+};
 
 // api — /me (Privy bearer)
 export const getMe = () => authed<Me>("/me");
-export const getPositions = () => authed<Position[]>("/me/positions");
-export const getHistory = () => authed<Transfer[]>("/me/history");
-export const getExecutions = () => authed<Execution[]>("/me/executions");
-export const getSchedules = () => authed<Schedule[]>("/me/schedules");
-export const createSchedule = (input: ScheduleInput) => authed<Schedule>("/me/schedules", "POST", input);
-export const deleteSchedule = (id: string) => authed<{ deactivated: boolean }>(`/me/schedules/${id}`, "DELETE");
 export const putDelegation = (walletId: string, walletAddress: string) =>
   authed<Me["delegation"]>("/me/delegation", "POST", { walletId, walletAddress });
 export const deleteDelegation = () => authed<{ revoked: boolean }>("/me/delegation", "DELETE");
+export const getMyBaskets = () => authed<Basket[]>("/me/baskets");
+export const createBasket = (b: { name: string; legs: Leg[]; public: boolean }) => authed<Basket>("/me/baskets", "POST", b);
+export const trade = (b: { market: string; side: "buy" | "sell"; amount: string; slippageBps?: number }) =>
+  authed<Accepted>("/me/trade", "POST", b);
+export const buyBasket = (id: string, amountUsdc: string, slippageBps?: number) =>
+  authed<Accepted>(`/me/baskets/${id}/buy`, "POST", { amountUsdc, slippageBps });
+export const sellBasket = (id: string, bps: number, slippageBps?: number) =>
+  authed<Accepted>(`/me/baskets/${id}/sell`, "POST", { bps, slippageBps });
+export const placeOrder = (b: { market: string; side: "buy" | "sell"; price: string; size: string; postOnly?: boolean; fund?: boolean }) =>
+  authed<Accepted>("/me/orders", "POST", b);
+export const getOrders = () => authed<Order[]>("/me/orders");
+export const cancelOrder = (id: string) => authed<Accepted>(`/me/orders/${id}`, "DELETE");
+export const getHoldings = () => authed<Holdings>("/me/holdings");
+export const createStrategy = (s: StrategyInput) => authed<Strategy>("/strategies", "POST", s);
+export const getMyStrategies = () => authed<Strategy[]>("/me/strategies");
+export const deployStrategy = (id: string, amountUsdc: string, slippageBps?: number) =>
+  authed<Accepted>(`/me/strategies/${id}/deploy`, "POST", { amountUsdc, slippageBps });
+export const withdrawPosition = (id: string) => authed<Accepted>(`/me/positions/${id}/withdraw`, "POST", {});
+export const getPositions = () => authed<Position[]>("/me/positions");
+export const getExecutions = () => authed<Execution[]>("/me/executions");
+export const getExecution = (id: string) => authed<Execution>(`/me/executions/${id}`);
+export const getSchedules = () => authed<Schedule[]>("/me/schedules");
+export const createSchedule = (input: ScheduleInput) => authed<Schedule>("/me/schedules", "POST", input);
+export const deleteSchedule = (id: string) => authed<unknown>(`/me/schedules/${id}`, "DELETE");
 
-// market-data
-export const getMarkets = () => request<Market[]>(`${MARKET_DATA_URL}/markets`);
-export const getLiveNav = (basket: string) =>
-  request<LiveNav>(`${MARKET_DATA_URL}/baskets/${basket.toLowerCase()}/nav`);
-export const getBook = (market: string) => request<Book>(`${MARKET_DATA_URL}/books/${market.toLowerCase()}`);
-// amount raw: USDC 6dp for mint, shares 18dp for redeem. 503 "stale" when feed is down.
-export const getQuote = (basket: string, side: "mint" | "redeem", amount: bigint, slippageBps = 50) =>
-  request<Quote>(
-    `${MARKET_DATA_URL}/quote/${basket.toLowerCase()}${q({ side, amount: amount.toString(), slippageBps })}`,
-  );
+// market-data (orderbook addresses). 503 "stale" when the feed is down.
+export const getBook = (orderbook: string) => request<Book>(`${MARKET_DATA_URL}/books/${orderbook}`);
+// amount raw atoms: buy = USDC, sell = base
+export const getQuote = (orderbook: string, side: "buy" | "sell", amount: bigint, slippageBps = 50) =>
+  request<Quote>(`${MARKET_DATA_URL}/quote/${orderbook}${q({ side, amount: amount.toString(), slippageBps })}`);
+export const getBasketQuote = (legs: Leg[], amountUsdcRaw: bigint, slippageBps = 50) =>
+  request<BasketQuote>(`${MARKET_DATA_URL}/quote/basket`, json({
+      side: "buy",
+      amountUsdc: amountUsdcRaw.toString(),
+      slippageBps,
+      legs: legs.map((l) => ({ market: marketOf(l.market)?.orderbook ?? l.market, weightBps: l.weightBps })),
+    }),);
+export const getCandles = (orderbook: string, interval: Interval, from?: number, to?: number) =>
+  request<Candle[]>(`${MARKET_DATA_URL}/candles/${orderbook}${q({ interval, from, to })}`);
+export const getRates = () => request<Rates>(`${MARKET_DATA_URL}/rates`);
+
+// history
+export type BacktestBody = {
+  asset: string;
+  amount: string;
+  from?: string;
+  to?: string;
+  legs: { kind: string; venue?: string; perpId?: number; weight: string }[];
+  rules?: Record<string, unknown>;
+};
+export const runBacktest = (body: BacktestBody) => request<Backtest>(`${HISTORY_URL}/backtest`, json(body));
 
 // display formatters (numbers already in display units)
 export const fmtUsdCompact = (n: number) =>
@@ -131,3 +184,37 @@ export const fmtTime = (iso: string | number) => {
 
 export const errMsg = (e: unknown): string =>
   (e as { shortMessage?: string })?.shortMessage ?? (e instanceof Error ? e.message : String(e));
+
+const COPY: Record<string, string> = {
+  delegation_inactive: "Enable automation first — sweem needs your delegated signer to run this.",
+  below_min_size: "Amount is below the market's minimum order size.",
+  exceeds_safe_size: "Too large for current book depth.",
+  insufficient_liquidity: "Order book can't fill this size right now.",
+  cap_exceeded: "A single step exceeds the per-trade safety cap.",
+  unsupported_source: "One of the sources isn't supported for this asset.",
+  treasury_unset: "Fees are not configured yet (treasury unset).",
+  too_many_steps: "Plan is too long (over 32 steps).",
+  nothing_to_sell: "Nothing held in this basket to sell.",
+  quote_unavailable: "Market data is down or stale, try again shortly.",
+  history_unavailable: "Backtest service unavailable.",
+  rpc_unavailable: "Monad RPC unavailable, try again shortly.",
+  executor_unavailable: "Executor unreachable; nothing was sent.",
+  position_not_open: "Position isn't open.",
+  order_not_open: "Order isn't live on Kuru yet.",
+  stale: "Price feed is stale, try again shortly.",
+  unavailable: "No liquidity on this side right now.",
+  unauthorized: "Session expired, sign in again.",
+  not_found: "Not found.",
+  no_data: "Not enough history for this setup.",
+  invalid_name: "Name is invalid.",
+  invalid_legs: "Legs are invalid (1–10 unique markets, weights sum 100%).",
+  invalid_sources: "Sources are invalid.",
+  invalid_asset: "Asset is invalid.",
+};
+
+// user-facing text: known code → copy (+ detail), else raw message
+export const errText = (e: unknown): string => {
+  const m = errMsg(e);
+  const d = e instanceof ApiError && e.detail ? ` (${e.detail})` : "";
+  return (COPY[m] ?? m) + d;
+};

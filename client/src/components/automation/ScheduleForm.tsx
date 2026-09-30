@@ -1,38 +1,29 @@
 "use client";
 
 import { useState } from "react";
-import { createSchedule, errMsg, fmtUsd, getLiveNav } from "@/lib/api";
-import { useAsync, useSession } from "@/lib/session";
-import type { ScheduleInput, ScheduleKind } from "@/lib/types";
+import { createSchedule, errText, fmtUsd } from "@/lib/api";
+import { useSession } from "@/lib/session";
+import type { ScheduleInput, ScheduleKind, Target } from "@/lib/types";
 import { Button, ErrorBox, Label } from "@/components/ui";
 import { Segmented } from "@/components/motion";
 import { showToast } from "@/components/TxToast";
 import { DelegationCard } from "./Delegation";
 import { cn } from "@/lib/utils";
 
-const API_ERRORS: Record<string, string> = {
-  invalid_basket: "Invalid basket address.",
-  invalid_max_slippage_bps: "Max slippage must be between 0.01% and 10%.",
-  invalid_max_per_run_usdc: "Max per run must be a positive USDC amount.",
-  invalid_amount_usdc: "Amount must be a positive USDC amount.",
-  invalid_interval_seconds: "Interval must be at least 1 minute.",
-  max_per_run_below_amount: "Max per run must be at least the amount.",
-  invalid_stop_nav_per_share: "Trigger NAV must be a positive number.",
-  invalid_redeem_bps: "Sell percentage must be between 1% and 100%.",
-  invalid_kind: "Unknown schedule type.",
-  delegation_inactive: "Enable automation first.",
-  basket_not_found: "This basket isn't indexed yet.",
-  unauthorized: "Session expired, sign in again.",
-  bad_request: "The request was malformed.",
+const KINDS: Record<Target["type"], ScheduleKind[]> = {
+  market: ["dca", "take_profit", "stop_loss"],
+  basket: ["dca", "take_profit", "stop_loss", "rebalance"],
+  position: ["take_profit", "stop_loss", "rebalance"],
 };
-
-export const apiErrorText = (e: unknown) => {
-  const m = errMsg(e);
-  return API_ERRORS[m] ?? m;
+export const KIND_LABEL: Record<string, string> = {
+  dca: "DCA",
+  take_profit: "Take profit",
+  stop_loss: "Stop loss",
+  rebalance: "Rebalance",
+  recurring: "Recurring (legacy)",
 };
 
 const INTERVALS = [
-  { value: "60", label: "1m test" },
   { value: "3600", label: "1h" },
   { value: "86400", label: "1d" },
   { value: "604800", label: "1w" },
@@ -42,13 +33,11 @@ type IntervalOpt = (typeof INTERVALS)[number]["value"];
 
 const DEC = /^\d+(\.\d+)?$/;
 const pos = (s: string) => DEC.test(s.trim()) && Number(s) > 0;
-// ponytail: api requires maxPerRunUsdc on stop-loss but only enforces it on mints, so send a no-op cap.
-const STOP_LOSS_CAP = "1000000000";
 
 export const inputCls =
   "tnum w-full rounded-xl border border-border bg-card px-3 py-2.5 text-sm outline-none transition-colors placeholder:text-muted-foreground/60 focus:border-ring";
 
-function Field({ label, hint, children }: { label: string; hint?: React.ReactNode; children: React.ReactNode }) {
+export function Field({ label, hint, children }: { label: string; hint?: React.ReactNode; children: React.ReactNode }) {
   return (
     <label className="block space-y-1.5">
       <div className="flex items-baseline justify-between gap-2">
@@ -60,63 +49,60 @@ function Field({ label, hint, children }: { label: string; hint?: React.ReactNod
   );
 }
 
-export function ScheduleForm({ basket, onCreated }: { basket: string; onCreated: () => void }) {
+// current = live price (market, USDC/unit) or value (basket/position, USDC) for TP/SL hints
+export function ScheduleForm({ target, current, onCreated }: { target: Target; current: number | null; onCreated: () => void }) {
   const { authenticated, login, delegated } = useSession();
-  const [kind, setKind] = useState<ScheduleKind>("recurring");
-  const [amount, setAmount] = useState("10");
+  const kinds = KINDS[target.type];
+  const [kind, setKind] = useState<ScheduleKind>(kinds[0]);
+  const [amount, setAmount] = useState("25");
   const [every, setEvery] = useState<IntervalOpt>("86400");
   const [customMin, setCustomMin] = useState("30");
   const [maxPerRun, setMaxPerRun] = useState("");
   const [slippage, setSlippage] = useState("1");
-  const [stopNav, setStopNav] = useState("");
+  const [trigger, setTrigger] = useState("");
   const [sellPct, setSellPct] = useState(100);
+  const [drift, setDrift] = useState("5");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const nav = useAsync(kind === "stop_loss" ? `nav:${basket}` : null, () => getLiveNav(basket));
-  const current = nav.data ? Number(nav.data.navPerShare) : null;
-  const below = current && pos(stopNav) ? ((current - Number(stopNav)) / current) * 100 : null;
-
+  const tp = kind === "take_profit";
+  const triggerLabel = target.type === "market" ? "Trigger price (USDC)" : "Trigger value (USDC)";
+  const dist = current && pos(trigger) ? ((Number(trigger) - current) / current) * 100 : null;
   const intervalSeconds = every === "custom" ? Math.round(Number(customMin) * 60) : Number(every);
-  const cap = maxPerRun.trim() || amount.trim();
+  const cap = maxPerRun.trim() || (kind === "dca" ? amount.trim() : "1000");
   const slippageBps = Math.round(Number(slippage) * 100);
+  const driftBps = Math.round(Number(drift) * 100);
 
-  function validate(): string | null {
-    if (!DEC.test(slippage.trim()) || slippageBps < 1 || slippageBps > 1000) return API_ERRORS.invalid_max_slippage_bps;
-    if (kind === "recurring") {
-      if (!pos(amount)) return API_ERRORS.invalid_amount_usdc;
-      if (!Number.isFinite(intervalSeconds) || intervalSeconds < 60) return API_ERRORS.invalid_interval_seconds;
-      if (!pos(cap)) return API_ERRORS.invalid_max_per_run_usdc;
-      if (Number(cap) < Number(amount)) return API_ERRORS.max_per_run_below_amount;
-    } else {
-      if (!pos(stopNav)) return API_ERRORS.invalid_stop_nav_per_share;
-      if (sellPct < 1 || sellPct > 100) return API_ERRORS.invalid_redeem_bps;
+  function build(): ScheduleInput | string {
+    if (!DEC.test(slippage.trim()) || slippageBps < 1 || slippageBps > 1000) return "Max slippage must be 0.01%–10%.";
+    if (!pos(cap)) return "Max per run must be a positive USDC amount.";
+    const base = { kind, target, maxSlippageBps: slippageBps, maxPerRunUsdc: cap };
+    if (kind === "dca") {
+      if (!pos(amount)) return "Amount must be a positive USDC amount.";
+      if (!(intervalSeconds >= 60)) return "Interval must be at least 1 minute.";
+      if (Number(cap) < Number(amount)) return "Max per run must be at least the amount.";
+      return { ...base, amountUsdc: amount.trim(), intervalSeconds };
     }
-    return null;
+    if (kind === "rebalance") {
+      if (!(intervalSeconds >= 60)) return "Check cadence must be at least 1 minute.";
+      if (target.type === "basket" && !(driftBps >= 1 && driftBps <= 10000)) return "Drift band must be 0.01%–100%.";
+      return { ...base, intervalSeconds, ...(drift.trim() && driftBps > 0 ? { driftBps } : {}) };
+    }
+    if (!pos(trigger)) return "Trigger must be a positive number.";
+    return { ...base, triggerPrice: trigger.trim(), sellBps: sellPct * 100 };
   }
 
   async function submit() {
-    const v = validate();
-    setError(v);
-    if (v) return;
-    const input: ScheduleInput =
-      kind === "recurring"
-        ? { basket, kind, amountUsdc: amount.trim(), intervalSeconds, maxSlippageBps: slippageBps, maxPerRunUsdc: cap }
-        : {
-            basket,
-            kind,
-            stopNavPerShare: stopNav.trim(),
-            redeemBps: sellPct * 100,
-            maxSlippageBps: slippageBps,
-            maxPerRunUsdc: STOP_LOSS_CAP,
-          };
+    const input = build();
+    setError(typeof input === "string" ? input : null);
+    if (typeof input === "string") return;
     setPending(true);
     try {
       await createSchedule(input);
-      showToast({ tone: "success", title: kind === "recurring" ? "Recurring buy scheduled" : "Stop-loss set" });
+      showToast({ tone: "success", title: `${KIND_LABEL[kind]} scheduled` });
       onCreated();
     } catch (e) {
-      setError(apiErrorText(e));
+      setError(errText(e));
     } finally {
       setPending(false);
     }
@@ -125,74 +111,67 @@ export function ScheduleForm({ basket, onCreated }: { basket: string; onCreated:
   if (!authenticated)
     return (
       <div className="flex items-center justify-between gap-3 text-sm">
-        <span className="text-muted-foreground">Sign in to automate this basket.</span>
-        <Button onClick={login}>Connect</Button>
+        <span className="text-muted-foreground">Sign in to automate.</span>
+        <Button onClick={login}>Log in</Button>
       </div>
     );
+
+  const intervalPicker = (label: string) => (
+    <>
+      <Field label={label}>
+        <div className="flex flex-wrap gap-1.5">
+          {INTERVALS.map((o) => (
+            <button
+              key={o.value}
+              type="button"
+              onClick={() => setEvery(o.value)}
+              className={cn(
+                "rounded-full px-3 py-1.5 text-xs font-medium transition-colors",
+                every === o.value ? "bg-primary text-primary-foreground" : "bg-secondary/60 text-muted-foreground hover:text-foreground",
+              )}
+            >
+              {o.label}
+            </button>
+          ))}
+        </div>
+      </Field>
+      {every === "custom" && (
+        <Field label="Custom interval (minutes, min 1)">
+          <input className={inputCls} inputMode="decimal" value={customMin} onChange={(e) => setCustomMin(e.target.value)} />
+        </Field>
+      )}
+    </>
+  );
 
   return (
     <div className="space-y-4">
       <Segmented
-        id={`schedule-kind-${basket}`}
+        id={`schedule-kind-${target.type}`}
         value={kind}
         onChange={(k) => (setKind(k), setError(null))}
-        options={[
-          { value: "recurring", label: "Recurring buy" },
-          { value: "stop_loss", label: "Stop-loss" },
-        ]}
+        options={kinds.map((k) => ({ value: k, label: KIND_LABEL[k] }))}
       />
 
       {!delegated && <DelegationCard compact />}
 
-      {kind === "recurring" ? (
+      {kind === "dca" && (
         <>
-          <Field label="Amount per buy (USDC)">
+          <Field label="Buy per run (USDC)">
             <input className={inputCls} inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} />
           </Field>
-          <Field label="Every">
-            <div className="flex flex-wrap gap-1.5">
-              {INTERVALS.map((o) => (
-                <button
-                  key={o.value}
-                  type="button"
-                  onClick={() => setEvery(o.value)}
-                  className={cn(
-                    "rounded-full px-3 py-1.5 text-xs font-medium transition-colors",
-                    every === o.value ? "bg-primary text-primary-foreground" : "bg-secondary/60 text-muted-foreground hover:text-foreground",
-                  )}
-                >
-                  {o.label}
-                </button>
-              ))}
-            </div>
-          </Field>
-          {every === "custom" && (
-            <Field label="Custom interval (minutes, min 1)">
-              <input className={inputCls} inputMode="decimal" value={customMin} onChange={(e) => setCustomMin(e.target.value)} />
-            </Field>
-          )}
-          <Field label="Max per run (USDC)" hint="safety cap, ≥ amount">
-            <input
-              className={inputCls}
-              inputMode="decimal"
-              placeholder={amount || "0"}
-              value={maxPerRun}
-              onChange={(e) => setMaxPerRun(e.target.value)}
-            />
-          </Field>
+          {intervalPicker("Every")}
         </>
-      ) : (
+      )}
+
+      {(kind === "take_profit" || kind === "stop_loss") && (
         <>
-          <Field
-            label="Trigger NAV / share (USDC)"
-            hint={nav.loading ? "loading NAV…" : current !== null ? `current ${fmtUsd(current)}` : "NAV unavailable"}
-          >
+          <Field label={triggerLabel} hint={current !== null ? `now ${fmtUsd(current)}` : "no live value"}>
             <input
               className={inputCls}
               inputMode="decimal"
-              placeholder={current ? (current * 0.9).toFixed(4) : "0.00"}
-              value={stopNav}
-              onChange={(e) => setStopNav(e.target.value)}
+              placeholder={current ? (current * (tp ? 1.1 : 0.9)).toFixed(4) : "0.00"}
+              value={trigger}
+              onChange={(e) => setTrigger(e.target.value)}
             />
           </Field>
           <div className="flex flex-wrap items-center gap-1.5 text-xs">
@@ -201,19 +180,20 @@ export function ScheduleForm({ basket, onCreated }: { basket: string; onCreated:
                 <button
                   key={p}
                   type="button"
-                  onClick={() => setStopNav((current * (1 - p / 100)).toFixed(6))}
+                  onClick={() => setTrigger((current * (1 + ((tp ? 1 : -1) * p) / 100)).toFixed(6))}
                   className="rounded-full bg-secondary/60 px-3 py-1.5 font-medium text-muted-foreground transition-colors hover:text-foreground"
                 >
-                  −{p}%
+                  {tp ? "+" : "−"}
+                  {p}%
                 </button>
               ))}
-            {below !== null && (
-              <span className={cn("ml-auto", below < 0 ? "text-warning" : "text-muted-foreground")}>
-                {below < 0 ? `${(-below).toFixed(2)}% above current, fires immediately` : `${below.toFixed(2)}% below current`}
+            {dist !== null && (
+              <span className={cn("ml-auto", (tp ? dist <= 0 : dist >= 0) ? "text-warning" : "text-muted-foreground")}>
+                {(tp ? dist <= 0 : dist >= 0) ? "already past trigger, fires immediately" : `${Math.abs(dist).toFixed(2)}% ${dist > 0 ? "above" : "below"} now`}
               </span>
             )}
           </div>
-          <Field label="Sell" hint={<span className="tnum text-foreground">{sellPct}% of shares</span>}>
+          <Field label="Sell" hint={<span className="tnum text-foreground">{sellPct}%</span>}>
             <input
               type="range"
               min={1}
@@ -227,14 +207,28 @@ export function ScheduleForm({ basket, onCreated }: { basket: string; onCreated:
         </>
       )}
 
-      <Field label="Max slippage (%)" hint="0.01 – 10">
-        <input className={inputCls} inputMode="decimal" value={slippage} onChange={(e) => setSlippage(e.target.value)} />
-      </Field>
+      {kind === "rebalance" && (
+        <>
+          <Field label="Drift band (%)" hint={target.type === "position" ? "blank = strategy rules" : "rebalance when a leg drifts this far"}>
+            <input className={inputCls} inputMode="decimal" value={drift} onChange={(e) => setDrift(e.target.value)} />
+          </Field>
+          {intervalPicker("Check every")}
+        </>
+      )}
+
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Max per run (USDC)">
+          <input className={inputCls} inputMode="decimal" placeholder={cap} value={maxPerRun} onChange={(e) => setMaxPerRun(e.target.value)} />
+        </Field>
+        <Field label="Max slippage (%)">
+          <input className={inputCls} inputMode="decimal" value={slippage} onChange={(e) => setSlippage(e.target.value)} />
+        </Field>
+      </div>
 
       {error && <ErrorBox message={error} />}
 
       <Button className="w-full" pending={pending} disabled={!delegated} onClick={() => void submit()}>
-        {kind === "recurring" ? "Schedule recurring buy" : "Set stop-loss"}
+        {delegated ? `Create ${KIND_LABEL[kind].toLowerCase()}` : "Enable delegation first"}
       </Button>
     </div>
   );

@@ -2,9 +2,8 @@
 
 import Link from "next/link";
 import { useState } from "react";
-import { ArrowDown, ArrowUp, ChevronDown, ExternalLink, Fuel, Search } from "lucide-react";
+import { ArrowDown, ArrowUp, ChevronDown, Fuel, Search } from "lucide-react";
 import { fmtUsd } from "@/lib/api";
-import { USDC_DECIMALS } from "@/lib/config";
 import { fmtUnits } from "@/lib/tokens";
 import type { Basket } from "@/lib/types";
 import { Panel, Skeleton, useDismissable } from "@/components/ui";
@@ -71,7 +70,7 @@ export function Holdings({
           ))}
         </select>
         <select aria-label="Network" className={SELECT}>
-          <option>Monad testnet</option>
+          <option>Monad</option>
         </select>
         <label className="flex w-full items-center gap-2 rounded-full bg-secondary/70 px-4 py-2 text-sm sm:w-56">
           <Search className="size-4 shrink-0 text-muted-foreground" />
@@ -93,7 +92,7 @@ export function Holdings({
             {usdc === undefined ? (
               <Skeleton className="mt-1 h-6 w-20" />
             ) : (
-              <div className="tnum text-lg font-medium">${fmtUnits(usdc, USDC_DECIMALS, 2)}</div>
+              <div className="tnum text-lg font-medium">${fmtUnits(usdc, 6, 2)}</div>
             )}
           </div>
           <InvestMenu baskets={baskets} />
@@ -114,14 +113,9 @@ export function Holdings({
             )}
           </div>
           {lowGas && (
-            <a
-              href="https://faucet.monad.xyz"
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-warning underline-offset-4 hover:underline"
-            >
-              <Fuel className="size-3.5" /> Low gas · Get MON <ExternalLink className="size-3" />
-            </a>
+            <span className="inline-flex items-center gap-1 px-2 py-1 text-xs text-warning">
+              <Fuel className="size-3.5" /> Low gas · top up MON
+            </span>
           )}
         </div>
       </div>
@@ -157,7 +151,7 @@ export function Holdings({
                     <>
                       Nothing here yet.{" "}
                       <Link href="/" className="text-foreground underline underline-offset-4 hover:no-underline">
-                        Browse baskets
+                        Start trading
                       </Link>
                     </>
                   ) : (
@@ -223,18 +217,19 @@ function InvestMenu({ baskets }: { baskets: Basket[] | null }) {
             <li className="p-2">
               <Skeleton className="h-6 w-full" />
             </li>
-          ) : baskets.length === 0 ? (
-            <li className="px-3 py-2 text-sm text-muted-foreground">No baskets yet.</li>
           ) : (
-            baskets.map((b) => (
-              <li key={b.address}>
+            [
+              { href: "/earn", name: "Earn strategies", tag: "Earn" },
+              ...baskets.map((b) => ({ href: `/baskets/${b.id}`, name: b.name, tag: "Basket" })),
+            ].map((b) => (
+              <li key={b.href}>
                 <Link
-                  href={`/baskets/${b.address}`}
+                  href={b.href}
                   onClick={() => setOpen(false)}
                   className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm transition-colors hover:bg-secondary/70"
                 >
                   <span className="truncate">{b.name}</span>
-                  <span className="ml-auto text-xs text-muted-foreground">{b.symbol}</span>
+                  <span className="ml-auto text-xs text-muted-foreground">{b.tag}</span>
                 </Link>
               </li>
             ))

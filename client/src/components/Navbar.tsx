@@ -5,20 +5,18 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { Check, Copy, Menu, Wallet as WalletIcon } from "lucide-react";
-import { zeroAddress } from "viem";
-import { errMsg, fmtTime, shortHash } from "@/lib/api";
-import { addressUrl, USDC } from "@/lib/config";
-import { useAsync, useSession } from "@/lib/session";
-import { fmtUnits, tokenOf } from "@/lib/tokens";
-import { readBalance, readNextClaimAt, useTx } from "@/lib/tx";
+import { errMsg, shortHash } from "@/lib/api";
+import { addressUrl } from "@/lib/config";
+import { useHoldings } from "@/lib/hooks";
+import { useSession } from "@/lib/session";
 import { cn } from "@/lib/utils";
 import { BasketSearch } from "./BasketSearch";
 import { Spinner, useDismissable } from "./ui";
 
 const NAV = [
-  { label: "Explore", href: "/" },
+  { label: "Trade", href: "/" },
+  { label: "Earn", href: "/earn" },
   { label: "Portfolio", href: "/portfolio" },
-  { label: "Create", href: "/create" },
 ] as const;
 
 export function Navbar() {
@@ -33,7 +31,7 @@ export function Navbar() {
     return () => window.removeEventListener("scroll", on);
   }, []);
   const isActive = (href: string) =>
-    href === "/" ? pathname === "/" || pathname.startsWith("/baskets") : pathname.startsWith(href);
+    href === "/" ? pathname === "/" || pathname.startsWith("/baskets") || pathname.startsWith("/trade") : pathname.startsWith(href);
   const links = (cls: string) =>
     NAV.map((item) => (
       <Link
@@ -154,7 +152,7 @@ function WalletMenu() {
                   {copied ? <Check className="size-4 text-positive" /> : <Copy className="size-4" />}
                 </button>
               </div>
-              <Wallet address={address} />
+              <Wallet />
               {err && <p className="text-xs break-words text-destructive">{err}</p>}
               <div className="flex gap-2 pt-1">
                 <MenuButton
@@ -175,40 +173,18 @@ function WalletMenu() {
   );
 }
 
-function Wallet({ address }: { address: `0x${string}` }) {
-  const { claimFaucet } = useTx();
-  const [claiming, setClaiming] = useState(false);
-  const bal = useAsync(`wallet:${address}`, async () => {
-    const [usdc, mon, next] = await Promise.all([
-      readBalance(USDC, address),
-      readBalance(zeroAddress, address),
-      readNextClaimAt(address),
-    ]);
-    return { usdc, mon, next, claimable: next.getTime() <= Date.now() };
-  });
-  const { usdc, mon, next, claimable } = bal.data ?? {};
-
+function Wallet() {
+  const h = useHoldings();
+  const amt = (sym: string) => {
+    const t = h.data?.tokens.find((x) => x.symbol === sym);
+    return t ? Number(t.amount).toLocaleString("en-US", { maximumFractionDigits: 4 }) : h.data ? "0" : "…";
+  };
   return (
     <div className="space-y-2">
-      <Row label="USDC" value={usdc === undefined ? "…" : fmtUnits(usdc, tokenOf(USDC).decimals, 2)} />
-      <Row label="MON" value={mon === undefined ? "…" : fmtUnits(mon, 18)} />
-      {bal.error && <p className="text-xs text-warning">{bal.error}</p>}
-      <div className="flex items-center justify-between gap-3 pt-1">
-        <span className="text-xs text-muted-foreground">
-          {next === undefined ? "Faucet" : claimable ? "Faucet ready" : `Faucet at ${fmtTime(next.getTime())}`}
-        </span>
-        <MenuButton
-          disabled={!claimable || claiming}
-          onClick={() => {
-            setClaiming(true);
-            claimFaucet()
-              .then(bal.reload, () => {})
-              .finally(() => setClaiming(false));
-          }}
-        >
-          {claiming ? "Claiming…" : "Claim test tokens"}
-        </MenuButton>
-      </div>
+      <Row label="Network" value="Monad mainnet" />
+      <Row label="USDC" value={amt("USDC")} />
+      <Row label="MON (gas)" value={amt("MON")} />
+      {h.error && <p className="text-xs text-warning">Balances unavailable: {h.error}</p>}
     </div>
   );
 }

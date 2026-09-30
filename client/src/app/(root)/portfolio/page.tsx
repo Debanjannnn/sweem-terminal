@@ -1,53 +1,44 @@
 "use client";
 
 import Link from "next/link";
-import { ExternalLink } from "lucide-react";
-import { formatUnits, zeroAddress } from "viem";
-import { fmtTime, getBaskets, getBook, getHistory, getPositions, shortHash } from "@/lib/api";
+import { formatUnits } from "viem";
+import { useState } from "react";
+import { errText, fmtTime, fmtUsd, getBaskets, getMyBaskets, getOrders, getPositions, withdrawPosition } from "@/lib/api";
+import { useHoldings, useTickers } from "@/lib/hooks";
 import { useAsync, useSession } from "@/lib/session";
-import { SHARE_DECIMALS, txUrl, USDC_DECIMALS } from "@/lib/config";
-import { fmtUnits } from "@/lib/tokens";
-import { Button, ErrorBox, Panel, Skeleton } from "@/components/ui";
-import { cn } from "@/lib/utils";
-import { FaucetCard, LOW_GAS, useBalances, useNow } from "@/components/portfolio/Wallet";
-import { pnlByBasket } from "@/components/portfolio/pnl";
+import { fmtUnits, tokenBySymbol } from "@/lib/tokens";
+import type { Position } from "@/lib/types";
+import { Button, ErrorBox, Notice, Panel, Skeleton, StatusPill } from "@/components/ui";
+import { TokenIcon } from "@/components/TokenIcon";
+import { LOW_GAS, useNow } from "@/components/portfolio/Wallet";
 import { Holdings, type Row } from "@/components/portfolio/Holdings";
 import { ValueChart } from "@/components/portfolio/ValueChart";
-import { symbolOf, useMarkets } from "@/components/invest/extras";
 import { DelegationCard } from "@/components/automation/Delegation";
-import { ScheduleList } from "@/components/automation/ScheduleList";
+import { ExecutionLog, ScheduleList } from "@/components/automation/ScheduleList";
+import { ScheduleForm } from "@/components/automation/ScheduleForm";
+import { OrderList } from "@/components/trade/LimitPanel";
+import { ExecutionProgress } from "@/components/Execution";
+import { KIND_LABEL, venueName } from "@/components/earn/sources";
 
-const usd = (raw: bigint) => `${raw < BigInt(0) ? "-" : ""}$${fmtUnits(raw < BigInt(0) ? -raw : raw, USDC_DECIMALS, 2)}`;
-const STABLES = new Set(["USDC"]);
+const STABLES = new Set(["USDC", "AUSD", "USDT0"]);
+const PRICE_OF: Record<string, string> = { WMON: "MON" };
 
 export default function PortfolioPage() {
   const { ready, authenticated, login, address } = useSession();
   const on = ready && authenticated;
+  const holdings = useHoldings();
+  const { tickers, loading: pxLoading } = useTickers();
   const positions = useAsync(on ? "positions" : null, getPositions);
-  const history = useAsync(on ? "history" : null, getHistory);
+  const orders = useAsync(on ? "orders" : null, getOrders);
   const baskets = useAsync("baskets", () => getBaskets());
-  const balances = useBalances(on ? address : undefined);
-  const markets = useMarkets();
-  // token address → book mid in USDC; ponytail: one book fetch per market, fine for a handful of markets
-  const prices = useAsync(on && markets.data ? "pf:prices" : null, async () => {
-    const list = markets.data ?? [];
-    const books = await Promise.allSettled(list.map((m) => getBook(m.market)));
-    const out = new Map<string, number>();
-    list.forEach((m, i) => {
-      const r = books[i];
-      if (r.status !== "fulfilled") return;
-      const px = [r.value.bids[0]?.[0], r.value.asks[0]?.[0]].filter(Boolean).map(Number);
-      if (px.length) out.set(m.base, px.reduce((a, b) => a + b) / px.length);
-    });
-    return out;
-  });
+  const mine = useAsync(on ? "my-baskets" : null, getMyBaskets);
 
   if (ready && !authenticated) {
     return (
       <main className="w-full px-4 pb-24 pt-16 md:px-6">
         <Panel className="mx-auto w-full max-w-md p-8 text-center">
           <h1 className="text-lg font-medium">Your portfolio</h1>
-          <p className="mt-2 text-sm text-muted-foreground">Log in to see your holdings, baskets and automations.</p>
+          <p className="mt-2 text-sm text-muted-foreground">Log in to see your wallet, strategies, orders and automations.</p>
           <Button className="mt-6 w-full" onClick={login}>
             Log in
           </Button>
@@ -56,53 +47,48 @@ export default function PortfolioPage() {
     );
   }
 
-  const loading = !ready || positions.loading || balances.loading || (prices.loading && !prices.data);
-  const pnl = pnlByBasket(history.data ?? [], positions.data ?? []);
-  const nameOf = (addr: string) => baskets.data?.find((b) => b.address === addr);
-  const activity = [...(history.data ?? [])].sort((a, b) => b.ts.localeCompare(a.ts)).slice(0, 25);
-  const bal = (sym: string) => balances.data?.find(([t]) => t.symbol === sym)?.[1];
-  const mon = bal("MON");
-
+  const priceOf = (sym: string) => (STABLES.has(sym) ? 1 : (tickers[PRICE_OF[sym] ?? sym]?.price ?? null));
+  const h = holdings.data;
+  const raw = (sym: string) => (h ? BigInt(h.tokens.find((t) => t.symbol === sym)?.raw ?? 0) : undefined);
   const rows: Row[] = [];
-  for (const [t, raw] of balances.data ?? []) {
-    if (t.symbol === "MON" || raw === BigInt(0)) continue;
-    const stable = STABLES.has(t.symbol);
-    const price = stable ? 1 : (prices.data?.get(t.address) ?? null);
+  for (const t of h?.tokens ?? []) {
+    if (t.symbol === "MON" || t.symbol === "USDC" || Number(t.amount) === 0) continue;
+    const price = priceOf(t.symbol);
     rows.push({
-      key: t.address,
+      key: t.symbol,
       symbol: t.symbol,
-      name: t.name,
-      cls: stable ? "Stablecoin" : "Crypto",
+      name: tokenBySymbol(t.symbol)?.name ?? t.symbol,
+      cls: STABLES.has(t.symbol) ? "Stablecoin" : "Crypto",
       icons: [t.symbol],
+      href: tickers[t.symbol] ? `/trade/${t.symbol}` : undefined,
       price,
-      balance: fmtUnits(raw, t.decimals, 4),
-      value: price === null ? null : Number(formatUnits(raw, t.decimals)) * price,
+      balance: Number(t.amount).toLocaleString("en-US", { maximumFractionDigits: 6 }),
+      value: price === null ? null : Number(t.amount) * price,
     });
   }
-  for (const p of positions.data ?? []) {
-    if (BigInt(p.sharesRaw) === BigInt(0)) continue;
-    const b = nameOf(p.basket);
-    const r = pnl.get(p.basket);
+  for (const b of h?.baskets ?? []) {
+    const value = b.legs.reduce<number | null>((s, l) => (s === null || priceOf(l.market) === null ? null : s + Number(l.amount) * priceOf(l.market)!), 0);
     rows.push({
-      key: p.basket,
-      symbol: b?.symbol ?? shortHash(p.basket),
-      name: b?.name ?? "Basket",
+      key: b.basketId,
+      symbol: b.name,
+      name: "Basket · tokens in your wallet",
       cls: "Basket",
-      icons: b ? b.components.map((c) => symbolOf(c.market, markets.data)) : [],
-      href: `/baskets/${p.basket}`,
-      price: p.navPerShare ? Number(p.navPerShare) : null,
-      balance: fmtUnits(p.sharesRaw, SHARE_DECIMALS, 4),
-      value: p.valueUsdc ? Number(p.valueUsdc) : null,
-      note: r && r.costRaw !== BigInt(0) && (
-        <div className={cn("text-xs", r.pnlRaw >= BigInt(0) ? "text-positive" : "text-destructive")}>
-          {r.pnlRaw > BigInt(0) ? "+" : ""}
-          {usd(r.pnlRaw)} PnL
-        </div>
-      ),
+      icons: b.legs.map((l) => l.market),
+      href: `/baskets/${b.basketId}`,
+      price: null,
+      balance: b.legs.map((l) => `${Number(l.amount).toLocaleString("en-US", { maximumFractionDigits: 4 })} ${l.market}`).join(" + "),
+      value,
     });
   }
-  const monPx = prices.data?.get(zeroAddress) ?? 0;
-  const total = rows.reduce((s, r) => s + (r.value ?? 0), 0) + (mon ? Number(formatUnits(mon, 18)) * monPx : 0);
+  // basket legs are also wallet tokens; count tokens once, baskets are an attribution view
+  const tokensUsd = (h?.tokens ?? []).reduce((s, t) => s + Number(t.amount) * (priceOf(t.symbol) ?? 0), 0);
+  const open = (positions.data ?? []).filter((p) => p.status !== "closed");
+  const posUsd = open.reduce((s, p) => s + Number(p.principalUsdc), 0);
+  const total = tokensUsd + posUsd;
+  const loading = !ready || holdings.loading || pxLoading;
+  const mon = raw("MON");
+  const names = Object.fromEntries([...(baskets.data ?? []), ...(mine.data ?? [])].map((b) => [b.id, b.name]));
+  const openOrders = (orders.data ?? []).filter((o) => o.status === "open" || o.status === "pending");
 
   return (
     <main className="w-full px-4 pb-24 pt-8 md:px-6">
@@ -120,71 +106,127 @@ export default function PortfolioPage() {
 
         <ValueChart address={address ?? "0x"} total={total} loading={loading} />
 
-        {(positions.error || balances.error) && <ErrorBox message={(positions.error ?? balances.error)!} />}
+        {holdings.error && <ErrorBox message={`Wallet balances unavailable: ${errText(new Error(holdings.error))}`} />}
 
-        <Holdings
-          rows={rows}
-          loading={loading}
-          usdc={bal("USDC")}
-          mon={mon}
-          lowGas={mon !== undefined && mon < LOW_GAS}
-          baskets={baskets.data}
-        />
+        <Holdings rows={rows} loading={loading} usdc={raw("USDC")} mon={mon} lowGas={mon !== undefined && mon < LOW_GAS} baskets={baskets.data} />
+
+        <section className="space-y-3">
+          <div className="flex items-center justify-between px-1">
+            <h2 className="text-lg font-medium">Earn positions</h2>
+            <Link href="/earn" className="text-sm text-muted-foreground hover:text-foreground">
+              Explore strategies →
+            </Link>
+          </div>
+          {positions.error && <ErrorBox message={errText(new Error(positions.error))} />}
+          {positions.loading && !positions.data ? (
+            <Skeleton className="h-28 w-full rounded-3xl" />
+          ) : (positions.data ?? []).length === 0 ? (
+            <Panel className="p-5 text-sm text-muted-foreground">No strategy positions yet.</Panel>
+          ) : (
+            <div className="grid gap-3 md:grid-cols-2">
+              {(positions.data ?? []).map((p) => (
+                <PositionCard key={p.id} p={p} price={priceOf(p.asset)} onChange={positions.reload} />
+              ))}
+            </div>
+          )}
+        </section>
+
+        <section className="space-y-3">
+          <h2 className="px-1 text-lg font-medium">Open limit orders</h2>
+          <Panel className="p-5">{orders.loading && !orders.data ? <Skeleton className="h-6 w-1/2" /> : <OrderList orders={openOrders} onChange={orders.reload} showMarket />}</Panel>
+        </section>
 
         <section className="space-y-3">
           <h2 className="px-1 text-lg font-medium">Automation</h2>
           <DelegationCard />
-          <ScheduleList />
-        </section>
-
-        {address && <FaucetCard address={address} onClaimed={balances.reload} />}
-
-        <section className="space-y-3">
-          <h2 className="px-1 text-lg font-medium">Activity</h2>
-          <Panel>
-            {loading ? (
-              <div className="space-y-3 p-5">
-                <Skeleton className="h-4 w-2/3" />
-                <Skeleton className="h-4 w-1/2" />
-              </div>
-            ) : activity.length === 0 ? (
-              <p className="p-5 text-sm text-muted-foreground">No buys or sells yet.</p>
-            ) : (
-              <ul className="divide-y divide-border">
-                {activity.map((t) => (
-                  <li key={`${t.txHash}:${t.logIndex}`} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-5 py-3 text-sm">
-                    <span
-                      className={cn(
-                        "rounded-md border px-2 py-0.5 text-[11px]",
-                        t.kind === "mint" ? "border-primary/30 bg-primary/10 text-primary" : "border-border bg-secondary/60 text-muted-foreground",
-                      )}
-                    >
-                      {t.kind === "mint" ? "buy" : "sell"}
-                    </span>
-                    <Link href={`/baskets/${t.basket}`} className="hover:underline">
-                      {nameOf(t.basket)?.symbol ?? shortHash(t.basket)}
-                    </Link>
-                    <span className="tnum">
-                      {usd(BigInt(t.usdcRaw))} · {fmtUnits(t.sharesRaw, SHARE_DECIMALS, 4)} shares
-                    </span>
-                    <span className="ml-auto text-xs text-muted-foreground">{fmtTime(t.ts)}</span>
-                    <a
-                      href={txUrl(t.txHash)}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
-                    >
-                      {shortHash(t.txHash)}
-                      <ExternalLink className="size-3" />
-                    </a>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </Panel>
+          <ScheduleList names={names} />
+          <ExecutionLog />
         </section>
       </div>
     </main>
+  );
+}
+
+// principal is what went in; per-source amounts are the atoms supplied at deploy (venue yield accrues on-venue)
+function PositionCard({ p, price, onChange }: { p: Position; price: number | null; onChange: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [execId, setExecId] = useState<string | null>(null);
+  const [auto, setAuto] = useState(false);
+  const dec = tokenBySymbol(p.asset)?.decimals ?? 18;
+  // ponytail: basis AUSD collateral not marked (hedge PnL ~0); read venue balances via RPC if exact value matters
+  const supplied = p.legs.reduce((s, l) => s + Number(formatUnits(BigInt(l.asset || 0), dec)) + (l.collateral ? Number(formatUnits(BigInt(l.collateral), 6)) / (price || 1) : 0), 0);
+  const value = price !== null ? supplied * price : null;
+  const pnl = value !== null ? value - Number(p.principalUsdc) : null;
+
+  async function withdraw() {
+    setBusy(true);
+    setErr(null);
+    try {
+      setExecId((await withdrawPosition(p.id)).executionId);
+    } catch (e) {
+      setErr(errText(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Panel className="space-y-3 p-5">
+      <div className="flex items-center gap-3">
+        <TokenIcon symbol={p.asset} size={28} />
+        <Link href={`/earn/${p.strategyId}`} className="truncate font-medium hover:underline">
+          {p.strategyName}
+        </Link>
+        <span className="ml-auto">
+          <StatusPill status={p.status} />
+        </span>
+      </div>
+      <dl className="tnum grid grid-cols-3 gap-3 text-sm">
+        <div>
+          <dt className="text-xs text-muted-foreground">Principal</dt>
+          <dd>{fmtUsd(Number(p.principalUsdc))}</dd>
+        </div>
+        <div>
+          <dt className="text-xs text-muted-foreground">Value (spot)</dt>
+          <dd>{value !== null ? fmtUsd(value) : "—"}</dd>
+        </div>
+        <div>
+          <dt className="text-xs text-muted-foreground">PnL</dt>
+          <dd className={pnl === null ? "" : pnl >= 0 ? "text-positive" : "text-destructive"}>{pnl !== null ? `${pnl >= 0 ? "+" : ""}${fmtUsd(pnl)}` : "—"}</dd>
+        </div>
+      </dl>
+      <ul className="space-y-1 text-xs">
+        {p.legs.map((l, i) => (
+          <li key={i} className="flex items-center gap-2">
+            <span className="rounded-md bg-secondary/60 px-1.5 py-0.5 text-[10px] text-muted-foreground">{KIND_LABEL[l.kind as keyof typeof KIND_LABEL] ?? l.kind}</span>
+            {venueName(l.venue)}
+            <span className="tnum ml-auto text-muted-foreground">
+              {fmtUnits(l.asset || "0", dec)} {p.asset}
+              {l.entryPx ? ` · entry ${fmtUsd(Number(l.entryPx))}` : ""}
+            </span>
+          </li>
+        ))}
+      </ul>
+      <p className="text-[11px] text-muted-foreground">
+        Opened {fmtTime(p.openedAt)}
+        {p.lastRebalanceAt ? ` · rebalanced ${fmtTime(p.lastRebalanceAt)}` : ""}. Value marks supplied {p.asset} at spot; lending/staking yield accrues on-venue.
+      </p>
+      {p.legs.some((l) => l.kind === "lp") && <Notice>ActiveVault leg: 4-day lock, withdraw may fail inside the lock.</Notice>}
+      {err && <Notice tone="bad">{err}</Notice>}
+      {p.status === "open" && (
+        <div className="flex gap-2">
+          <Button variant="ghost" pending={busy} onClick={() => void withdraw()}>
+            Withdraw to USDC
+          </Button>
+          <Button variant="ghost" onClick={() => setAuto((a) => !a)}>
+            {auto ? "Hide automation" : "TP / SL / Rebalance"}
+          </Button>
+        </div>
+      )}
+      {auto && <ScheduleForm target={{ type: "position", id: p.id }} current={value} onCreated={() => setAuto(false)} />}
+      {execId && <ExecutionProgress id={execId} onSettled={onChange} />}
+    </Panel>
   );
 }
 

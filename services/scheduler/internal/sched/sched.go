@@ -23,6 +23,7 @@ import (
 type Chain interface {
 	Wallet(ctx context.Context, wallet, sym string) (decimal.Decimal, error) // atoms, MON native
 	Balances(ctx context.Context, wallet string, s planner.Strategy, legs []planner.LegState, peers []planner.Peer) ([]planner.Balance, error)
+	Live(ctx context.Context, wallet string, s planner.Strategy, legs []planner.LegState, peers []planner.Peer) (planner.Live, error)
 	Perp(ctx context.Context, wallet string, perpID int) (Perp, error)
 }
 
@@ -124,6 +125,7 @@ type exec struct {
 	kind, user                       string
 	steps                            []planner.Step
 	legs                             []planner.LegState // position legs after the run; applied on confirm (reconcile)
+	settle                           bool               // full withdraw: position → closed when the run confirms
 }
 
 func (s *Scheduler) schedules(ctx context.Context, now time.Time) {
@@ -266,16 +268,33 @@ func (s *Scheduler) trigger(ctx context.Context, c schedule, e exec) error {
 		if !Hit(c.kind, value.Shift(-s.decimals(p.strat.Asset)).Mul(px), c.trigger) {
 			return nil
 		}
-		plan, err := s.P.WithdrawBps(ctx, p.strat, p.legs, bals, c.sellBps, c.slip)
+		e.positionID = &p.id
+		inflight := `not exists (select 1 from executions e where e.position_id = $2 and (e.status in ('pending', 'submitted') or e.legs is not null))`
+		if c.sellBps < 10_000 {
+			plan, err := s.P.WithdrawBps(ctx, p.strat, p.legs, bals, c.sellBps, c.slip)
+			if err != nil {
+				return err
+			}
+			e.steps, e.legs = plan.Steps, plan.Legs
+			deactivate = []any{`with d as (update schedules set active = false where id = $1 and active returning 1)
+				update strategy_positions set status = status where id = $2 and status = 'open' and exists (select 1 from d) and ` + inflight, c.id, p.id}
+			break
+		}
+		// full close = api's resumable withdraw: open → withdrawing → closed on confirm; a failure stays withdrawing for the user to resume
+		live, err := s.Chain.Live(ctx, p.wallet, p.strat, p.legs, p.peers)
 		if err != nil {
 			return err
 		}
-		e.steps, e.positionID, e.legs = plan.Steps, &p.id, plan.Legs
+		plan, err := s.P.Withdraw(ctx, p.strat, p.legs, live.Bals, c.slip)
+		if err != nil {
+			return err
+		}
+		if e.steps, err = s.P.ResumeWithdraw(ctx, p.strat, plan.Steps, 0, live, c.slip); err != nil || len(e.steps) == 0 {
+			return errors.Join(err, errors.New("nothing left to withdraw"))
+		}
+		e.kind, e.settle = "withdraw", true
 		deactivate = []any{`with d as (update schedules set active = false where id = $1 and active returning 1)
-			update strategy_positions set status = case when $3 then 'closing' else status end
-			where id = $2 and status = 'open' and exists (select 1 from d)
-			and not exists (select 1 from executions e where e.position_id = $2 and (e.status in ('pending', 'submitted') or e.legs is not null))`,
-			c.id, p.id, c.sellBps == 10_000}
+			update strategy_positions set status = 'withdrawing' where id = $2 and status = 'open' and exists (select 1 from d) and ` + inflight, c.id, p.id}
 	}
 	return s.submit(ctx, deactivate, e)
 }
@@ -356,21 +375,26 @@ func (s *Scheduler) basketLegs(ctx context.Context, id string) ([]planner.Leg, e
 
 // basketHoldings: per leg, attributed base atoms (confirmed executions of this basket) capped at the wallet balance, and ref price.
 func (s *Scheduler) basketHoldings(ctx context.Context, user, wallet, basketID string, legs []planner.Leg) (held, px []decimal.Decimal, err error) {
-	rows, err := s.DB.Query(ctx, `select steps from executions where user_id = $1 and basket_id::text = $2 and status = 'confirmed' and steps is not null`, user, basketID)
+	rows, err := s.DB.Query(ctx, `select e.steps, e.tx_hashes, coalesce((select jsonb_object_agg(lower(t.tx_hash), t.sz) from (
+			select tx_hash, sum(size)::text sz from user_trades where tx_hash = any(e.tx_hashes) and role = 'taker' and lower(wallet) = $3
+			group by tx_hash) t), '{}')
+		from executions e where e.user_id = $1 and e.basket_id::text = $2 and e.status = 'confirmed' and e.steps is not null`, user, basketID, wallet)
 	if err != nil {
 		return nil, nil, err
 	}
-	plans, err := pgx.CollectRows(rows, pgx.RowTo[[]byte])
+	execs, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (x planner.ExecFills, err error) {
+		return x, r.Scan(&x.Steps, &x.TxHashes, &x.Fills)
+	})
 	if err != nil {
 		return nil, nil, err
 	}
-	attr := planner.Attribute(plans)
+	attr := s.P.AttributeFills(execs)
 	for _, l := range legs {
 		p, err := s.price(ctx, l.Market)
 		if err != nil {
 			return nil, nil, err
 		}
-		h := attr[l.Market]
+		h := attr[l.Market].Amount
 		if h.IsPositive() {
 			bal, err := s.Chain.Wallet(ctx, wallet, s.Dep.Kuru.Markets[l.Market].Base)
 			if err != nil {
@@ -437,20 +461,25 @@ func (s *Scheduler) submit(ctx context.Context, claim []any, e exec) error {
 	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
-	go s.run(context.WithoutCancel(ctx), id, e.kind)
+	go s.run(context.WithoutCancel(ctx), id, e)
 	return nil
 }
 
 // run hands the execution to the executor; it owns status after that. Unreachable executor ⇒ failed, like api.
-func (s *Scheduler) run(ctx context.Context, id, kind string) {
+func (s *Scheduler) run(ctx context.Context, id string, e exec) {
 	out, err := s.Exec.Run(ctx, id)
 	if err != nil {
-		slog.Error("executor", "execution", id, "kind", kind, "err", err)
+		slog.Error("executor", "execution", id, "kind", e.kind, "err", err)
 		var pe *planner.Error
 		if !errors.As(err, &pe) {
 			s.DB.Exec(ctx, `update executions set status = 'failed', error = 'executor_unavailable', updated_at = now() where id = $1 and status = 'pending'`, id)
 		}
 		return
 	}
-	slog.Info("executor", "execution", id, "kind", kind, "status", out.Status, "steps", out.StepsDone)
+	slog.Info("executor", "execution", id, "kind", e.kind, "status", out.Status, "steps", out.StepsDone)
+	if e.settle && out.Status == "confirmed" {
+		if _, err := s.DB.Exec(ctx, `update strategy_positions set status = 'closed', closed_at = now() where id = $1 and status = 'withdrawing'`, *e.positionID); err != nil {
+			slog.Error("settle position", "position", *e.positionID, "err", err)
+		}
+	}
 }

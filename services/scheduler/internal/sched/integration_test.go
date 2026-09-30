@@ -357,11 +357,12 @@ func TestLiquidationGuard(t *testing.T) {
 		t.Fatalf("calls %v", ids)
 	}
 	kind, steps := e.steps(t, ids[0])
-	// need = 11% × 232 − 8 = 17.52 USDC
-	if kind != "margin_guard" || len(steps) != 2 || steps[0].Action != "stable.swap" || steps[0].Amount != "17520000" || steps[1].Action != "perpl.deposit" {
+	// need 11% × 232 − 8 = 17.52 ⇒ swap 17.52 / 0.99, deposit its minOut, move it into the position
+	if kind != "margin_guard" || len(steps) != 3 || steps[0].Action != "stable.swap" || steps[0].Amount != "17696970" ||
+		steps[1].Action != "perpl.deposit" || steps[2].Kind != "addMargin" || steps[2].Amount != steps[1].Amount {
 		t.Fatalf("%s %+v", kind, steps)
 	}
-	// no USDC left ⇒ cut the short: keep 40 × 8 / (11% × 232) = 12 lots
+	// no USDC left ⇒ cut the short: keep 40 × 8 / 25.52 = 12, re-add the released (8 − 0.232) × 28/40
 	e.confirmAll(t)
 	e.chain.wallet["USDC"] = decimal.Zero
 	e.evaluate(t)
@@ -370,7 +371,8 @@ func TestLiquidationGuard(t *testing.T) {
 		t.Fatalf("calls %v", ids)
 	}
 	kind, steps = e.steps(t, ids[1])
-	if kind != "margin_guard" || len(steps) != 1 || steps[0].Kind != "closeShort" || steps[0].Lot != "28" {
+	if kind != "margin_guard" || len(steps) != 2 || steps[0].Kind != "closeShort" || steps[0].Lot != "28" ||
+		steps[1].Kind != "addMargin" || steps[1].Amount != "5437600" || steps[1].Perp != "ETH" {
 		t.Fatalf("%s %+v", kind, steps)
 	}
 	// wiped out ⇒ last resort: full close, spot parked in aave
@@ -424,5 +426,27 @@ func TestPositionTakeProfitPartial(t *testing.T) {
 	e.db.QueryRow(context.Background(), `select legs from strategy_positions`).Scan(&legs)
 	if legs[0].Asset != "70000000000000000" || legs[1].Lot != "20" {
 		t.Fatalf("legs %+v", legs)
+	}
+}
+
+func TestPositionStopLossFullWithdraw(t *testing.T) {
+	e := setup(t)
+	pid := seedPosition(t, e, "0.05")
+	e.exec(t, `insert into schedules(user_id,kind,target_type,target_id,trigger_price,sell_bps,max_slippage_bps,max_per_run_usdc)
+		values ($1,'stop_loss','position',$2,900,10000,50,1000)`, user, pid) // worth 800 ≤ 900
+	e.race(time.Now())
+	ids := e.calls(1)
+	if len(ids) != 1 {
+		t.Fatalf("calls %v", ids)
+	}
+	kind, steps := e.steps(t, ids[0])
+	if kind != "withdraw" || len(steps) == 0 {
+		t.Fatalf("%s %+v", kind, steps)
+	}
+	var status string
+	var legs []byte
+	e.db.QueryRow(context.Background(), `select p.status, e.legs from strategy_positions p join executions e on e.position_id = p.id`).Scan(&status, &legs)
+	if status != "closed" || legs != nil { // fake executor confirms; api-style withdraw rows carry no legs
+		t.Fatalf("status %s legs %s", status, legs)
 	}
 }

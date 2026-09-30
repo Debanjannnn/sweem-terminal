@@ -53,6 +53,7 @@ sol! {
         function depositCollateral(uint256 amountCNS) external;
         function execOrder(OrderDesc orderDesc) external returns (uint256 perpId, uint256 orderId);
         function withdrawCollateral(uint256 amountCNS) external;
+        function requestDecreasePositionCollateral(uint256 perpId, uint256 amountCNS, bool clampToMaximum) external;
     }
 }
 

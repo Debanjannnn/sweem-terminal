@@ -32,4 +32,6 @@ cast calldata "$OD" '(0,1,3,0,1200000,100,0,false,false,true,0,200,0,0,1000)'
 cast calldata 'withdrawCollateral(uint256)' 99000000
 cast calldata 'deposit()'
 cast calldata 'withdraw(uint256)' 10000000000000000000
+cast calldata "$OD" '(0,1,5,0,0,0,0,false,false,false,0,100,0,5000000,0)'
+cast calldata 'requestDecreasePositionCollateral(uint256,uint256,bool)' 1 1000000 false
 } > "$(dirname "$0")/user_steps.golden.txt"

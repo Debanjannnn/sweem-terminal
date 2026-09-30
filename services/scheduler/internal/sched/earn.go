@@ -61,17 +61,13 @@ func (s *Scheduler) position(ctx context.Context, id string) (position, error) {
 	return pgx.CollectExactlyOneRow(rows, scanPosition)
 }
 
-// reconcile applies planned legs of finished executions: confirmed ⇒ strategy_positions.legs (closing ⇒ closed),
-// failed/rejected ⇒ legs dropped (closing ⇒ open again).
+// reconcile applies planned legs of finished executions: confirmed ⇒ strategy_positions.legs, failed/rejected ⇒ dropped.
+// Status is never touched (api owns 'withdrawing').
 // ponytail: a run that failed midway keeps the old legs; lending values self-correct via Balances, a half-done basis toggle needs a manual look.
 func (s *Scheduler) reconcile(ctx context.Context) error {
 	_, err := s.DB.Exec(ctx, `with done as (
 			select id, position_id, legs, status from executions where legs is not null and status in ('confirmed', 'failed', 'rejected') for update),
-		applied as (update strategy_positions p set
-			legs = case when done.status = 'confirmed' then done.legs else p.legs end,
-			status = case when p.status <> 'closing' then p.status when done.status = 'confirmed' then 'closed' else 'open' end,
-			closed_at = case when p.status = 'closing' and done.status = 'confirmed' then now() else p.closed_at end
-			from done where done.position_id = p.id)
+		applied as (update strategy_positions p set legs = done.legs from done where done.position_id = p.id and done.status = 'confirmed')
 		update executions set legs = null where id in (select id from done)`)
 	return err
 }
@@ -145,14 +141,17 @@ func (s *Scheduler) evaluate(ctx context.Context, p position, now time.Time) err
 			e.kind = "margin_guard"
 			lot := decimal.RequireFromString(p.legs[basis].Lot)
 			var plan planner.Plan
-			if g.CloseAll || g.LotCut.GreaterThanOrEqual(lot) {
+			switch {
+			case g.CloseAll || g.LotCut.GreaterThanOrEqual(lot):
 				off := append([]bool(nil), on...)
 				off[basis] = false
 				plan, err = s.P.Rebalance(ctx, p.strat, p.legs, bals, Targets(p.strat.Sources, off, apy, nil), perp.Account > 0, s.Slippage)
-			} else if plan, err = s.P.ResizeBasis(ctx, p.strat, p.legs[basis], g.LotCut.Neg(), g.TopUp, s.Slippage); err == nil {
-				leg := plan.Legs[0]
-				plan.Legs = append([]planner.LegState(nil), p.legs...)
-				plan.Legs[basis] = leg
+			default: // isolated margin: free balance + wallet top-up + released collateral all go into the position via addMargin
+				var r planner.Plan
+				if r, err = s.P.ResizeBasis(ctx, p.strat, p.legs[basis], g.LotCut.Neg(), g.TopUp, perp.Free.Add(g.Released), s.Slippage); err == nil {
+					plan.Steps, plan.Legs = r.Steps, append([]planner.LegState(nil), p.legs...)
+					plan.Legs[basis] = r.Legs[0]
+				}
 			}
 			if err != nil || len(plan.Steps) == 0 {
 				return errors.Join(err, errors.New("guard: nothing planned"))

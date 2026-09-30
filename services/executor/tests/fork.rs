@@ -97,13 +97,21 @@ async fn mainnet_fork_every_adapter() {
     f.step(json!({"action":"stable.swap","from":"USDC","to":"AUSD","amount":"100000000","minOut":"99000000"})).await;
     assert!(f.bal("AUSD", w).await >= u(99_000_000));
     f.step(json!({"action":"perpl.createAccount","amount":"90000000"})).await;
-    f.step(json!({"action":"perpl.deposit","amount":"5000000"})).await;
     // PerpetualInfo is dynamic: word 0 = offset, markPNS is head field 11
     let mark = f.word(ex, getPerpetualInfoCall { perpId: u(1) }.abi_encode(), 12).await;
     let acct = f.word(ex, getAccountByAddrCall { a: w }.abi_encode(), 0).await;
     println!("BTC mark {mark} account {acct}");
     f.step(json!({"action":"perpl.order","perp":"BTC","kind":"openShort","price":(mark * u(98) / u(100)).to_string(),"lot":"100","leverageHdths":200})).await;
     assert_eq!(f.word(ex, getPositionCall { perpId: u(1), accountId: acct }.abi_encode(), 6).await, u(100), "short filled");
+    // isolated margin: fund the account, then move it into the position (PositionInfo.depositCNS = word 4)
+    let pos = || getPositionCall { perpId: u(1), accountId: acct }.abi_encode();
+    let dep0 = f.word(ex, pos(), 4).await;
+    f.step(json!({"action":"perpl.deposit","amount":"5000000"})).await;
+    f.step(json!({"action":"perpl.order","perp":"BTC","kind":"addMargin","amount":"5000000"})).await;
+    let dep1 = f.word(ex, pos(), 4).await;
+    println!("position margin {dep0} -> {dep1}");
+    assert_eq!(dep1 - dep0, u(5_000_000));
+    f.step(json!({"action":"perpl.requestRemoveMargin","perp":"BTC","amount":"1000000"})).await;
     f.step(json!({"action":"perpl.order","perp":"BTC","kind":"closeShort","price":(mark * u(102) / u(100)).to_string(),"lot":"100","leverageHdths":200})).await;
     assert_eq!(f.word(ex, getPositionCall { perpId: u(1), accountId: acct }.abi_encode(), 6).await, U256::ZERO, "closed");
     let ausd0 = f.bal("AUSD", w).await;

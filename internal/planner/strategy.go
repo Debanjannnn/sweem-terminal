@@ -419,9 +419,12 @@ func (p *Planner) WithdrawBps(ctx context.Context, s Strategy, legs []LegState, 
 }
 
 // ResizeBasis changes the Perpl hedge of a basis leg without touching spot (liquidation guard / re-hedge).
-// lotDelta: perp lot units, < 0 reduces the short, > 0 adds to it (at the source leverage). collateralDelta: > 0 USDC atoms added
-// as AUSD collateral, < 0 AUSD atoms withdrawn back to USDC. Plan.Legs = the updated leg.
-func (p *Planner) ResizeBasis(ctx context.Context, s Strategy, leg LegState, lotDelta, collateralDelta decimal.Decimal, slip int) (Plan, error) {
+// Perpl margin is isolated (fork-verified): deposits and closed shares land in the free account balance, so collateral only
+// reaches the position through perpl.addMargin.
+// lotDelta: perp lot units, < 0 reduces the short, > 0 adds to it (at the source leverage). collateralDelta: > 0 USDC atoms
+// swapped to AUSD, deposited and added as position margin; < 0 AUSD atoms of free balance withdrawn back to USDC.
+// margin: extra free-balance AUSD atoms (e.g. released by the close) moved into the position at the end. Plan.Legs = the updated leg.
+func (p *Planner) ResizeBasis(ctx context.Context, s Strategy, leg LegState, lotDelta, collateralDelta, margin decimal.Decimal, slip int) (Plan, error) {
 	var src *Source
 	for i := range s.Sources {
 		if s.Sources[i].Kind == "basis" {
@@ -432,18 +435,21 @@ func (p *Planner) ResizeBasis(ctx context.Context, s Strategy, leg LegState, lot
 	if src == nil || !ok {
 		return Plan{}, fail("bad_request", "strategy has no basis source")
 	}
-	if !lotDelta.IsInteger() || d(leg.Lot).Add(lotDelta).IsNegative() || d(leg.Collateral).Add(decimal.Min(collateralDelta, decimal.Zero)).IsNegative() {
+	if !lotDelta.IsInteger() || d(leg.Lot).Add(lotDelta).IsNegative() || d(leg.Collateral).Add(decimal.Min(collateralDelta, decimal.Zero)).IsNegative() ||
+		margin.IsNegative() || (margin.IsPositive() && collateralDelta.IsNegative()) {
 		return Plan{}, fail("bad_request", "resize beyond the position")
 	}
 	var steps []Step
 	out := leg
 	if collateralDelta.IsPositive() {
-		cs, err := p.AddCollateral(collateralDelta, slip)
-		if err != nil {
-			return Plan{}, err
+		ausd := collateralDelta.Mul(decimal.NewFromInt(int64(10_000 - slip - poolFeeBps))).Div(bps).Floor()
+		if !ausd.IsPositive() {
+			return Plan{}, fail("bad_request", "amount too small")
 		}
-		steps = append(steps, cs...)
-		out.Collateral = d(leg.Collateral).Add(d(cs[0].MinOut)).String()
+		steps = append(steps, Step{Action: "stable.swap", From: "USDC", To: "AUSD", Amount: collateralDelta.String(), MinOut: ausd.String()},
+			Step{Action: "perpl.deposit", Amount: ausd.String()})
+		out.Collateral = d(leg.Collateral).Add(ausd).String()
+		margin = margin.Add(ausd)
 	}
 	if !lotDelta.IsZero() {
 		q, err := p.quote(ctx, s.Asset, "buy", decimal.New(100, 6), slip) // $100 probe for the spot price
@@ -465,6 +471,9 @@ func (p *Planner) ResizeBasis(ctx context.Context, s Strategy, leg LegState, lot
 		steps = append(steps, Step{Action: "perpl.order", Perp: pp.Name, Kind: kind, Price: limit.String(), Lot: lot.String(), LeverageHdths: lev})
 		out.Lot = d(leg.Lot).Add(lotDelta).String()
 	}
+	if margin.IsPositive() {
+		steps = append(steps, Step{Action: "perpl.order", Perp: pp.Name, Kind: "addMargin", Amount: margin.String()})
+	}
 	if collateralDelta.IsNegative() {
 		amt := collateralDelta.Neg()
 		min := amt.Mul(decimal.NewFromInt(int64(10_000 - slip - poolFeeBps))).Div(bps).Floor()
@@ -474,18 +483,6 @@ func (p *Planner) ResizeBasis(ctx context.Context, s Strategy, leg LegState, lot
 	}
 	steps, err := p.check(p.Dep, steps)
 	return Plan{Steps: steps, Legs: []LegState{out}}, err
-}
-
-// AddCollateral tops up the Perpl account from USDC (liquidation guard).
-func (p *Planner) AddCollateral(usdc decimal.Decimal, slip int) ([]Step, error) {
-	ausd := usdc.Mul(decimal.NewFromInt(int64(10_000 - slip - poolFeeBps))).Div(bps).Floor()
-	if !ausd.IsPositive() {
-		return nil, fail("bad_request", "amount too small")
-	}
-	return p.check(p.Dep, []Step{
-		{Action: "stable.swap", From: "USDC", To: "AUSD", Amount: usdc.String(), MinOut: ausd.String()},
-		{Action: "perpl.deposit", Amount: ausd.String()},
-	})
 }
 
 // Rebalance moves value toward targetBps (same order as sources). Lending/staking move partially; basis only toggles
@@ -584,7 +581,7 @@ func (p *Planner) Rebalance(ctx context.Context, s Strategy, legs []LegState, ba
 	return Plan{Steps: steps, Legs: out}, err
 }
 
-// Attribute nets a basket's holdings per market from its confirmed executions' steps: Σ marketBuy minOut − Σ marketSell size (base atoms).
+// Deprecated: use AttributeFills (actual fills). Attribute nets a basket's holdings per market from its confirmed executions' steps: Σ marketBuy minOut − Σ marketSell size (base atoms).
 func Attribute(plans [][]byte) map[string]decimal.Decimal {
 	out := map[string]decimal.Decimal{}
 	for _, raw := range plans {

@@ -66,7 +66,11 @@ pub enum Step {
     PerplDeposit { amount: String },
     /// kind openShort|closeShort, IOC; price/lot raw in the perp's price/size decimals
     #[serde(rename = "perpl.order")]
-    PerplOrder { perp: String, kind: String, price: String, lot: String, leverage_hdths: u64 },
+    /// kind addMargin {perp, amount}: isolated margin, moves `amount` AUSD atoms of free account balance into the position
+    PerplOrder { perp: String, kind: String, price: Option<String>, lot: Option<String>, leverage_hdths: Option<u64>, amount: Option<String> },
+    /// asks Perpl to release position margin to free balance; completed or declined later by Perpl, not in this tx
+    #[serde(rename = "perpl.requestRemoveMargin")]
+    PerplRequestRemoveMargin { perp: String, amount: String },
     #[serde(rename = "perpl.withdraw")]
     PerplWithdraw { amount: String },
     /// MON wei → WMON (value)
@@ -234,28 +238,38 @@ pub fn build(d: &Deployments, wallet: Address, step: &Step) -> Result<Call, Stri
             let a = amt(amount)?;
             call(d.perpl.exchange, IPerpl::depositCollateralCall { amountCNS: a }.abi_encode(), token(d, "AUSD")?.0, a)
         }
-        PerplOrder { perp, kind, price, lot, leverage_hdths } => {
-            let perp_id = *d.perpl.perp_ids.get(perp).ok_or_else(|| format!("unknown perp {perp}"))?;
-            let order_type = match kind.as_str() { "openShort" => 1, "closeShort" => 3, k => return Err(format!("perpl kind {k}")) };
+        PerplOrder { perp, kind, price, lot, leverage_hdths, amount } => {
+            let none = |o: &Option<String>| o.is_none();
+            // (type, price, lot, leverage, IOC, amount, maxNegPnl); addMargin as verified on a fork: over-asking reverts
+            let (t, price, lot, lev, ioc, amount, neg) = match (kind.as_str(), price, lot, leverage_hdths, amount) {
+                (k @ ("openShort" | "closeShort"), Some(p), Some(l), Some(lev), None) => {
+                    (if k == "openShort" { 1 } else { 3 }, amt(p)?, amt(l)?, *lev, true, U256::ZERO, 1000)
+                }
+                ("addMargin", p, l, None, Some(a)) if none(p) && none(l) => (5, U256::ZERO, U256::ZERO, 100, false, amt(a)?, 0),
+                (k, ..) => return Err(format!("perpl.order kind {k}: bad or missing fields")),
+            };
             let desc = IPerpl::OrderDesc {
                 orderDescId: U256::ZERO,
-                perpId: U256::from(perp_id),
-                orderType: order_type,
+                perpId: U256::from(perp_id(d, perp)?),
+                orderType: t,
                 orderId: U256::ZERO,
-                pricePNS: amt(price)?,
-                lotLNS: amt(lot)?,
+                pricePNS: price,
+                lotLNS: lot,
                 expiryBlock: U256::ZERO,
                 postOnly: false,
                 fillOrKill: false,
-                immediateOrCancel: true,
+                immediateOrCancel: ioc,
                 maxMatches: U256::ZERO,
-                leverageHdths: U256::from(*leverage_hdths),
+                leverageHdths: U256::from(lev),
                 lastExecutionBlock: U256::ZERO,
-                amountCNS: U256::ZERO,
-                // as in the verified fork test
-                maxNegPnlCollatBPS: U256::from(1000),
+                amountCNS: amount,
+                maxNegPnlCollatBPS: U256::from(neg),
             };
             plain(d.perpl.exchange, IPerpl::execOrderCall { orderDesc: desc }.abi_encode())
+        }
+        PerplRequestRemoveMargin { perp, amount } => {
+            let data = IPerpl::requestDecreasePositionCollateralCall { perpId: U256::from(perp_id(d, perp)?), amountCNS: amt(amount)?, clampToMaximum: false };
+            plain(d.perpl.exchange, data.abi_encode())
         }
         PerplWithdraw { amount } => plain(d.perpl.exchange, IPerpl::withdrawCollateralCall { amountCNS: amt(amount)? }.abi_encode()),
         WmonWrap { amount } => {
@@ -269,6 +283,10 @@ pub fn build(d: &Deployments, wallet: Address, step: &Step) -> Result<Call, Stri
             Call { to: usdc, value: U256::ZERO, data: IERC20::transferCall { to: treasury, amount: a }.abi_encode(), spend: Some((usdc, a)), approve: false }
         }
     })
+}
+
+fn perp_id(d: &Deployments, perp: &str) -> Result<u64, String> {
+    d.perpl.perp_ids.get(perp).copied().ok_or_else(|| format!("unknown perp {perp}"))
 }
 
 fn erc20(t: Address) -> Result<Address, String> {
@@ -367,6 +385,10 @@ mod tests {
             serde_json::json!({"action":"stable.swap","from":"WETH","to":"AUSD","amount":"1","minOut":"0"}),
             serde_json::json!({"action":"perpl.order","perp":"DOGE","kind":"openShort","price":"1","lot":"1","leverageHdths":200}),
             serde_json::json!({"action":"perpl.order","perp":"BTC","kind":"openLong","price":"1","lot":"1","leverageHdths":200}),
+            serde_json::json!({"action":"perpl.order","perp":"BTC","kind":"openShort","price":"1","lot":"1"}),
+            serde_json::json!({"action":"perpl.order","perp":"BTC","kind":"openShort","price":"1","lot":"1","leverageHdths":200,"amount":"1"}),
+            serde_json::json!({"action":"perpl.order","perp":"BTC","kind":"addMargin"}),
+            serde_json::json!({"action":"perpl.order","perp":"BTC","kind":"addMargin","amount":"1","price":"1"}),
             serde_json::json!({"action":"kuru.limit","market":"WETH","side":"buy","price":"4294967296","size":"1","postOnly":true}),
             serde_json::json!({"action":"kuru.cancel","market":"WETH","orderIds":[]}),
             serde_json::json!({"action":"erc20.transfer","to":"0x2222222222222222222222222222222222222222","amount":"1"}),

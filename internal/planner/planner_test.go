@@ -389,28 +389,30 @@ func TestWithdrawBpsAndResize(t *testing.T) {
 		t.Errorf("bps 0: %v", err)
 	}
 
-	// guard: cut the short by 34 lots and add $50 collateral
-	plan, err = p.ResizeBasis(ctx, s, legs[2], decimal.NewFromInt(-34), decimal.NewFromInt(50_000_000), 0)
+	// guard: cut the short by 34 lots, add $50 collateral and re-margin 20 AUSD the close releases (isolated margin)
+	plan, err = p.ResizeBasis(ctx, s, legs[2], decimal.NewFromInt(-34), decimal.NewFromInt(50_000_000), decimal.NewFromInt(20_000_000), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	golden(t, "resize down", plan, `{"steps":[
 		{"action":"stable.swap","from":"USDC","to":"AUSD","amount":"50000000","minOut":"49975000"},
 		{"action":"perpl.deposit","amount":"49975000"},
-		{"action":"perpl.order","perp":"ETH","kind":"closeShort","price":"404000","lot":"34","leverageHdths":100}],
+		{"action":"perpl.order","perp":"ETH","kind":"closeShort","price":"404000","lot":"34","leverageHdths":100},
+		{"action":"perpl.order","perp":"ETH","kind":"addMargin","amount":"69975000"}],
 		"legs":[{"kind":"basis","venue":"perpl","asset":"133000000000000000","collateral":"315975000","lot":"100","entryPx":"4000"}]}`)
-	plan, _ = p.ResizeBasis(ctx, s, legs[2], decimal.NewFromInt(10), decimal.NewFromInt(-6_000_000), 0)
+	plan, _ = p.ResizeBasis(ctx, s, legs[2], decimal.NewFromInt(10), decimal.NewFromInt(-6_000_000), decimal.Zero, 0)
 	golden(t, "resize up + free collateral", plan.Steps, `[
 		{"action":"perpl.order","perp":"ETH","kind":"openShort","price":"396000","lot":"10","leverageHdths":200},
 		{"action":"perpl.withdraw","amount":"6000000"},
 		{"action":"stable.swap","from":"AUSD","to":"USDC","amount":"6000000","minOut":"5997000"}]`)
 	for name, err := range map[string]error{
-		"over close":  second(p.ResizeBasis(ctx, s, legs[2], decimal.NewFromInt(-135), decimal.Zero, 0)),
-		"over collat": second(p.ResizeBasis(ctx, s, legs[2], decimal.Zero, decimal.NewFromInt(-266_000_001), 0)),
-		"no basis":    second(p.ResizeBasis(ctx, Strategy{Asset: "WETH", Sources: s.Sources[:2]}, legs[2], decimal.NewFromInt(-1), decimal.Zero, 0)),
-		"nothing":     second(p.ResizeBasis(ctx, s, legs[2], decimal.Zero, decimal.Zero, 0)),
+		"over close":  second(p.ResizeBasis(ctx, s, legs[2], decimal.NewFromInt(-135), decimal.Zero, decimal.Zero, 0)),
+		"over collat": second(p.ResizeBasis(ctx, s, legs[2], decimal.Zero, decimal.NewFromInt(-266_000_001), decimal.Zero, 0)),
+		"no basis":    second(p.ResizeBasis(ctx, Strategy{Asset: "WETH", Sources: s.Sources[:2]}, legs[2], decimal.NewFromInt(-1), decimal.Zero, decimal.Zero, 0)),
+		"nothing":     second(p.ResizeBasis(ctx, s, legs[2], decimal.Zero, decimal.Zero, decimal.Zero, 0)),
+		"neg margin":  second(p.ResizeBasis(ctx, s, legs[2], decimal.Zero, decimal.Zero, decimal.NewFromInt(-1), 0)),
 	} {
-		want := map[string]string{"over close": "bad_request", "over collat": "bad_request", "no basis": "bad_request", "nothing": "nothing_to_sell"}[name]
+		want := map[string]string{"neg margin": "bad_request", "over close": "bad_request", "over collat": "bad_request", "no basis": "bad_request", "nothing": "nothing_to_sell"}[name]
 		if code(err) != want {
 			t.Errorf("%s: %v", name, err)
 		}

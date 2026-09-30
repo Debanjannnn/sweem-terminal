@@ -86,6 +86,12 @@ func (f *fakeChain) Balances(context.Context, string, planner.Strategy, []planne
 	return f.bals, nil
 }
 
+func (f *fakeChain) Live(context.Context, string, planner.Strategy, []planner.LegState, []planner.Peer) (planner.Live, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return planner.Live{Bals: f.bals, Wallet: f.wallet, PerpLot: f.perp.Lot, PerpFree: f.perp.Free}, nil
+}
+
 func (f *fakeChain) Perp(context.Context, string, int) (Perp, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -258,17 +264,21 @@ func TestGuard(t *testing.T) {
 			t.Fatal(mark, g)
 		}
 	}
+	// mark 3700: equity 200 / 3700 = 5.4% < 8%; target 11% × 3700 = 407
 	cases := []struct {
-		wallet, topUp, cut string
-		closeAll           bool
+		free, wallet, topUp, cut, released string
 	}{
-		{"500000000", "207000000", "0", false},   // equity 200 / 3700 = 5.4% < 8%: top up 11% × 3700 − 200
-		{"100000000", "100000000", "263", false}, // partial top-up, keep 1000 × 300 / 407 = 737 lots
-		{"500000", "0", "509", false},            // dust wallet: cut only, keep 1000 × 200 / 407
+		{"0", "500000000", "209090910", "0", "0"},          // wallet covers 207 / 0.99 swap haircut
+		{"50000000", "500000000", "158585859", "0", "0"},   // free balance first: 157 / 0.99
+		{"300000000", "0", "0", "0", "0"},                  // free balance alone covers it
+		{"0", "100000000", "100000000", "266", "52215800"}, // keep 1000 × (200 + 99) / 407 = 734; re-add (200 − 3.7) × 0.266
+		{"0", "500000", "0", "509", "99916700"},            // dust wallet: keep 1000 × 200 / 407 = 491
 	}
 	for _, c := range cases {
-		g := Guard(p(370000), buf, d(c.wallet))
-		if !g.Fire || g.CloseAll != c.closeAll || !g.TopUp.Equal(d(c.topUp)) || !g.LotCut.Equal(d(c.cut)) {
+		pp := p(370000)
+		pp.Free = d(c.free)
+		g := Guard(pp, buf, d(c.wallet))
+		if !g.Fire || g.CloseAll || !g.TopUp.Equal(d(c.topUp)) || !g.LotCut.Equal(d(c.cut)) || !g.Released.Equal(d(c.released)) {
 			t.Errorf("%+v: %+v", c, g)
 		}
 	}

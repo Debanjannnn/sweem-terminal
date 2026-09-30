@@ -18,24 +18,30 @@ import (
 // Perp is one Perpl short as the exchange sees it. Prices in PNS (10^-PriceDec USD), lots in LNS (10^-LotDec units), collateral 6dp.
 type Perp struct {
 	Account            uint64          // 0 = wallet has no Perpl account
-	Deposit, PnL, Mark decimal.Decimal // PnL at mark incl. funding (pnlCNS)
+	Free               decimal.Decimal // account balance not in any position (AUSD atoms)
+	Deposit, PnL, Mark decimal.Decimal // position collateral; PnL at mark incl. funding (pnlCNS)
 	Lot                decimal.Decimal
 	PriceDec, LotDec   int32
 	MaintHdths         decimal.Decimal // max leverage at maintenance ×100 (2000 = 20x ⇒ 5% margin)
 	MarkValid          bool
 }
 
-// GuardAction lifts a short near maintenance back to maintenance + 2×buffer: TopUp USDC atoms from the wallet first,
-// then LotCut perp lots; CloseAll only when no remaining size fits the equity.
+// GuardAction lifts a short near maintenance back to maintenance + 2×buffer. Perpl margin is isolated (verified on a
+// mainnet fork 2026-09-30): depositCollateral only credits the free account balance, and a partial close releases the closed
+// share of (deposit + PnL) to it. So every action ends by moving free balance into the position (addMargin, orderType 5):
+// Free first, then TopUp USDC from the wallet, then LotCut lots whose Released collateral is re-added; CloseAll as last resort.
 type GuardAction struct {
-	Fire, CloseAll bool
-	TopUp, LotCut  decimal.Decimal
+	Fire, CloseAll          bool
+	TopUp, LotCut, Released decimal.Decimal // USDC atoms, perp lots, AUSD atoms (conservative)
 }
 
-var minTopUp = decimal.New(1, 6) // 1 USDC; smaller top-ups are not worth a swap
+var (
+	minTopUp = decimal.New(1, 6)                  // 1 USDC; smaller top-ups are not worth a swap
+	swapKeep = decimal.RequireFromString("0.99")  // USDC→AUSD after slippage + pool fee, worst case
+	closeFee = decimal.RequireFromString("0.001") // of closed notional: taker fee + mark drift before the close lands
+)
 
-// Guard fires when the margin fraction ((collateral + PnL) / notional) is within buffer of maintenance.
-// Lot cut assumes a partial close leaves the position's collateral in place (Perpl isolated margin): hypothesis, verify on fork.
+// Guard fires when the position's margin fraction ((deposit + PnL) / notional) is within buffer of maintenance.
 func Guard(p Perp, buffer, wallet decimal.Decimal) GuardAction {
 	if !p.Lot.IsPositive() || !p.MarkValid || !p.MaintHdths.IsPositive() {
 		return GuardAction{}
@@ -48,18 +54,24 @@ func Guard(p Perp, buffer, wallet decimal.Decimal) GuardAction {
 	}
 	target := maint.Add(buffer.Mul(decimal.NewFromInt(2)))
 	a := GuardAction{Fire: true}
-	if need := target.Mul(notional).Sub(equity).Ceil(); wallet.GreaterThanOrEqual(need) {
-		a.TopUp = need
+	short := target.Mul(notional).Sub(equity).Sub(p.Free) // still missing after moving all free balance in
+	if !short.IsPositive() {
+		return a
+	}
+	if topUp := short.Div(swapKeep).Ceil(); wallet.GreaterThanOrEqual(topUp) {
+		a.TopUp = topUp
 		return a
 	}
 	if wallet.GreaterThanOrEqual(minTopUp) {
 		a.TopUp = wallet.Floor()
 	}
-	keep := p.Lot.Mul(equity.Add(a.TopUp)).Div(target.Mul(notional)).Floor()
-	if !keep.IsPositive() {
+	// equity (incl. released) stays, notional shrinks with the lot
+	keep := p.Lot.Mul(equity.Add(p.Free).Add(a.TopUp.Mul(swapKeep))).Div(target.Mul(notional)).Floor()
+	if !keep.IsPositive() || !equity.IsPositive() {
 		return GuardAction{Fire: true, CloseAll: true}
 	}
 	a.LotCut = p.Lot.Sub(keep)
+	a.Released = decimal.Max(decimal.Zero, equity.Sub(notional.Mul(closeFee)).Mul(a.LotCut).Div(p.Lot).Floor())
 	return a
 }
 
@@ -86,6 +98,10 @@ func (r RPC) Wallet(ctx context.Context, wallet, sym string) (decimal.Decimal, e
 
 func (r RPC) Balances(ctx context.Context, wallet string, s planner.Strategy, legs []planner.LegState, peers []planner.Peer) ([]planner.Balance, error) {
 	return planner.Balances(ctx, r.C, r.Dep, wallet, s, legs, peers)
+}
+
+func (r RPC) Live(ctx context.Context, wallet string, s planner.Strategy, legs []planner.LegState, peers []planner.Peer) (planner.Live, error) {
+	return planner.ReadLive(ctx, r.C, r.Dep, wallet, s, legs, peers)
 }
 
 func (r RPC) call(ctx context.Context, method string, args ...any) ([]any, error) {
@@ -116,7 +132,7 @@ func (r RPC) Perp(ctx context.Context, wallet string, perpID int) (Perp, error) 
 		return Perp{}, err
 	}
 	id := field(acct[0], "AccountId")
-	p := Perp{Account: id.BigInt().Uint64()}
+	p := Perp{Account: id.BigInt().Uint64(), Free: field(acct[0], "BalanceCNS")}
 	pid := big.NewInt(int64(perpID))
 	pos, err := r.call(ctx, "getPosition", pid, id.BigInt())
 	if err != nil {

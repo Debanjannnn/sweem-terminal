@@ -89,6 +89,7 @@ pub fn rules(d: &Deployments) -> Vec<Value> {
         rule("Perpl createAccount", vec![perpl], abi("createAccount", &[u("amountCNS")]), vec![]),
         rule("Perpl depositCollateral", vec![perpl], abi("depositCollateral", &[u("amountCNS")]), vec![]),
         rule("Perpl execOrder", vec![perpl], abi_item("execOrder", order_desc), vec![]),
+        rule("Perpl request margin decrease", vec![perpl], abi("requestDecreasePositionCollateral", &[u("perpId"), u("amountCNS"), ("clampToMaximum", "bool")]), vec![]),
         rule("Perpl withdrawCollateral", vec![perpl], abi("withdrawCollateral", &[u("amountCNS")]), vec![]),
     ]
 }
@@ -132,7 +133,7 @@ mod tests {
     fn every_rule_pins_chain_targets_and_function() {
         let d = dep();
         let r = rules(&d);
-        assert_eq!(r.len(), 24);
+        assert_eq!(r.len(), 25);
         for rule in &r {
             assert_eq!(rule["method"], "eth_sendTransaction");
             assert_eq!(rule["action"], "ALLOW");

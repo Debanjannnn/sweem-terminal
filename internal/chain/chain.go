@@ -8,7 +8,7 @@ import (
 	"github.com/snehendu098/sweem-terminal/internal/config"
 )
 
-// Dial connects and refuses any chain but Monad testnet.
+// Dial connects and refuses any chain but config.ExpectedChainID (env CHAIN_ID).
 func Dial(ctx context.Context, url string) (*ethclient.Client, error) {
 	c, err := ethclient.DialContext(ctx, url)
 	if err != nil {
@@ -19,9 +19,9 @@ func Dial(ctx context.Context, url string) (*ethclient.Client, error) {
 		c.Close()
 		return nil, err
 	}
-	if id.Uint64() != config.ChainID {
+	if want := config.ExpectedChainID(); id.Uint64() != want {
 		c.Close()
-		return nil, fmt.Errorf("rpc %s is chain %s, want %d", url, id, config.ChainID)
+		return nil, fmt.Errorf("rpc %s is chain %s, want %d", url, id, want)
 	}
 	return c, nil
 }

@@ -47,3 +47,28 @@ func TestLoadDeployments(t *testing.T) {
 		t.Fatal("want chain id error")
 	}
 }
+
+func TestLoadDeployments143(t *testing.T) {
+	d, err := LoadDeployments143("../../contracts/deployments/143.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Tokens["USDC"].Decimals != 6 || d.Kuru.Markets["MON"].PricePrecision != 1e8 || d.Perpl.PerpIds["ETH"] != 20 ||
+		d.Swap.AUSD3Pool.Coins["USDC"] != 1 || d.Lending.AaveV3.ATokens["USDC"] == "" || len(d.Lending.ERC4626) == 0 {
+		t.Fatalf("bad parse %+v", d)
+	}
+	if _, err := LoadDeployments143("../../contracts/deployments/10143.json"); err == nil {
+		t.Fatal("want chain id error")
+	}
+}
+
+func TestExpectedChainID(t *testing.T) {
+	t.Setenv("CHAIN_ID", "")
+	if ExpectedChainID() != ChainID {
+		t.Fatal("default")
+	}
+	t.Setenv("CHAIN_ID", "143")
+	if ExpectedChainID() != 143 {
+		t.Fatal("env")
+	}
+}

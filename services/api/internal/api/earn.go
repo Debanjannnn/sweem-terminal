@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -331,6 +332,8 @@ func (s *Server) positions(w http.ResponseWriter, r *http.Request) {
 	reply(w, "positions", v, err)
 }
 
+// withdraw unwinds an open position, or resumes a failed withdraw from its step_done. Every step is capped by live
+// on-chain state (planner.ResumeWithdraw), so a retry never re-closes a short or withdraws twice.
 func (s *Server) withdraw(w http.ResponseWriter, r *http.Request) {
 	pid, ok := id(w, r)
 	var in struct{ SlippageBps *int }
@@ -344,7 +347,7 @@ func (s *Server) withdraw(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, me := r.Context(), did(r)
 	pos, st, err := s.Store.Position(ctx, me, pid)
-	if err == nil && pos.Status != "open" {
+	if err == nil && pos.Status != "open" && pos.Status != "withdrawing" {
 		err = ErrNotOpen
 	}
 	var peers []planner.Peer
@@ -354,27 +357,57 @@ func (s *Server) withdraw(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		peers, err = s.Store.Peers(ctx, me, pid)
 	}
+	var last LastWithdraw
+	var resume bool
+	if err == nil && pos.Status == "withdrawing" {
+		last, resume, err = s.Store.LastWithdraw(ctx, pid)
+		if err == nil && (last.Status == "pending" || last.Status == "submitted") {
+			err = ErrWithdrawBusy
+		}
+	}
 	if err != nil {
 		fail(w, "withdraw", err)
 		return
 	}
-	bals, err := planner.Balances(ctx, s.Chain, s.Plan.Dep, pos.Wallet, st, pos.Legs, peers)
+	live, err := planner.ReadLive(ctx, s.Chain, s.Plan.Dep, pos.Wallet, st, pos.Legs, peers)
 	if err != nil {
-		slog.Error("balances", "err", err)
+		slog.Error("live state", "err", err)
 		httpx.Error(w, http.StatusBadGateway, "rpc_unavailable")
 		return
 	}
-	plan, err := s.Plan.Withdraw(ctx, st, pos.Legs, bals, sl)
+	steps, done := last.Steps, last.StepDone
+	if !resume {
+		plan, err := s.Plan.Withdraw(ctx, st, pos.Legs, live.Bals, sl)
+		if err != nil && !isNothing(err) {
+			fail(w, "plan withdraw", err)
+			return
+		}
+		steps, done = plan.Steps, 0
+	}
+	steps, err = s.Plan.ResumeWithdraw(ctx, st, steps, done, live, sl)
 	if err != nil {
-		fail(w, "plan withdraw", err)
+		fail(w, "resume withdraw", err)
 		return
 	}
-	execID, err := s.Store.StartWithdraw(ctx, me, pid, NewExec{Kind: "withdraw", Steps: plan.Steps, PositionID: &pid})
+	if len(steps) == 0 {
+		// nothing left on chain to unwind
+		if err := s.Store.SettlePosition(ctx, pid, "closed"); err != nil {
+			fail(w, "settle", err)
+			return
+		}
+		httpx.JSON(w, http.StatusOK, map[string]any{"positionId": pid, "status": "closed", "steps": []planner.Step{}})
+		return
+	}
+	execID, err := s.Store.StartWithdraw(ctx, me, pid, NewExec{Kind: "withdraw", Steps: steps, PositionID: &pid})
 	if err != nil {
 		fail(w, "start withdraw", err)
 		return
 	}
-	// ponytail: a failed unwind returns the position to open; partial unwinds are reconciled by re-reading balances on retry
-	s.start(execID, s.settle(pid, "closed", "open"))
-	accepted(w, execID, "withdraw", plan.Steps, map[string]any{"positionId": pid})
+	s.start(execID, s.settle(pid, "closed", "withdrawing"))
+	accepted(w, execID, "withdraw", steps, map[string]any{"positionId": pid, "resumed": resume})
+}
+
+func isNothing(err error) bool {
+	var pe *planner.Error
+	return errors.As(err, &pe) && pe.Code == "nothing_to_sell"
 }

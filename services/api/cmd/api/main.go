@@ -68,6 +68,7 @@ func run() error {
 		Plan:    &planner.Planner{Dep: dep, Q: md, MaxStepUSD: int64(maxStep)},
 		Exec:    planner.Executor{URL: execURL, Secret: secret2, Caller: "api", HTTP: &http.Client{Timeout: 15 * time.Minute}},
 		Chain:   eth,
+		Txs:     eth,
 		Rates:   md,
 		History: api.History{URL: histURL, HTTP: &http.Client{Timeout: 60 * time.Second}},
 	}).Routes(mux)

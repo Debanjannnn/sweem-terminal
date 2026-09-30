@@ -2,10 +2,20 @@ package api
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"sort"
 	"strings"
+	"time"
+
+	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/google/uuid"
+	"github.com/snehendu098/sweem-terminal/internal/config"
 
 	"github.com/shopspring/decimal"
 	"github.com/snehendu098/sweem-terminal/internal/httpx"
@@ -106,126 +116,243 @@ func (s *Server) launch(w http.ResponseWriter, r *http.Request, e NewExec, extra
 	accepted(w, execID, e.Kind, e.Steps, extra)
 }
 
-func (s *Server) trade(w http.ResponseWriter, r *http.Request) {
+// TradeInput is the body of /me/trade, /me/baskets/{id}/buy|sell and /me/trade/prepare (Kind picks which).
+type TradeInput struct {
+	Kind        string `json:"kind"` // trade | basket_buy | basket_sell
+	Market      string `json:"market"`
+	Side        string `json:"side"`
+	Amount      string `json:"amount"`
+	BasketID    string `json:"basketId"`
+	AmountUsdc  string `json:"amountUsdc"`
+	Bps         *int   `json:"bps"`
+	SlippageBps *int   `json:"slippageBps"`
+	Wallet      string `json:"wallet"` // prepare only: the Privy embedded wallet that will sign
+}
+
+var errBad = &planner.Error{Code: "bad_request", Detail: "invalid trade input"}
+
+// planTrade turns a trade input into a plan for wallet; basket runs return their basket id for attribution.
+func (s *Server) planTrade(ctx context.Context, me, wallet string, in TradeInput) ([]planner.Step, *string, error) {
+	sl, ok := slip(in.SlippageBps)
+	if !ok {
+		return nil, nil, errBad
+	}
+	switch in.Kind {
+	case "trade":
+		m, okm := s.Plan.Dep.Kuru.Markets[in.Market]
+		amt, oka := human(in.Amount)
+		if !okm || !oka {
+			return nil, nil, errBad
+		}
+		switch in.Side {
+		case "buy":
+			atoms, _ := s.Plan.ToAtoms(m.Quote, amt)
+			steps, err := s.Plan.MarketBuy(ctx, in.Market, atoms, sl)
+			return steps, nil, err
+		case "sell":
+			atoms, _ := s.Plan.ToAtoms(m.Base, amt)
+			steps, err := s.Plan.MarketSell(ctx, in.Market, atoms, sl)
+			return steps, nil, err
+		}
+		return nil, nil, errBad
+	case "basket_buy", "basket_sell":
+		if uuid.Validate(in.BasketID) != nil {
+			return nil, nil, errBad
+		}
+		bid := in.BasketID
+		b, err := s.Store.BasketDef(ctx, me, bid)
+		if err != nil {
+			return nil, nil, err
+		}
+		if in.Kind == "basket_buy" {
+			amt, ok := human(in.AmountUsdc)
+			if !ok {
+				return nil, nil, errBad
+			}
+			atoms, _ := s.Plan.ToAtoms("USDC", amt)
+			steps, err := s.Plan.BasketBuy(ctx, b.Legs, atoms, sl)
+			return steps, &bid, err
+		}
+		part := 10_000
+		if in.Bps != nil {
+			part = *in.Bps
+		}
+		if part < 1 || part > 10_000 {
+			return nil, nil, errBad
+		}
+		fills, err := s.Store.BasketFills(ctx, me, wallet, bid)
+		if err != nil {
+			return nil, nil, err
+		}
+		held := s.Plan.AttributeFills(fills)
+		var legs []planner.SellLeg
+		for _, l := range b.Legs {
+			amt := held[l.Market].Amount.Mul(decimal.NewFromInt(int64(part))).Div(decimal.NewFromInt(10_000)).Floor()
+			if !amt.IsPositive() {
+				continue
+			}
+			bal, err := planner.WalletBalance(ctx, s.Chain, s.Plan.Dep, wallet, s.Plan.Dep.Kuru.Markets[l.Market].Base)
+			if err != nil {
+				slog.Error("rpc balance", "err", err)
+				return nil, nil, ErrRPC
+			}
+			legs = append(legs, planner.SellLeg{Market: l.Market, Amount: decimal.Min(amt, bal)})
+		}
+		steps, err := s.Plan.BasketSell(ctx, legs, sl)
+		return steps, &bid, err
+	}
+	return nil, nil, errBad
+}
+
+// delegatedTrade runs a trade on the executor from the delegated wallet.
+func (s *Server) delegatedTrade(kind string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var in TradeInput
+		if !decode(w, r, &in) {
+			return
+		}
+		in.Kind = kind
+		if kind != "trade" {
+			var ok bool
+			if in.BasketID, ok = id(w, r); !ok {
+				return
+			}
+		}
+		wallet, err := s.Store.Wallet(r.Context(), did(r))
+		var steps []planner.Step
+		var bid *string
+		if err == nil {
+			steps, bid, err = s.planTrade(r.Context(), did(r), wallet, in)
+		}
+		if err != nil {
+			fail(w, "plan "+kind, err)
+			return
+		}
+		s.launch(w, r, NewExec{Kind: kind, Steps: steps, BasketID: bid}, nil, nil)
+	}
+}
+
+const prepareTTL = 2 * time.Minute
+
+// prepare plans a client-signed trade: ordered unsigned txs for the user's own Privy wallet, no delegation needed.
+func (s *Server) prepare(w http.ResponseWriter, r *http.Request) {
+	var in TradeInput
+	if !decode(w, r, &in) {
+		return
+	}
+	if !isAddress(in.Wallet) {
+		httpx.Error(w, http.StatusBadRequest, "invalid_wallet")
+		return
+	}
+	ctx, me, wallet := r.Context(), did(r), strings.ToLower(in.Wallet)
+	steps, bid, err := s.planTrade(ctx, me, wallet, in)
+	if err != nil {
+		fail(w, "plan prepare", err)
+		return
+	}
+	txs, err := s.Plan.Render(common.HexToAddress(wallet), steps, planner.ChainAllowance(ctx, s.Chain, common.HexToAddress(wallet)))
+	if err != nil {
+		fail(w, "render", err)
+		return
+	}
+	expires := time.Now().Add(prepareTTL).UTC().Truncate(time.Second)
+	pid, err := s.Store.CreatePrepare(ctx, me, Prepare{Wallet: wallet, Kind: in.Kind, BasketID: bid, Steps: steps, Txs: txs, ExpiresAt: expires})
+	if err != nil {
+		fail(w, "create prepare", err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{"prepareId": pid, "kind": in.Kind, "steps": steps, "txs": txs, "expiresAt": expires})
+}
+
+// TxReader is the RPC surface record needs (*ethclient.Client satisfies it).
+type TxReader interface {
+	TransactionByHash(ctx context.Context, hash common.Hash) (*types.Transaction, bool, error)
+	TransactionReceipt(ctx context.Context, hash common.Hash) (*types.Receipt, error)
+}
+
+// record stores a client-signed run as an execution after checking every hash on chain: sent by the prepared wallet,
+// same to/data/value as prepared, in order. A prefix is fine (the client stopped at a revert); a reverted tx ends the run.
+func (s *Server) record(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Market, Side, Amount string
-		SlippageBps          *int
+		PrepareID string   `json:"prepareId"`
+		TxHashes  []string `json:"txHashes"`
 	}
 	if !decode(w, r, &in) {
 		return
 	}
-	m, okm := s.Plan.Dep.Kuru.Markets[in.Market]
-	amt, oka := human(in.Amount)
-	sl, oks := slip(in.SlippageBps)
-	if !okm || !oka || !oks || (in.Side != "buy" && in.Side != "sell") {
+	ctx, me := r.Context(), did(r)
+	if uuid.Validate(in.PrepareID) != nil || len(in.TxHashes) == 0 {
 		httpx.Error(w, http.StatusBadRequest, "bad_request")
 		return
 	}
-	if _, err := s.Store.Wallet(r.Context(), did(r)); err != nil {
-		fail(w, "wallet", err)
-		return
-	}
-	var steps []planner.Step
-	var err error
-	if in.Side == "buy" {
-		atoms, _ := s.Plan.ToAtoms(m.Quote, amt)
-		steps, err = s.Plan.MarketBuy(r.Context(), in.Market, atoms, sl)
-	} else {
-		atoms, _ := s.Plan.ToAtoms(m.Base, amt)
-		steps, err = s.Plan.MarketSell(r.Context(), in.Market, atoms, sl)
-	}
+	pr, err := s.Store.Prepare(ctx, me, in.PrepareID)
 	if err != nil {
-		fail(w, "plan trade", err)
+		fail(w, "prepare", err)
 		return
 	}
-	s.launch(w, r, NewExec{Kind: "trade", Steps: steps}, nil, nil)
-}
-
-func (s *Server) basketBuy(w http.ResponseWriter, r *http.Request) {
-	bid, ok := id(w, r)
-	var in struct {
-		AmountUsdc  string
-		SlippageBps *int
-	}
-	if !ok || !decode(w, r, &in) {
+	if pr.ExecutionID != nil {
+		v, err := s.Store.Execution(ctx, me, *pr.ExecutionID)
+		reply(w, "execution", v, err)
 		return
 	}
-	amt, oka := human(in.AmountUsdc)
-	sl, oks := slip(in.SlippageBps)
-	if !oka || !oks {
-		httpx.Error(w, http.StatusBadRequest, "bad_request")
+	if len(in.TxHashes) > len(pr.Txs) {
+		httpx.Error(w, http.StatusBadRequest, "tx_mismatch")
 		return
 	}
-	b, err := s.Store.BasketDef(r.Context(), did(r), bid)
-	if err == nil {
-		_, err = s.Store.Wallet(r.Context(), did(r))
-	}
-	if err != nil {
-		fail(w, "basket", err)
-		return
-	}
-	atoms, _ := s.Plan.ToAtoms("USDC", amt)
-	steps, err := s.Plan.BasketBuy(r.Context(), b.Legs, atoms, sl)
-	if err != nil {
-		fail(w, "plan basket buy", err)
-		return
-	}
-	s.launch(w, r, NewExec{Kind: "basket_buy", Steps: steps, BasketID: &bid}, nil, nil)
-}
-
-func (s *Server) basketSell(w http.ResponseWriter, r *http.Request) {
-	bid, ok := id(w, r)
-	var in struct {
-		Bps         *int
-		SlippageBps *int
-	}
-	if !ok || !decode(w, r, &in) {
-		return
-	}
-	sl, oks := slip(in.SlippageBps)
-	part := 10_000
-	if in.Bps != nil {
-		part = *in.Bps
-	}
-	if !oks || part < 1 || part > 10_000 {
-		httpx.Error(w, http.StatusBadRequest, "bad_request")
-		return
-	}
-	ctx := r.Context()
-	b, err := s.Store.BasketDef(ctx, did(r), bid)
-	var wallet string
-	if err == nil {
-		wallet, err = s.Store.Wallet(ctx, did(r))
-	}
-	var plans [][]byte
-	if err == nil {
-		plans, err = s.Store.BasketPlans(ctx, did(r), bid)
-	}
-	if err != nil {
-		fail(w, "basket", err)
-		return
-	}
-	held := planner.Attribute(plans)
-	var legs []planner.SellLeg
-	for _, l := range b.Legs {
-		amt := held[l.Market].Mul(decimal.NewFromInt(int64(part))).Div(decimal.NewFromInt(10_000)).Floor()
-		if !amt.IsPositive() {
-			continue
+	signer := types.LatestSignerForChainID(big.NewInt(config.MainnetChainID))
+	stepHash := make([]string, len(pr.Steps))
+	status, failed := "confirmed", false
+	for i, h := range in.TxHashes {
+		want := pr.Txs[i]
+		hash := common.HexToHash(h)
+		tx, pending, err := s.Txs.TransactionByHash(ctx, hash)
+		if errors.Is(err, ethereum.NotFound) || pending {
+			httpx.Error(w, http.StatusConflict, "tx_pending")
+			return
 		}
-		bal, err := planner.WalletBalance(ctx, s.Chain, s.Plan.Dep, wallet, s.Plan.Dep.Kuru.Markets[l.Market].Base)
 		if err != nil {
-			slog.Error("rpc balance", "err", err)
+			slog.Error("tx lookup", "err", err)
 			httpx.Error(w, http.StatusBadGateway, "rpc_unavailable")
 			return
 		}
-		legs = append(legs, planner.SellLeg{Market: l.Market, Amount: decimal.Min(amt, bal)})
+		from, err := types.Sender(signer, tx)
+		if err != nil || tx.To() == nil || !strings.EqualFold(from.Hex(), pr.Wallet) || !strings.EqualFold(tx.To().Hex(), want.To) ||
+			hexutil.Encode(tx.Data()) != want.Data || hexutil.EncodeBig(tx.Value()) != want.Value {
+			httpx.Error(w, http.StatusBadRequest, "tx_mismatch")
+			return
+		}
+		rc, err := s.Txs.TransactionReceipt(ctx, hash)
+		if errors.Is(err, ethereum.NotFound) {
+			httpx.Error(w, http.StatusConflict, "tx_pending")
+			return
+		}
+		if err != nil {
+			httpx.Error(w, http.StatusBadGateway, "rpc_unavailable")
+			return
+		}
+		if rc.Status != types.ReceiptStatusSuccessful {
+			status, failed = "failed", true
+			break
+		}
+		// the plan step's own tx (not its approve) carries the fills
+		if i == len(pr.Txs)-1 || pr.Txs[i+1].Step != want.Step {
+			stepHash[want.Step] = strings.ToLower(h)
+		}
 	}
-	steps, err := s.Plan.BasketSell(ctx, legs, sl)
+	done := 0
+	for done < len(stepHash) && stepHash[done] != "" {
+		done++
+	}
+	if !failed && done < len(pr.Steps) {
+		status = "failed" // client stopped early
+	}
+	execID, err := s.Store.RecordPrepare(ctx, me, pr, status, stepHash[:done])
 	if err != nil {
-		fail(w, "plan basket sell", err)
+		fail(w, "record", err)
 		return
 	}
-	s.launch(w, r, NewExec{Kind: "basket_sell", Steps: steps, BasketID: &bid}, nil, nil)
+	v, err := s.Store.Execution(ctx, me, execID)
+	reply(w, "execution", v, err)
 }
 
 func (s *Server) margin(deposit bool) http.HandlerFunc {
@@ -341,9 +468,10 @@ type TokenBalance struct {
 }
 
 type LegHolding struct {
-	Market string `json:"market"`
-	Raw    string `json:"raw"`
-	Amount string `json:"amount"`
+	Market      string `json:"market"`
+	Raw         string `json:"raw"`
+	Amount      string `json:"amount"`
+	Provisional bool   `json:"provisional"` // some buy/sell not indexed yet: planned amount stands in for its fill
 }
 
 type BasketHolding struct {
@@ -354,11 +482,11 @@ type BasketHolding struct {
 
 func (s *Server) holdings(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	wallet, err := s.Store.Wallet(ctx, did(r))
-	var att map[string][][]byte
+	wallet, err := s.Store.KnownWallet(ctx, did(r))
+	var att map[string][]planner.ExecFills
 	var names map[string]string
 	if err == nil {
-		att, names, err = s.Store.Attributions(ctx, did(r))
+		att, names, err = s.Store.Attributions(ctx, did(r), wallet)
 	}
 	if err != nil {
 		fail(w, "holdings", err)
@@ -383,10 +511,10 @@ func (s *Server) holdings(w http.ResponseWriter, r *http.Request) {
 		toks = append(toks, TokenBalance{sym, strings.ToLower(t.Address), raw.String(), raw.Shift(-int32(t.Decimals)).String()})
 	}
 	bs := []BasketHolding{}
-	for bid, plans := range att {
+	for bid, execs := range att {
 		h := BasketHolding{BasketID: bid, Name: names[bid], Legs: []LegHolding{}}
-		for m, v := range planner.Attribute(plans) {
-			h.Legs = append(h.Legs, LegHolding{m, v.String(), v.Shift(-int32(dep.Tokens[dep.Kuru.Markets[m].Base].Decimals)).String()})
+		for m, v := range s.Plan.AttributeFills(execs) {
+			h.Legs = append(h.Legs, LegHolding{m, v.Amount.String(), v.Amount.Shift(-int32(dep.Tokens[dep.Kuru.Markets[m].Base].Decimals)).String(), v.Provisional})
 		}
 		sort.Slice(h.Legs, func(i, j int) bool { return h.Legs[i].Market < h.Legs[j].Market })
 		if len(h.Legs) > 0 {

@@ -17,7 +17,8 @@ type Store interface {
 	User(ctx context.Context, did string) (User, error)
 	PutDelegation(ctx context.Context, did, walletID, addr, quorumID string) (Delegation, error)
 	RevokeDelegation(ctx context.Context, did string) error
-	Wallet(ctx context.Context, did string) (string, error) // active delegation wallet, else ErrNoDelegation
+	Wallet(ctx context.Context, did string) (string, error)      // active delegation wallet, else ErrNoDelegation
+	KnownWallet(ctx context.Context, did string) (string, error) // delegation wallet, else the last client-signing wallet, else ErrNotFound
 
 	InsertExecution(ctx context.Context, did string, e NewExec) (string, error)
 	FailExecution(ctx context.Context, id, code string) error
@@ -28,8 +29,8 @@ type Store interface {
 	BasketDef(ctx context.Context, did, id string) (Basket, error)                  // public or did's own
 	SaveBasket(ctx context.Context, did, id string, in BasketInput) (Basket, error) // id "" creates
 	DeleteBasket(ctx context.Context, did, id string) error
-	BasketPlans(ctx context.Context, did, basketID string) ([][]byte, error)
-	Attributions(ctx context.Context, did string) (map[string][][]byte, map[string]string, error)
+	BasketFills(ctx context.Context, did, wallet, basketID string) ([]planner.ExecFills, error)
+	Attributions(ctx context.Context, did, wallet string) (map[string][]planner.ExecFills, map[string]string, error)
 
 	CreateOrder(ctx context.Context, did string, o Order, e NewExec) (orderID, execID string, err error)
 	Orders(ctx context.Context, did string) ([]Order, error)
@@ -46,8 +47,13 @@ type Store interface {
 	Positions(ctx context.Context, did string) ([]Position, error)
 	Position(ctx context.Context, did, id string) (Position, planner.Strategy, error)
 	Peers(ctx context.Context, did, exceptID string) ([]planner.Peer, error)
-	StartWithdraw(ctx context.Context, did, posID string, e NewExec) (string, error)
+	LastWithdraw(ctx context.Context, posID string) (w LastWithdraw, found bool, err error)
+	StartWithdraw(ctx context.Context, did, posID string, e NewExec) (string, error) // open or withdrawing (no run in flight) → withdrawing
 	SettlePosition(ctx context.Context, posID, status string) error
+
+	CreatePrepare(ctx context.Context, did string, p Prepare) (string, error)
+	Prepare(ctx context.Context, did, id string) (Prepare, error)
+	RecordPrepare(ctx context.Context, did string, p Prepare, status string, stepHashes []string) (string, error)
 
 	Schedules(ctx context.Context, did string) ([]Schedule, error)
 	CreateSchedule(ctx context.Context, did string, in ScheduleInput) (Schedule, error)
@@ -82,6 +88,7 @@ type NewExec struct {
 type Execution struct {
 	ID         string          `json:"id"`
 	Kind       string          `json:"kind"`
+	Signer     string          `json:"signer"` // executor | client
 	Status     string          `json:"status"`
 	StepDone   int             `json:"stepDone"`
 	StepsTotal int             `json:"stepsTotal"`
@@ -171,6 +178,18 @@ type Schedule struct {
 	CreatedAt       time.Time  `json:"createdAt"`
 }
 
+// Prepare is a client-signed plan waiting for its tx hashes.
+type Prepare struct {
+	ID          string
+	Wallet      string
+	Kind        string
+	BasketID    *string
+	Steps       []planner.Step
+	Txs         []planner.TxRequest
+	ExpiresAt   time.Time
+	ExecutionID *string
+}
+
 // PG is the Postgres Store. Numerics leave the DB as ::text so no float ever touches them.
 type PG struct{ DB *pgxpool.Pool }
 
@@ -242,6 +261,18 @@ func (p PG) Wallet(ctx context.Context, did string) (string, error) {
 	return w, err
 }
 
+func (p PG) KnownWallet(ctx context.Context, did string) (string, error) {
+	var w *string
+	err := p.DB.QueryRow(ctx, `select coalesce((select lower(wallet_address) from delegations where user_id=$1 and active), lower(wallet_address)) from users where id=$1`, did).Scan(&w)
+	if err == nil && w == nil {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", notFound(err)
+	}
+	return *w, nil
+}
+
 type querier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
@@ -267,13 +298,13 @@ func (p PG) FailExecution(ctx context.Context, id, code string) error {
 	return err
 }
 
-const execSQL = `select e.id::text, e.kind, e.status, e.step_done, coalesce(jsonb_array_length(e.steps),0), coalesce(e.steps,'[]'),
+const execSQL = `select e.id::text, e.kind, e.signer, e.status, e.step_done, coalesce(jsonb_array_length(e.steps),0), coalesce(e.steps,'[]'),
   e.tx_hashes, e.tx_hash, e.error, e.schedule_id::text, e.position_id::text, e.basket_id::text, e.created_at, e.updated_at
 from executions e left join schedules s on s.id=e.schedule_id where coalesce(e.user_id, s.user_id)=$1`
 
 func scanExec(r pgx.CollectableRow) (Execution, error) {
 	var e Execution
-	return e, r.Scan(&e.ID, &e.Kind, &e.Status, &e.StepDone, &e.StepsTotal, &e.Steps, &e.TxHashes, &e.TxHash, &e.Error,
+	return e, r.Scan(&e.ID, &e.Kind, &e.Signer, &e.Status, &e.StepDone, &e.StepsTotal, &e.Steps, &e.TxHashes, &e.TxHash, &e.Error,
 		&e.ScheduleID, &e.PositionID, &e.BasketID, &e.CreatedAt, &e.UpdatedAt)
 }
 
@@ -327,22 +358,34 @@ func (p PG) DeleteBasket(ctx context.Context, did, id string) error {
 	return err
 }
 
-func (p PG) BasketPlans(ctx context.Context, did, basketID string) ([][]byte, error) {
-	rows, _ := p.DB.Query(ctx, `select steps from executions where user_id=$1 and basket_id=$2 and status='confirmed'`, did, basketID)
-	return collect(rows, pgx.RowTo[[]byte])
-}
+// fillsSQL: confirmed basket executions with the indexer's taker fills (Kuru Trade size) per tx of ours.
+const fillsSQL = `select e.basket_id::text, coalesce(b.name,''), e.steps, e.tx_hashes,
+  coalesce((select jsonb_object_agg(lower(t.tx_hash), t.sz) from (select tx_hash, sum(size)::text sz from user_trades
+    where tx_hash = any(e.tx_hashes) and role='taker' and lower(wallet)=$2 group by tx_hash) t), '{}')
+from executions e left join basket_defs b on b.id=e.basket_id
+where e.user_id=$1 and e.basket_id is not null and e.status='confirmed' and ($3='' or e.basket_id::text=$3)
+order by e.created_at`
 
-func (p PG) Attributions(ctx context.Context, did string) (map[string][][]byte, map[string]string, error) {
-	rows, _ := p.DB.Query(ctx, `select e.basket_id::text, coalesce(b.name,''), e.steps from executions e
-left join basket_defs b on b.id=e.basket_id where e.user_id=$1 and e.basket_id is not null and e.status='confirmed'`, did)
-	plans, names := map[string][][]byte{}, map[string]string{}
+func (p PG) fills(ctx context.Context, did, wallet, basketID string) (map[string][]planner.ExecFills, map[string]string, error) {
+	rows, _ := p.DB.Query(ctx, fillsSQL, did, wallet, basketID)
+	out, names := map[string][]planner.ExecFills{}, map[string]string{}
 	var id, name string
-	var steps []byte
-	_, err := pgx.ForEachRow(rows, []any{&id, &name, &steps}, func() error {
-		plans[id], names[id] = append(plans[id], steps), name
+	var e planner.ExecFills
+	_, err := pgx.ForEachRow(rows, []any{&id, &name, &e.Steps, &e.TxHashes, &e.Fills}, func() error {
+		out[id], names[id] = append(out[id], e), name
+		e = planner.ExecFills{}
 		return nil
 	})
-	return plans, names, err
+	return out, names, err
+}
+
+func (p PG) BasketFills(ctx context.Context, did, wallet, basketID string) ([]planner.ExecFills, error) {
+	m, _, err := p.fills(ctx, did, wallet, basketID)
+	return m[basketID], err
+}
+
+func (p PG) Attributions(ctx context.Context, did, wallet string) (map[string][]planner.ExecFills, map[string]string, error) {
+	return p.fills(ctx, did, wallet, "")
 }
 
 func (p PG) CreateOrder(ctx context.Context, did string, o Order, e NewExec) (orderID, execID string, err error) {
@@ -489,14 +532,40 @@ where p.user_id=$1 and p.id<>$2 and p.status in ('opening','open','closing')`, d
 	})
 }
 
+// LastWithdraw is a position's latest withdraw execution.
+type LastWithdraw struct {
+	Status   string
+	Steps    []planner.Step
+	StepDone int
+}
+
+func (p PG) LastWithdraw(ctx context.Context, posID string) (LastWithdraw, bool, error) {
+	var w LastWithdraw
+	err := p.DB.QueryRow(ctx, `select status, steps, step_done from executions where position_id=$1 and kind='withdraw'
+order by created_at desc limit 1`, posID).Scan(&w.Status, &w.Steps, &w.StepDone)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return w, false, nil
+	}
+	return w, err == nil, err
+}
+
+// StartWithdraw claims the position (row lock): open, or withdrawing with no withdraw run in flight.
 func (p PG) StartWithdraw(ctx context.Context, did, posID string, e NewExec) (execID string, err error) {
 	err = pgx.BeginFunc(ctx, p.DB, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, `update strategy_positions set status='closing' where id=$1 and user_id=$2 and status='open'`, posID, did)
-		if err != nil {
-			return err
+		var status string
+		var busy bool
+		if err := tx.QueryRow(ctx, `select status, exists(select 1 from executions where position_id=$1 and kind='withdraw' and status in ('pending','submitted'))
+from strategy_positions where id=$1 and user_id=$2 for update`, posID, did).Scan(&status, &busy); err != nil {
+			return notFound(err)
 		}
-		if tag.RowsAffected() == 0 {
+		if status != "open" && status != "withdrawing" {
 			return ErrNotOpen
+		}
+		if busy {
+			return ErrWithdrawBusy
+		}
+		if _, err := tx.Exec(ctx, `update strategy_positions set status='withdrawing' where id=$1`, posID); err != nil {
+			return err
 		}
 		execID, err = insertExec(ctx, tx, did, e)
 		return err
@@ -568,4 +637,49 @@ func notFound(err error) error {
 		return ErrNotFound
 	}
 	return err
+}
+
+func (p PG) CreatePrepare(ctx context.Context, did string, x Prepare) (string, error) {
+	steps, _ := json.Marshal(x.Steps)
+	txs, _ := json.Marshal(x.Txs)
+	if _, err := p.DB.Exec(ctx, `update users set wallet_address=$2 where id=$1 and wallet_address is null`, did, x.Wallet); err != nil {
+		return "", err
+	}
+	var id string
+	err := p.DB.QueryRow(ctx, `insert into trade_prepares(user_id, wallet, kind, basket_id, steps, txs, expires_at) values ($1,$2,$3,$4,$5,$6,$7) returning id::text`,
+		did, x.Wallet, x.Kind, x.BasketID, steps, txs, x.ExpiresAt).Scan(&id)
+	return id, err
+}
+
+func (p PG) Prepare(ctx context.Context, did, id string) (Prepare, error) {
+	x := Prepare{ID: id}
+	err := p.DB.QueryRow(ctx, `select wallet, kind, basket_id::text, steps, txs, expires_at, execution_id::text from trade_prepares where id=$1 and user_id=$2`, id, did).
+		Scan(&x.Wallet, &x.Kind, &x.BasketID, &x.Steps, &x.Txs, &x.ExpiresAt, &x.ExecutionID)
+	return x, notFound(err)
+}
+
+// RecordPrepare inserts the client-signed run as an execution (tx_hashes[i] = plan step i) once per prepare.
+func (p PG) RecordPrepare(ctx context.Context, did string, x Prepare, status string, stepHashes []string) (execID string, err error) {
+	steps, _ := json.Marshal(x.Steps)
+	err = pgx.BeginFunc(ctx, p.DB, func(tx pgx.Tx) error {
+		var prev *string
+		if err := tx.QueryRow(ctx, `select execution_id::text from trade_prepares where id=$1 for update`, x.ID).Scan(&prev); err != nil {
+			return err
+		}
+		if prev != nil {
+			execID = *prev
+			return nil
+		}
+		var last *string
+		if len(stepHashes) > 0 {
+			last = &stepHashes[len(stepHashes)-1]
+		}
+		if err := tx.QueryRow(ctx, `insert into executions(user_id, slot, kind, steps, basket_id, status, step_done, tx_hashes, tx_hash, signer)
+values ($1, 0, $2, $3, $4, $5, $6, $7, $8, 'client') returning id::text`, did, x.Kind, steps, x.BasketID, status, len(stepHashes), stepHashes, last).Scan(&execID); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `update trade_prepares set execution_id=$2 where id=$1`, x.ID, execID)
+		return err
+	})
+	return
 }

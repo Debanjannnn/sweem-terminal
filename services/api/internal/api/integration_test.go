@@ -4,8 +4,10 @@ package api
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,7 +15,13 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
@@ -71,8 +79,12 @@ func fakeMarketData(t *testing.T) *httptest.Server {
 	}))
 }
 
-// fake executor: accepts only the api caller, confirms every step in the DB like the real one.
-func fakeExecutor(t *testing.T, db *pgxpool.Pool) *httptest.Server {
+// txHash is the fake executor's one hash per execution (every plan here signs a single tx).
+func txHash(execID string) string { h := strings.ReplaceAll(execID, "-", ""); return "0x" + h + h }
+
+// fake executor: accepts only the api caller, confirms every step in the DB like the real one; *failNext fails the
+// next run after its first step (step_done=1), like a chain_error mid-plan.
+func fakeExecutor(t *testing.T, db *pgxpool.Pool, failNext *bool) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct{ ExecutionID string }
 		json.NewDecoder(r.Body).Decode(&req)
@@ -80,22 +92,27 @@ func fakeExecutor(t *testing.T, db *pgxpool.Pool) *httptest.Server {
 			w.WriteHeader(403)
 			return
 		}
-		hash := "0x" + strings.Repeat("ab", 32)
+		hash := txHash(req.ExecutionID)
+		status, done := "confirmed", "jsonb_array_length(steps)"
+		if *failNext {
+			*failNext, status, done = false, "failed", "1"
+		}
 		var n int
-		if err := db.QueryRow(r.Context(), `update executions set status='confirmed', step_done=jsonb_array_length(steps),
-  tx_hashes=array[$2], tx_hash=$2 where id=$1 and status='pending' returning step_done`, req.ExecutionID, hash).Scan(&n); err != nil {
+		if err := db.QueryRow(r.Context(), `update executions set status=$3, step_done=`+done+`,
+  tx_hashes=array[$2], tx_hash=$2 where id=$1 and status='pending' returning step_done`, req.ExecutionID, hash, status).Scan(&n); err != nil {
 			w.WriteHeader(409)
 			w.Write([]byte(`{"error":"not_pending"}`))
 			return
 		}
-		json.NewEncoder(w).Encode(planner.Outcome{ExecutionID: req.ExecutionID, Status: "confirmed", StepsDone: n, TxHashes: []string{hash}})
+		json.NewEncoder(w).Encode(planner.Outcome{ExecutionID: req.ExecutionID, Status: status, StepsDone: n, TxHashes: []string{hash}})
 	}))
 }
 
 func TestFlow(t *testing.T) {
 	ctx := context.Background()
 	db := testDB(t)
-	md, ex := fakeMarketData(t), fakeExecutor(t, db)
+	failNext := false
+	md, ex := fakeMarketData(t), fakeExecutor(t, db, &failNext)
 	defer md.Close()
 	defer ex.Close()
 	var histReq []byte
@@ -159,11 +176,20 @@ func TestFlow(t *testing.T) {
 		Baskets []BasketHolding `json:"baskets"`
 	}
 	call("GET", "/api/v1/me/holdings", "", 200, &h)
-	if len(h.Tokens) != 9 || len(h.Baskets) != 1 || h.Baskets[0].Legs[0].Raw != "10000000000000000" || h.Baskets[0].Legs[0].Amount != "0.01" {
-		t.Fatalf("holdings: %+v", h)
+	if len(h.Tokens) != 9 || len(h.Baskets) != 1 || h.Baskets[0].Legs[0].Raw != "10000000000000000" || !h.Baskets[0].Legs[0].Provisional {
+		t.Fatalf("holdings before fill indexed: %+v", h)
+	}
+	// indexer sees the taker fill: 0.0102 WETH in two maker fills (size in 1e10 sizePrecision) replaces the planned minOut
+	if _, err := db.Exec(ctx, `insert into user_trades values ($1,1,'taker','0xa6af','`+wallet+`','buy',1,1,60000000,0,1,now()),
+  ($1,2,'taker','0xa6af','`+wallet+`','buy',2,1,42000000,0,1,now()), ($1,3,'maker','0xa6af','`+wallet+`','sell',3,1,99,0,1,now())`, txHash(acc.ExecutionID)); err != nil {
+		t.Fatal(err)
+	}
+	call("GET", "/api/v1/me/holdings", "", 200, &h)
+	if l := h.Baskets[0].Legs[0]; l.Raw != "10200000000000000" || l.Amount != "0.0102" || l.Provisional {
+		t.Fatalf("holdings from fills: %+v", l)
 	}
 	call("POST", "/api/v1/me/baskets/"+b.ID+"/sell", `{"bps":5000,"slippageBps":0}`, 202, &acc)
-	if len(acc.Steps) != 1 || acc.Steps[0].Size != "5000000000000000" {
+	if len(acc.Steps) != 1 || acc.Steps[0].Size != "5100000000000000" {
 		t.Fatalf("basket sell: %+v", acc.Steps)
 	}
 
@@ -192,9 +218,25 @@ func TestFlow(t *testing.T) {
 	if fee != "0.4" || owed != "0" {
 		t.Fatalf("fee ledger: %s %s", fee, owed)
 	}
+	failNext = true
 	call("POST", "/api/v1/me/positions/"+pos[0].ID+"/withdraw", ``, 202, &acc)
 	if acc.Steps[0].Action != "lend.withdraw" || acc.Steps[0].Amount != "7000000000000000" {
 		t.Fatalf("withdraw steps: %+v", acc.Steps)
+	}
+	call("GET", "/api/v1/me/positions", "", 200, &pos)
+	if pos[0].Status != "withdrawing" {
+		t.Fatalf("failed withdraw must stay withdrawing: %+v", pos[0])
+	}
+	// a run in flight blocks a second claim
+	var busy string
+	db.QueryRow(ctx, `insert into executions(user_id,slot,kind,position_id,steps) values ('did:privy:u1',0,'withdraw',$1,'[]') returning id::text`, pos[0].ID).Scan(&busy)
+	call("POST", "/api/v1/me/positions/"+pos[0].ID+"/withdraw", ``, 409, nil)
+	db.Exec(ctx, `delete from executions where id=$1`, busy)
+	// resume: the one-step plan finished step 0 → nothing left, closed without a new execution
+	var closed map[string]any
+	call("POST", "/api/v1/me/positions/"+pos[0].ID+"/withdraw", ``, 200, &closed)
+	if closed["status"] != "closed" {
+		t.Fatalf("resume: %+v", closed)
 	}
 	call("GET", "/api/v1/me/positions", "", 200, &pos)
 	if pos[0].Status != "closed" || pos[0].ClosedAt == nil {
@@ -204,7 +246,7 @@ func TestFlow(t *testing.T) {
 
 	// limit order: id resolved from the indexer's OrderCreated row for the placing tx
 	call("POST", "/api/v1/me/orders", `{"market":"WETH","side":"buy","price":"3600","size":"0.01","fund":true}`, 202, &acc)
-	if _, err := db.Exec(ctx, `insert into user_orders_events values ($1,3,777,'weth',$2,'created','buy',36000000,100000000,1,now())`, "0x"+strings.Repeat("ab", 32), wallet); err != nil {
+	if _, err := db.Exec(ctx, `insert into user_orders_events values ($1,3,777,'weth',$2,'created','buy',36000000,100000000,1,now())`, txHash(acc.ExecutionID), wallet); err != nil {
 		t.Fatal(err)
 	}
 	var orders []Order
@@ -248,3 +290,127 @@ func TestFlow(t *testing.T) {
 }
 
 func mustDec(s string) decimal.Decimal { return decimal.RequireFromString(s) }
+
+type fakeTxs struct {
+	txs      map[common.Hash]*types.Transaction
+	reverted map[common.Hash]bool
+}
+
+func (f *fakeTxs) TransactionByHash(_ context.Context, h common.Hash) (*types.Transaction, bool, error) {
+	tx, ok := f.txs[h]
+	if !ok {
+		return nil, false, ethereum.NotFound
+	}
+	return tx, false, nil
+}
+
+func (f *fakeTxs) TransactionReceipt(_ context.Context, h common.Hash) (*types.Receipt, error) {
+	if _, ok := f.txs[h]; !ok {
+		return nil, ethereum.NotFound
+	}
+	st := types.ReceiptStatusSuccessful
+	if f.reverted[h] {
+		st = types.ReceiptStatusFailed
+	}
+	return &types.Receipt{Status: st}, nil
+}
+
+// client-signed trades: prepare renders txs for the user's own wallet (no delegation), record checks them on chain.
+func TestClientSigned(t *testing.T) {
+	db := testDB(t)
+	md := fakeMarketData(t)
+	defer md.Close()
+	key, _ := crypto.GenerateKey()
+	wallet := crypto.PubkeyToAddress(key.PublicKey)
+	other, _ := crypto.GenerateKey()
+	ftx := &fakeTxs{txs: map[common.Hash]*types.Transaction{}, reverted: map[common.Hash]bool{}}
+	// allowance (and every balance) reads 0 → every buy needs its approve
+	srv := &Server{Store: PG{DB: db}, Auth: fakeAuth{}, Privy: fakePrivy{},
+		Plan:  &planner.Planner{Dep: testDep(t), Q: planner.MarketData{URL: md.URL, HTTP: md.Client()}, MaxStepUSD: 1000},
+		Chain: fakeChain{0}, Txs: ftx}
+	mux := http.NewServeMux()
+	srv.Routes(mux)
+	call := func(method, path, body string, wantCode int, out any) {
+		t.Helper()
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer good")
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		if w.Code != wantCode {
+			t.Fatalf("%s %s: %d %s", method, path, w.Code, w.Body)
+		}
+		if out != nil {
+			json.Unmarshal(w.Body.Bytes(), out)
+		}
+	}
+	signer := types.LatestSignerForChainID(big.NewInt(143))
+	send := func(k *ecdsa.PrivateKey, tx planner.TxRequest, nonce uint64) string {
+		to := common.HexToAddress(tx.To)
+		v, _ := hexutil.DecodeBig(tx.Value)
+		st, err := types.SignNewTx(k, signer, &types.DynamicFeeTx{ChainID: big.NewInt(143), Nonce: nonce, To: &to, Value: v, Data: hexutil.MustDecode(tx.Data), Gas: 1e6})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ftx.txs[st.Hash()] = st
+		return st.Hash().Hex()
+	}
+	var b Basket
+	call("POST", "/api/v1/me/baskets", `{"name":"Blue","legs":[{"market":"WETH","weightBps":6000},{"market":"cbBTC","weightBps":4000}]}`, 201, &b)
+	var prep struct {
+		PrepareID string              `json:"prepareId"`
+		Steps     []planner.Step      `json:"steps"`
+		Txs       []planner.TxRequest `json:"txs"`
+		ExpiresAt time.Time           `json:"expiresAt"`
+	}
+	call("POST", "/api/v1/me/trade/prepare", `{"kind":"basket_buy","basketId":"`+b.ID+`","amountUsdc":"50","slippageBps":0}`, 400, nil) // no wallet
+	call("POST", "/api/v1/me/trade/prepare", `{"kind":"basket_buy","basketId":"`+b.ID+`","amountUsdc":"50","slippageBps":0,"wallet":"`+wallet.Hex()+`"}`, 200, &prep)
+	if len(prep.Steps) != 2 || len(prep.Txs) != 4 || prep.Txs[0].Description != "approve USDC 30000000" || prep.Txs[1].Step != 0 || prep.Txs[3].Step != 1 ||
+		prep.Txs[1].ChainID != 143 || time.Until(prep.ExpiresAt) <= 0 {
+		t.Fatalf("prepare: %+v", prep)
+	}
+	var hashes []string
+	for i, tx := range prep.Txs {
+		hashes = append(hashes, send(key, tx, uint64(i)))
+	}
+	rec := func(hs []string) string {
+		b, _ := json.Marshal(map[string]any{"prepareId": prep.PrepareID, "txHashes": hs})
+		return string(b)
+	}
+	call("POST", "/api/v1/me/trade/record", rec([]string{"0x" + strings.Repeat("11", 32)}), 409, nil) // not mined yet
+	bad := prep.Txs[0]
+	bad.Data = bad.Data[:len(bad.Data)-2] + "00"
+	call("POST", "/api/v1/me/trade/record", rec([]string{send(key, bad, 9)}), 400, nil)           // other calldata
+	call("POST", "/api/v1/me/trade/record", rec([]string{send(other, prep.Txs[0], 0)}), 400, nil) // other signer
+
+	var e Execution
+	call("POST", "/api/v1/me/trade/record", rec(hashes), 200, &e)
+	if e.Status != "confirmed" || e.Signer != "client" || e.Kind != "basket_buy" || e.StepDone != 2 || *e.BasketID != b.ID ||
+		len(e.TxHashes) != 2 || e.TxHashes[0] != strings.ToLower(hashes[1]) || e.TxHashes[1] != strings.ToLower(hashes[3]) {
+		t.Fatalf("record: %+v", e)
+	}
+	var again Execution
+	call("POST", "/api/v1/me/trade/record", rec(hashes), 200, &again)
+	if again.ID != e.ID {
+		t.Fatalf("record not idempotent: %s vs %s", again.ID, e.ID)
+	}
+	// no delegation: holdings use the wallet the client signed with; WETH fill indexed, cbBTC still provisional
+	db.Exec(context.Background(), `insert into user_trades values ($1,1,'taker','0xa6af',$2,'buy',1,1,76000000,0,1,now())`, strings.ToLower(hashes[1]), strings.ToLower(wallet.Hex()))
+	var h struct {
+		Wallet  string          `json:"wallet"`
+		Baskets []BasketHolding `json:"baskets"`
+	}
+	call("GET", "/api/v1/me/holdings", "", 200, &h)
+	if h.Wallet != strings.ToLower(wallet.Hex()) || len(h.Baskets) != 1 || h.Baskets[0].Legs[0].Market != "WETH" || h.Baskets[0].Legs[0].Raw != "7600000000000000" ||
+		h.Baskets[0].Legs[0].Provisional || !h.Baskets[0].Legs[1].Provisional {
+		t.Fatalf("holdings: %+v", h)
+	}
+
+	// a trade whose buy reverts after its approve: recorded as failed with no step done
+	call("POST", "/api/v1/me/trade/prepare", `{"kind":"trade","market":"WETH","side":"buy","amount":"10","wallet":"`+wallet.Hex()+`"}`, 200, &prep)
+	h1, h2 := send(key, prep.Txs[0], 10), send(key, prep.Txs[1], 11)
+	ftx.reverted[common.HexToHash(h2)] = true
+	call("POST", "/api/v1/me/trade/record", rec([]string{h1, h2}), 200, &e)
+	if e.Status != "failed" || e.StepDone != 0 || e.Kind != "trade" {
+		t.Fatalf("reverted: %+v", e)
+	}
+}

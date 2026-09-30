@@ -23,6 +23,8 @@ var (
 	ErrNoDelegation = errors.New("delegation_inactive")
 	ErrNotOpen      = errors.New("position_not_open")
 	ErrOrderNotOpen = errors.New("order_not_open")
+	ErrWithdrawBusy = errors.New("withdraw_in_progress")
+	ErrRPC          = errors.New("rpc_unavailable")
 )
 
 type Verifier interface {
@@ -55,6 +57,7 @@ type Server struct {
 	Plan     *planner.Planner
 	Exec     Runner
 	Chain    planner.Chain
+	Txs      TxReader
 	Rates    Rater
 	History  Backtester
 	bg       sync.WaitGroup // background executor runs; tests Wait on it
@@ -77,9 +80,11 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.Handle("POST /api/v1/me/baskets", s.me(s.saveBasket))
 	mux.Handle("POST /api/v1/me/baskets/{id}", s.me(s.saveBasket))
 	mux.Handle("DELETE /api/v1/me/baskets/{id}", s.me(s.deleteBasket))
-	mux.Handle("POST /api/v1/me/baskets/{id}/buy", s.me(s.basketBuy))
-	mux.Handle("POST /api/v1/me/baskets/{id}/sell", s.me(s.basketSell))
-	mux.Handle("POST /api/v1/me/trade", s.me(s.trade))
+	mux.Handle("POST /api/v1/me/baskets/{id}/buy", s.me(s.delegatedTrade("basket_buy")))
+	mux.Handle("POST /api/v1/me/baskets/{id}/sell", s.me(s.delegatedTrade("basket_sell")))
+	mux.Handle("POST /api/v1/me/trade", s.me(s.delegatedTrade("trade")))
+	mux.Handle("POST /api/v1/me/trade/prepare", s.me(s.prepare))
+	mux.Handle("POST /api/v1/me/trade/record", s.me(s.record))
 	mux.Handle("POST /api/v1/me/margin/deposit", s.me(s.margin(true)))
 	mux.Handle("POST /api/v1/me/margin/withdraw", s.me(s.margin(false)))
 	mux.Handle("POST /api/v1/me/orders", s.me(s.placeOrder))
@@ -145,9 +150,11 @@ func fail(w http.ResponseWriter, what string, err error) {
 			status = http.StatusBadRequest
 		}
 		httpx.JSON(w, status, map[string]string{"error": pe.Code, "detail": pe.Detail})
+	case errors.Is(err, ErrRPC):
+		httpx.Error(w, http.StatusBadGateway, err.Error())
 	case errors.Is(err, ErrNotFound):
 		httpx.Error(w, http.StatusNotFound, err.Error())
-	case errors.Is(err, ErrNoDelegation), errors.Is(err, ErrNotOpen), errors.Is(err, ErrOrderNotOpen):
+	case errors.Is(err, ErrNoDelegation), errors.Is(err, ErrNotOpen), errors.Is(err, ErrOrderNotOpen), errors.Is(err, ErrWithdrawBusy):
 		httpx.Error(w, http.StatusConflict, err.Error())
 	default:
 		slog.Error(what, "err", err)

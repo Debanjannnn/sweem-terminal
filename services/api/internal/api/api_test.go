@@ -100,6 +100,14 @@ type fakeStore struct {
 	status  string // position status
 	strat   Strategy
 	settled []string
+	last    *LastWithdraw
+}
+
+func (f *fakeStore) LastWithdraw(context.Context, string) (LastWithdraw, bool, error) {
+	if f.last == nil {
+		return LastWithdraw{}, false, nil
+	}
+	return *f.last, true, nil
 }
 
 func (f *fakeStore) log(s string) { f.mu.Lock(); f.calls = append(f.calls, s); f.mu.Unlock() }
@@ -340,5 +348,47 @@ func TestExecutorDown(t *testing.T) {
 	srv.bg.Wait()
 	if w.Code != 202 || !strings.Contains(strings.Join(st.calls, ","), "fail e2 executor_unavailable") || st.settled[0] != "p1 failed" {
 		t.Errorf("%d %v %v", w.Code, st.calls, st.settled)
+	}
+}
+
+// a failed withdraw resumes from step_done with every step capped by live state; nothing left closes the position.
+func TestWithdrawResume(t *testing.T) {
+	const uid = "6f1c1b1e-0000-4000-8000-000000000000"
+	plan := []planner.Step{{Action: "lend.withdraw", Venue: "aaveV3", Asset: "USDC", Amount: "9000000"}}
+	cases := []struct {
+		name   string
+		last   LastWithdraw
+		bal    int64
+		code   int
+		has    string
+		settle string
+	}{
+		{"in flight", LastWithdraw{Status: "submitted", Steps: plan}, 5_000_000, 409, "withdraw_in_progress", ""},
+		{"resume capped", LastWithdraw{Status: "failed", Steps: plan}, 5_000_000, 202, `"resumed":true,"steps":[{"action":"lend.withdraw","venue":"aaveV3","asset":"USDC","amount":"5000000"}]`, uid + " closed"},
+		{"step already done", LastWithdraw{Status: "failed", Steps: plan, StepDone: 1}, 5_000_000, 200, `"status":"closed"`, uid + " closed"},
+		{"landed before crash", LastWithdraw{Status: "failed", Steps: plan}, 0, 200, `"status":"closed"`, uid + " closed"},
+	}
+	for _, tc := range cases {
+		st := &fakeStore{wallet: "0x00000000000000000000000000000000000000bb", status: "withdrawing", strat: usdcStrat, last: &tc.last}
+		ex := &fakeExec{out: "failed"}
+		srv := &Server{Store: st, Auth: fakeAuth{}, Plan: &planner.Planner{Dep: testDep(t), Q: fakeQ{}, MaxStepUSD: 1000}, Exec: ex, Chain: fakeChain{tc.bal}}
+		mux := http.NewServeMux()
+		srv.Routes(mux)
+		req := httptest.NewRequest("POST", "/api/v1/me/positions/"+uid+"/withdraw", nil)
+		req.Header.Set("Authorization", "Bearer good")
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		srv.bg.Wait()
+		if w.Code != tc.code || !strings.Contains(w.Body.String(), tc.has) {
+			t.Errorf("%s: %d %s", tc.name, w.Code, w.Body)
+		}
+		// a failed run keeps the position withdrawing, never back to open
+		want := tc.settle
+		if tc.code == 202 {
+			want = uid + " withdrawing"
+		}
+		if (want == "") != (len(st.settled) == 0) || (want != "" && st.settled[0] != want) {
+			t.Errorf("%s: settled %v want %q", tc.name, st.settled, want)
+		}
 	}
 }

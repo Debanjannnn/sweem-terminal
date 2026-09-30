@@ -3,22 +3,20 @@ package main
 import (
 	"context"
 	"log/slog"
-	"math/big"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
-	"github.com/ethereum/go-ethereum/accounts/abi/bind"
-	"github.com/ethereum/go-ethereum/common"
 	"github.com/redis/go-redis/v9"
+	"github.com/shopspring/decimal"
 	"github.com/snehendu098/sweem-terminal/internal/chain"
-	"github.com/snehendu098/sweem-terminal/internal/chain/bindings/basket"
 	"github.com/snehendu098/sweem-terminal/internal/config"
 	"github.com/snehendu098/sweem-terminal/internal/httpx"
 	"github.com/snehendu098/sweem-terminal/internal/logx"
 	"github.com/snehendu098/sweem-terminal/internal/pg"
+	"github.com/snehendu098/sweem-terminal/internal/planner"
 	"github.com/snehendu098/sweem-terminal/services/scheduler/internal/sched"
 )
 
@@ -32,11 +30,21 @@ func main() {
 
 func run() error {
 	var e config.Env
-	dbURL, redisURL, rpcURL := e.Str("DATABASE_URL"), e.Str("REDIS_URL"), e.Str("RPC_URL")
+	dbURL, redisURL, rpcURL, depPath := e.Str("DATABASE_URL"), e.Str("REDIS_URL"), e.Str("RPC_URL"), e.Str("DEPLOYMENTS_PATH")
 	secret, execURL, mdURL := e.Str("INTERNAL_SECRET"), e.Str("EXECUTOR_URL"), e.Str("MARKET_DATA_URL")
 	addr := ":" + e.Opt("PORT", "8084")
 	tick := e.Duration("TICK", 5*time.Second)
+	posEvery := e.Duration("POSITION_EVERY", time.Minute)
+	maxAge := e.Duration("MAX_DATA_AGE", 3*time.Minute)
+	maxStep := e.Int("MAX_STEP_USD", 1000)
+	slip := e.Int("STRATEGY_SLIPPAGE_BPS", 50)
+	band := decimal.RequireFromString(e.Opt("FUNDING_GATE_BAND", "0.02"))
+	buffer := decimal.RequireFromString(e.Opt("GUARD_BUFFER", "0.03"))
 	if err := e.Err(); err != nil {
+		return err
+	}
+	dep, err := config.LoadDeployments143(depPath)
+	if err != nil {
 		return err
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -59,22 +67,17 @@ func run() error {
 	}
 	defer eth.Close()
 
-	hc := &http.Client{Timeout: 30 * time.Second}
 	s := &sched.Scheduler{
-		DB: db, RDB: rdb, Tick: tick,
-		Exec:   sched.Executor{URL: execURL, Secret: secret, HTTP: hc},
-		Quotes: sched.Quotes{URL: mdURL, HTTP: hc},
-		BalanceOf: func(ctx context.Context, b, owner string) (*big.Int, error) {
-			c, err := basket.NewSweemBasketCaller(common.HexToAddress(b), eth)
-			if err != nil {
-				return nil, err
-			}
-			return c.BalanceOf(&bind.CallOpts{Context: ctx}, common.HexToAddress(owner))
-		},
+		DB: db, RDB: rdb, Dep: dep,
+		P:     &planner.Planner{Dep: dep, Q: planner.MarketData{URL: mdURL, HTTP: &http.Client{Timeout: 15 * time.Second}}, MaxStepUSD: int64(maxStep)},
+		Exec:  planner.Executor{URL: execURL, Secret: secret, Caller: "scheduler", HTTP: &http.Client{Timeout: 10 * time.Minute}}, // runs every step before replying
+		Chain: sched.RPC{C: eth, Dep: dep},
+		Tick:  tick, PositionEvery: posEvery, MaxAge: maxAge, Slippage: slip, GateBand: band, GuardBuffer: buffer,
 	}
 	go s.Run(ctx)
 	return httpx.Run(ctx, addr, httpx.NewMux(map[string]httpx.Check{
 		"postgres": func(ctx context.Context) error { return db.Ping(ctx) },
 		"redis":    func(ctx context.Context) error { return rdb.Ping(ctx).Err() },
+		"rpc":      func(ctx context.Context) error { _, err := eth.BlockNumber(ctx); return err },
 	}))
 }

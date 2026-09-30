@@ -1,45 +1,68 @@
+// Package sched decides when user automations fire (DCA, TP/SL, basket + strategy rebalance, Perpl guard); the executor signs.
 package sched
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
-	"math/big"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 	"github.com/shopspring/decimal"
+	"github.com/snehendu098/sweem-terminal/internal/config"
+	"github.com/snehendu098/sweem-terminal/internal/planner"
 	"github.com/snehendu098/sweem-terminal/internal/streams"
 )
 
-type Scheduler struct {
-	DB        *pgxpool.Pool
-	RDB       *redis.Client
-	Exec      Executor
-	Quotes    Quotes
-	BalanceOf func(ctx context.Context, basket, owner string) (*big.Int, error)
-	Tick      time.Duration
-
-	mu       sync.Mutex
-	watching map[string]bool
+// Chain is the RPC reads the scheduler needs; RPC implements it, tests fake it.
+type Chain interface {
+	Wallet(ctx context.Context, wallet, sym string) (decimal.Decimal, error) // atoms, MON native
+	Balances(ctx context.Context, wallet string, s planner.Strategy, legs []planner.LegState, peers []planner.Peer) ([]planner.Balance, error)
+	Perp(ctx context.Context, wallet string, perpID int) (Perp, error)
 }
 
-// Run polls recurring schedules and keeps a NAV reader per stop-loss basket until ctx ends.
+type Scheduler struct {
+	DB    *pgxpool.Pool
+	RDB   *redis.Client
+	P     *planner.Planner
+	Exec  planner.Executor
+	Chain Chain
+	Dep   *config.Deployments143
+
+	Tick, PositionEvery, MaxAge time.Duration   // MaxAge: older ref/rates are stale
+	Slippage                    int             // strategy actions (schedules carry their own)
+	GateBand, GuardBuffer       decimal.Decimal // APR hysteresis to re-enable basis; margin-fraction headroom over maintenance
+
+	lastPositions time.Time
+}
+
 func (s *Scheduler) Run(ctx context.Context) {
 	t := time.NewTicker(s.Tick)
 	defer t.Stop()
 	for {
-		s.recurring(ctx, time.Now())
-		s.watch(ctx)
+		s.tick(ctx, time.Now())
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 		}
+	}
+}
+
+func (s *Scheduler) tick(ctx context.Context, now time.Time) {
+	if ok, err := streams.Alive(ctx, s.RDB); err != nil || !ok {
+		slog.Warn("publisher heartbeat missing, skipping tick", "err", err)
+		return
+	}
+	s.schedules(ctx, now)
+	if now.Sub(s.lastPositions) >= s.PositionEvery {
+		s.lastPositions = now
+		s.positions(ctx, now)
 	}
 }
 
@@ -56,196 +79,378 @@ func NextRun(next time.Time, interval int64, now time.Time) time.Time {
 	return next.Add(time.Duration(k) * iv)
 }
 
-// Triggered: stale or heartbeat-less NAV never fires.
-func Triggered(p streams.NavPoint, alive bool, stop streams.Dec) bool {
-	return alive && !p.Stale && p.NavPerShare.Sign() > 0 && p.NavPerShare.LessThanOrEqual(stop)
+// Hit: take_profit fires at or above trigger, stop_loss at or below (never on a zero/unknown value).
+func Hit(kind string, value, trigger decimal.Decimal) bool {
+	if !value.IsPositive() || !trigger.IsPositive() {
+		return false
+	}
+	if kind == "take_profit" {
+		return value.GreaterThanOrEqual(trigger)
+	}
+	return value.LessThanOrEqual(trigger)
 }
 
-// due.amount is raw USDC base units (6dp); schedules store human USDC.
-type due struct {
-	id, basket, amount string
-	interval           int64
-	next               time.Time
-	slippage           int
+// Drift is the largest |actual − target| weight in bps; values are in one unit, targets sum to 10000.
+func Drift(values []decimal.Decimal, target []int) int {
+	total := decimal.Sum(decimal.Zero, values...)
+	if !total.IsPositive() {
+		return 0
+	}
+	max := 0
+	for i, v := range values {
+		w := int(v.Mul(decimal.NewFromInt(10_000)).Div(total).Round(0).IntPart()) - target[i]
+		if w < 0 {
+			w = -w
+		}
+		if w > max {
+			max = w
+		}
+	}
+	return max
 }
 
-func (s *Scheduler) recurring(ctx context.Context, now time.Time) {
-	rows, err := s.DB.Query(ctx, `select s.id, s.basket, trunc(s.amount_usdc * 1000000)::text, s.interval_seconds, s.next_run_at, s.max_slippage_bps
-		from schedules s
-		where s.kind = 'recurring' and s.active and s.next_run_at <= $1
-		  and exists (select 1 from delegations d where d.user_id = s.user_id and d.active)`, now)
+type schedule struct {
+	id, user, wallet, kind, targetType, targetID string
+	amount, trigger                              decimal.Decimal
+	interval                                     int64
+	next                                         time.Time
+	sellBps, driftBps, slip                      int
+}
+
+// exec is one execution row to insert after claim succeeds.
+type exec struct {
+	scheduleID, positionID, basketID *string
+	slot                             int64
+	kind, user                       string
+	steps                            []planner.Step
+	legs                             []planner.LegState // position legs after the run; applied on confirm (reconcile)
+}
+
+func (s *Scheduler) schedules(ctx context.Context, now time.Time) {
+	rows, err := s.DB.Query(ctx, `select s.id, s.user_id, lower(d.wallet_address), s.kind, s.target_type, s.target_id,
+		coalesce(s.amount_usdc, 0)::text, coalesce(s.trigger_price, 0)::text, coalesce(s.interval_seconds, 0),
+		coalesce(s.next_run_at, 'epoch'), coalesce(s.sell_bps, 0), coalesce(s.drift_bps, 0), s.max_slippage_bps
+		from schedules s join delegations d on d.user_id = s.user_id and d.active
+		where s.active and s.target_type in ('market', 'basket', 'position') and s.kind in ('dca', 'take_profit', 'stop_loss', 'rebalance')`)
 	if err != nil {
-		slog.Error("due schedules", "err", err)
+		slog.Error("schedules", "err", err)
 		return
 	}
-	list, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (d due, err error) {
-		return d, r.Scan(&d.id, &d.basket, &d.amount, &d.interval, &d.next, &d.slippage)
+	list, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (c schedule, err error) {
+		var amt, trig string
+		err = r.Scan(&c.id, &c.user, &c.wallet, &c.kind, &c.targetType, &c.targetID, &amt, &trig, &c.interval, &c.next, &c.sellBps, &c.driftBps, &c.slip)
+		c.amount, c.trigger = decimal.RequireFromString(amt), decimal.RequireFromString(trig)
+		return c, err
 	})
 	if err != nil {
-		slog.Error("due schedules", "err", err)
+		slog.Error("schedules", "err", err)
 		return
 	}
-	for _, d := range list {
-		s.fireRecurring(ctx, d, now)
-	}
-}
-
-func (s *Scheduler) fireRecurring(ctx context.Context, d due, now time.Time) {
-	log := slog.With("schedule", d.id)
-	minOut, err := s.Quotes.MinOut(ctx, d.basket, "mint", d.amount, d.slippage)
-	if err != nil {
-		log.Warn("skip tick", "err", err)
-		return
-	}
-	id, err := s.insert(ctx, func(tx pgx.Tx) (int64, error) {
-		tag, err := tx.Exec(ctx, `update schedules set next_run_at = $2 where id = $1 and active and next_run_at = $3`,
-			d.id, NextRun(d.next, d.interval, now), d.next)
-		return tag.RowsAffected(), err
-	}, d.id, Slot(d.next, d.interval), "mint", d.amount, minOut)
-	if err != nil || id == "" {
-		if err != nil {
-			log.Error("insert execution", "err", err)
+	for _, c := range list {
+		if err := s.fire(ctx, c, now); err != nil {
+			slog.Warn("schedule skipped", "schedule", c.id, "kind", c.kind, "err", err)
 		}
-		return
 	}
-	s.call(ctx, "mint", id)
 }
 
-// insert runs claim (a CAS on the schedule row) then the idempotent execution insert in one tx.
-// Returns the new execution id, or "" when another instance got there first.
-func (s *Scheduler) insert(ctx context.Context, claim func(pgx.Tx) (int64, error), scheduleID string, slot int64, kind, amount, minOut string) (string, error) {
+func (s *Scheduler) fire(ctx context.Context, c schedule, now time.Time) error {
+	advance := func() []any {
+		return []any{`update schedules set next_run_at = $2 where id = $1 and active and next_run_at = $3`, c.id, NextRun(c.next, c.interval, now), c.next}
+	}
+	if (c.kind == "dca" || c.kind == "rebalance") && c.interval <= 0 {
+		return errors.New("interval_seconds missing")
+	}
+	e := exec{scheduleID: &c.id, kind: c.kind, user: c.user}
+	if c.targetType == "basket" {
+		e.basketID = &c.targetID
+	}
+	switch c.kind {
+	case "dca":
+		if c.next.After(now) {
+			return nil
+		}
+		usdc := c.amount.Shift(6).Floor()
+		var err error
+		if c.targetType == "basket" {
+			var legs []planner.Leg
+			if legs, err = s.basketLegs(ctx, c.targetID); err == nil {
+				e.steps, err = s.P.BasketBuy(ctx, legs, usdc, c.slip)
+			}
+		} else {
+			e.steps, err = s.P.MarketBuy(ctx, c.targetID, usdc, c.slip)
+		}
+		if err != nil {
+			return err
+		}
+		e.slot = Slot(c.next, c.interval)
+		return s.submit(ctx, advance(), e)
+	case "take_profit", "stop_loss":
+		return s.trigger(ctx, c, e)
+	case "rebalance":
+		if c.targetType != "basket" || c.next.After(now) {
+			return nil // position rebalance schedules only override driftBps, see positions
+		}
+		e.slot = Slot(c.next, c.interval)
+		steps, err := s.basketRebalance(ctx, c)
+		if len(steps) == 0 || err != nil {
+			return errors.Join(err, s.claimOnly(ctx, advance())) // checked this slot either way
+		}
+		e.steps = steps
+		return s.submit(ctx, advance(), e)
+	}
+	return nil
+}
+
+// trigger fires a one-shot TP/SL: value from Kuru ref prices, sell sellBps of the holding, deactivate.
+func (s *Scheduler) trigger(ctx context.Context, c schedule, e exec) error {
+	deactivate := []any{`update schedules set active = false where id = $1 and active`, c.id}
+	switch c.targetType {
+	case "market":
+		px, err := s.price(ctx, c.targetID)
+		if err != nil || !Hit(c.kind, px, c.trigger) {
+			return err
+		}
+		bal, err := s.Chain.Wallet(ctx, c.wallet, s.Dep.Kuru.Markets[c.targetID].Base)
+		if err != nil {
+			return err
+		}
+		if c.targetID == "MON" {
+			bal = bal.Sub(gasReserve) // native MON pays the executor's gas
+		}
+		amt := bpsOf(bal, c.sellBps)
+		if !amt.IsPositive() {
+			return errors.New("nothing to sell")
+		}
+		if e.steps, err = s.P.MarketSell(ctx, c.targetID, amt, c.slip); err != nil {
+			return err
+		}
+	case "basket":
+		legs, err := s.basketLegs(ctx, c.targetID)
+		if err != nil {
+			return err
+		}
+		held, px, err := s.basketHoldings(ctx, c.user, c.wallet, c.targetID, legs)
+		if err != nil {
+			return err
+		}
+		value := decimal.Sum(decimal.Zero, s.values(legs, held, px)...)
+		if !Hit(c.kind, value, c.trigger) {
+			return nil
+		}
+		var sell []planner.SellLeg
+		for i, l := range legs {
+			sell = append(sell, planner.SellLeg{Market: l.Market, Amount: bpsOf(held[i], c.sellBps)})
+		}
+		if e.steps, err = s.P.BasketSell(ctx, sell, c.slip); err != nil {
+			return err
+		}
+	case "position":
+		p, err := s.position(ctx, c.targetID)
+		if err != nil {
+			return err
+		}
+		bals, err := s.Chain.Balances(ctx, p.wallet, p.strat, p.legs, p.peers)
+		if err != nil {
+			return err
+		}
+		px := decimal.NewFromInt(1)
+		if p.strat.Asset != "USDC" {
+			if px, err = s.price(ctx, p.strat.Asset); err != nil {
+				return err
+			}
+		}
+		value := decimal.Zero
+		for _, b := range bals {
+			value = value.Add(decimal.RequireFromString(b.Value))
+		}
+		if !Hit(c.kind, value.Shift(-s.decimals(p.strat.Asset)).Mul(px), c.trigger) {
+			return nil
+		}
+		plan, err := s.P.WithdrawBps(ctx, p.strat, p.legs, bals, c.sellBps, c.slip)
+		if err != nil {
+			return err
+		}
+		e.steps, e.positionID, e.legs = plan.Steps, &p.id, plan.Legs
+		deactivate = []any{`with d as (update schedules set active = false where id = $1 and active returning 1)
+			update strategy_positions set status = case when $3 then 'closing' else status end
+			where id = $2 and status = 'open' and exists (select 1 from d)
+			and not exists (select 1 from executions e where e.position_id = $2 and (e.status in ('pending', 'submitted') or e.legs is not null))`,
+			c.id, p.id, c.sellBps == 10_000}
+	}
+	return s.submit(ctx, deactivate, e)
+}
+
+var gasReserve = decimal.New(2, 18)
+
+func bpsOf(x decimal.Decimal, bps int) decimal.Decimal {
+	return x.Mul(decimal.NewFromInt(int64(bps))).Div(decimal.NewFromInt(10_000)).Floor()
+}
+
+func (s *Scheduler) decimals(sym string) int32 { return int32(s.Dep.Tokens[sym].Decimals) }
+
+// values converts per-leg base atoms to USDC (human).
+func (s *Scheduler) values(legs []planner.Leg, held, px []decimal.Decimal) []decimal.Decimal {
+	out := make([]decimal.Decimal, len(legs))
+	for i, l := range legs {
+		out[i] = held[i].Shift(-s.decimals(s.Dep.Kuru.Markets[l.Market].Base)).Mul(px[i])
+	}
+	return out
+}
+
+// basketRebalance sells over-weight legs and spends their guaranteed proceeds on under-weight legs; nil when inside the band.
+func (s *Scheduler) basketRebalance(ctx context.Context, c schedule) ([]planner.Step, error) {
+	legs, err := s.basketLegs(ctx, c.targetID)
+	if err != nil {
+		return nil, err
+	}
+	held, px, err := s.basketHoldings(ctx, c.user, c.wallet, c.targetID, legs)
+	if err != nil {
+		return nil, err
+	}
+	values := s.values(legs, held, px)
+	weights := make([]int, len(legs))
+	for i, l := range legs {
+		weights[i] = l.WeightBps
+	}
+	if Drift(values, weights) <= c.driftBps {
+		return nil, nil
+	}
+	total := decimal.Sum(decimal.Zero, values...)
+	var sells []planner.SellLeg
+	deficit := make([]decimal.Decimal, len(legs))
+	for i, l := range legs {
+		d := values[i].Sub(total.Mul(decimal.NewFromInt(int64(l.WeightBps))).Div(decimal.NewFromInt(10_000))) // USDC over (+) / under (−) target
+		if d.IsPositive() {
+			sells = append(sells, planner.SellLeg{Market: l.Market, Amount: held[i].Mul(d).Div(values[i]).Floor()})
+		} else {
+			deficit[i] = d.Neg()
+		}
+	}
+	steps, err := s.P.BasketSell(ctx, sells, c.slip)
+	if err != nil {
+		return nil, err
+	}
+	proceeds := decimal.Zero
+	for _, st := range steps {
+		proceeds = proceeds.Add(decimal.RequireFromString(st.MinOut))
+	}
+	want := decimal.Sum(decimal.Zero, deficit...)
+	for i, l := range legs {
+		if !deficit[i].IsPositive() {
+			continue
+		}
+		buy, err := s.P.MarketBuy(ctx, l.Market, proceeds.Mul(deficit[i]).Div(want).Floor(), c.slip)
+		if err != nil {
+			return nil, err
+		}
+		steps = append(steps, buy...)
+	}
+	return steps, nil
+}
+
+func (s *Scheduler) basketLegs(ctx context.Context, id string) ([]planner.Leg, error) {
+	var legs []planner.Leg
+	err := s.DB.QueryRow(ctx, `select legs from basket_defs where id::text = $1`, id).Scan(&legs)
+	return legs, err
+}
+
+// basketHoldings: per leg, attributed base atoms (confirmed executions of this basket) capped at the wallet balance, and ref price.
+func (s *Scheduler) basketHoldings(ctx context.Context, user, wallet, basketID string, legs []planner.Leg) (held, px []decimal.Decimal, err error) {
+	rows, err := s.DB.Query(ctx, `select steps from executions where user_id = $1 and basket_id::text = $2 and status = 'confirmed' and steps is not null`, user, basketID)
+	if err != nil {
+		return nil, nil, err
+	}
+	plans, err := pgx.CollectRows(rows, pgx.RowTo[[]byte])
+	if err != nil {
+		return nil, nil, err
+	}
+	attr := planner.Attribute(plans)
+	for _, l := range legs {
+		p, err := s.price(ctx, l.Market)
+		if err != nil {
+			return nil, nil, err
+		}
+		h := attr[l.Market]
+		if h.IsPositive() {
+			bal, err := s.Chain.Wallet(ctx, wallet, s.Dep.Kuru.Markets[l.Market].Base)
+			if err != nil {
+				return nil, nil, err
+			}
+			h = decimal.Min(h, bal)
+		}
+		held, px = append(held, h), append(px, p)
+	}
+	return held, px, nil
+}
+
+// price is the Kuru reference price (USDC per unit) of market sym; missing or old ⇒ error, never act.
+func (s *Scheduler) price(ctx context.Context, sym string) (decimal.Decimal, error) {
+	m, ok := s.Dep.Kuru.Markets[sym]
+	if !ok {
+		return decimal.Zero, fmt.Errorf("unknown market %s", sym)
+	}
+	r, err := streams.Get[streams.RefPrice](ctx, s.RDB, streams.Ref(strings.ToLower(m.Orderbook)))
+	if err != nil {
+		return decimal.Zero, fmt.Errorf("ref %s: %w", sym, err)
+	}
+	if time.Since(time.UnixMilli(r.Ts)) > s.MaxAge || !r.Ref.IsPositive() {
+		return decimal.Zero, fmt.Errorf("ref %s stale", sym)
+	}
+	return r.Ref, nil
+}
+
+func (s *Scheduler) claimOnly(ctx context.Context, claim []any) error {
+	_, err := s.DB.Exec(ctx, claim[0].(string), claim[1:]...)
+	return err
+}
+
+// submit runs claim (a CAS that must touch a row) and the execution insert in one tx, then hands the id to the executor.
+// A lost claim or an existing (schedule_id, slot) row means another instance fired: no-op.
+func (s *Scheduler) submit(ctx context.Context, claim []any, e exec) error {
+	steps, err := json.Marshal(e.steps)
+	if err != nil {
+		return err
+	}
 	tx, err := s.DB.Begin(ctx)
 	if err != nil {
-		return "", err
+		return err
 	}
 	defer tx.Rollback(ctx)
-	if n, err := claim(tx); err != nil || n == 0 {
-		return "", err
+	tag, err := tx.Exec(ctx, claim[0].(string), claim[1:]...)
+	if err != nil || tag.RowsAffected() == 0 {
+		return err
 	}
 	var id string
-	err = tx.QueryRow(ctx, `insert into executions (schedule_id, slot, kind, status, amount, min_out)
-		values ($1, $2, $3, 'pending', $4::numeric, $5::numeric)
-		on conflict (schedule_id, slot) do nothing returning id`, scheduleID, slot, kind, amount, minOut).Scan(&id)
+	var legs []byte // nil ⇒ SQL null
+	if e.legs != nil {
+		legs, _ = json.Marshal(e.legs)
+	}
+	err = tx.QueryRow(ctx, `insert into executions (schedule_id, slot, kind, status, user_id, steps, basket_id, position_id, legs)
+		values ($1, $2, $3, 'pending', $4, $5, $6, $7, $8) on conflict (schedule_id, slot) do nothing returning id`,
+		e.scheduleID, e.slot, e.kind, e.user, steps, e.basketID, e.positionID, legs).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
-		id, err = "", nil
+		return nil
 	}
 	if err != nil {
-		return "", err
+		return err
 	}
-	return id, tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	go s.run(context.WithoutCancel(ctx), id, e.kind)
+	return nil
 }
 
-// call logs executor errors only; executor owns status, retries come from the next slot.
-func (s *Scheduler) call(ctx context.Context, op, id string) {
-	res, err := s.Exec.Call(ctx, op, id)
+// run hands the execution to the executor; it owns status after that. Unreachable executor ⇒ failed, like api.
+func (s *Scheduler) run(ctx context.Context, id, kind string) {
+	out, err := s.Exec.Run(ctx, id)
 	if err != nil {
-		slog.Error("executor", "op", op, "execution", id, "err", err)
-		return
-	}
-	slog.Info("executor", "op", op, "execution", id, "status", res.Status, "tx", res.TxHash)
-}
-
-func (s *Scheduler) watch(ctx context.Context) {
-	rows, err := s.DB.Query(ctx, `select distinct lower(basket) from schedules where kind = 'stop_loss' and active`)
-	if err != nil {
-		slog.Error("stop-loss baskets", "err", err)
-		return
-	}
-	baskets, err := pgx.CollectRows(rows, pgx.RowTo[string])
-	if err != nil {
-		slog.Error("stop-loss baskets", "err", err)
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.watching == nil {
-		s.watching = map[string]bool{}
-	}
-	// ponytail: readers for baskets whose stop-losses all ended keep running; cheap until basket count grows.
-	for _, b := range baskets {
-		if s.watching[b] {
-			continue
-		}
-		s.watching[b] = true
-		go func() {
-			r := streams.Reader[streams.NavPoint]{RDB: s.RDB, Stream: streams.Nav(b), Latest: streams.NavLatest(b)}
-			err := r.Run(ctx, func(p streams.NavPoint) { s.onNav(ctx, b, p) })
-			if ctx.Err() == nil {
-				slog.Error("nav reader", "basket", b, "err", err)
-			}
-			s.mu.Lock()
-			delete(s.watching, b) // restarted on next tick
-			s.mu.Unlock()
-		}()
-	}
-}
-
-func (s *Scheduler) onNav(ctx context.Context, basket string, p streams.NavPoint) {
-	if p.Stale {
-		return
-	}
-	alive, err := streams.Alive(ctx, s.RDB)
-	if err != nil || !alive {
-		return
-	}
-	rows, err := s.DB.Query(ctx, `select s.id, s.redeem_bps, s.max_slippage_bps, d.wallet_address, s.stop_nav_per_share::text
-		from schedules s join delegations d on d.user_id = s.user_id and d.active
-		where s.kind = 'stop_loss' and s.active and lower(s.basket) = $1`, basket)
-	if err != nil {
-		slog.Error("stop-loss schedules", "err", err)
-		return
-	}
-	type hit struct {
-		id, wallet    string
-		bps, slippage int64
-		stop          streams.Dec
-	}
-	hits, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (h hit, err error) {
-		var stop string
-		if err := r.Scan(&h.id, &h.bps, &h.slippage, &h.wallet, &stop); err != nil {
-			return h, err
-		}
-		h.stop, err = decimal.NewFromString(stop)
-		return h, err
-	})
-	if err != nil {
-		slog.Error("stop-loss schedules", "err", err)
-		return
-	}
-	for _, h := range hits {
-		if !Triggered(p, alive, h.stop) {
-			continue
-		}
-		s.fireStopLoss(ctx, basket, h.id, strings.ToLower(h.wallet), h.bps, int(h.slippage))
-	}
-}
-
-func (s *Scheduler) fireStopLoss(ctx context.Context, basket, scheduleID, wallet string, bps int64, slippage int) {
-	log := slog.With("schedule", scheduleID)
-	bal, err := s.BalanceOf(ctx, basket, wallet)
-	if err != nil {
-		log.Error("balanceOf", "err", err)
-		return
-	}
-	shares := new(big.Int).Div(new(big.Int).Mul(bal, big.NewInt(bps)), big.NewInt(10000))
-	if shares.Sign() == 0 {
-		log.Warn("stop-loss: no shares to redeem")
-		return
-	}
-	minOut, err := s.Quotes.MinOut(ctx, basket, "redeem", shares.String(), slippage)
-	if err != nil {
-		log.Warn("skip stop-loss", "err", err)
-		return
-	}
-	id, err := s.insert(ctx, func(tx pgx.Tx) (int64, error) {
-		tag, err := tx.Exec(ctx, `update schedules set active = false where id = $1 and active`, scheduleID)
-		return tag.RowsAffected(), err
-	}, scheduleID, 0, "redeem", shares.String(), minOut)
-	if err != nil || id == "" {
-		if err != nil {
-			log.Error("insert execution", "err", err)
+		slog.Error("executor", "execution", id, "kind", kind, "err", err)
+		var pe *planner.Error
+		if !errors.As(err, &pe) {
+			s.DB.Exec(ctx, `update executions set status = 'failed', error = 'executor_unavailable', updated_at = now() where id = $1 and status = 'pending'`, id)
 		}
 		return
 	}
-	s.call(ctx, "redeem", id)
+	slog.Info("executor", "execution", id, "kind", kind, "status", out.Status, "steps", out.StepsDone)
 }

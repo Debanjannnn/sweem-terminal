@@ -4,10 +4,8 @@ package sched
 
 import (
 	"context"
-	"io"
-	"math/big"
+	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sort"
@@ -21,6 +19,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/shopspring/decimal"
 	"github.com/snehendu098/sweem-terminal/internal/pg"
+	"github.com/snehendu098/sweem-terminal/internal/planner"
 	"github.com/snehendu098/sweem-terminal/internal/streams"
 )
 
@@ -61,150 +60,369 @@ func testDB(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
+// testRedis uses a separate logical db so a running publisher's keys are never touched; flushed per test.
 func testRedis(t *testing.T) *redis.Client {
-	opt, err := redis.ParseURL(env("REDIS_URL", "redis://localhost:6380"))
+	opt, err := redis.ParseURL(env("SCHED_TEST_REDIS_URL", "redis://localhost:6380/7"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	c := redis.NewClient(opt)
-	t.Cleanup(func() { c.Close() })
+	c.FlushDB(context.Background())
+	t.Cleanup(func() { c.FlushDB(context.Background()); c.Close() })
 	return c
 }
 
-func quoteServer(t *testing.T) *httptest.Server {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, `{"minOut":"123","stale":false}`)
-	}))
-	t.Cleanup(srv.Close)
-	return srv
+type env_ struct {
+	db    *pgxpool.Pool
+	rdb   *redis.Client
+	ex    *fakeExecutor
+	chain *fakeChain
+	q     *fakeQ
+	a, b  *Scheduler
 }
 
-func seedUser(t *testing.T, db *pgxpool.Pool) {
-	ctx := context.Background()
+const user, wallet = "did:privy:u", "0xabc0000000000000000000000000000000000001"
+
+func setup(t *testing.T) *env_ {
+	e := &env_{db: testDB(t), rdb: testRedis(t), ex: newFakeExecutor(t), chain: &fakeChain{wallet: map[string]decimal.Decimal{}}}
+	dep := testDep(t)
+	e.q = &fakeQ{dep: dep, px: map[string]string{"WETH": "4000", "MON": "0.03", "cbBTC": "100000", "XAUt0": "3500"}}
 	for _, q := range []string{
 		`insert into users(id) values ('did:privy:u')`,
 		`insert into delegations(user_id, privy_wallet_id, wallet_address, key_quorum_id) values ('did:privy:u','w','0xAbC0000000000000000000000000000000000001','kq')`,
 	} {
-		if _, err := db.Exec(ctx, q); err != nil {
-			t.Fatal(err)
-		}
+		e.exec(t, q)
 	}
+	mk := func() *Scheduler {
+		return &Scheduler{DB: e.db, RDB: e.rdb, Dep: dep, Chain: e.chain,
+			P:    &planner.Planner{Dep: dep, Q: e.q, MaxStepUSD: 1000},
+			Exec: planner.Executor{URL: e.ex.URL, Secret: "s3cret", Caller: "scheduler", HTTP: http.DefaultClient},
+			Tick: time.Second, PositionEvery: time.Minute, MaxAge: time.Minute, Slippage: 50, GateBand: d("0.02"), GuardBuffer: d("0.03")}
+	}
+	e.a, e.b = mk(), mk()
+	e.beat(t)
+	for sym, px := range e.q.px {
+		e.ref(t, sym, px, time.Now())
+	}
+	return e
 }
 
-func newScheduler(db *pgxpool.Pool, rdb *redis.Client, ex *fakeExecutor, q *httptest.Server) *Scheduler {
-	return &Scheduler{
-		DB: db, RDB: rdb, Tick: time.Second,
-		Exec:   Executor{URL: ex.URL, Secret: "s3cret", HTTP: http.DefaultClient},
-		Quotes: Quotes{URL: q.URL, HTTP: http.DefaultClient},
-		BalanceOf: func(ctx context.Context, basket, owner string) (*big.Int, error) {
-			if owner != "0xabc0000000000000000000000000000000000001" {
-				panic("owner " + owner)
-			}
-			return new(big.Int).Mul(big.NewInt(2), big.NewInt(1e18)), nil
-		},
-	}
-}
-
-func TestRecurringConcurrentInstancesCallOnce(t *testing.T) {
-	ctx := context.Background()
-	db, rdb, ex, q := testDB(t), testRedis(t), newFakeExecutor(t), quoteServer(t)
-	seedUser(t, db)
-	next := time.Now().Add(-90 * time.Minute).Truncate(time.Second)
-	var sid string
-	if err := db.QueryRow(ctx, `insert into schedules(user_id,basket,kind,amount_usdc,interval_seconds,next_run_at,max_slippage_bps,max_per_run_usdc)
-		values ('did:privy:u','0xb','recurring',10.5,3600,$1,50,20) returning id`, next).Scan(&sid); err != nil {
+func (e *env_) exec(t *testing.T, q string, args ...any) {
+	t.Helper()
+	if _, err := e.db.Exec(context.Background(), q, args...); err != nil {
 		t.Fatal(err)
 	}
-	a, b := newScheduler(db, rdb, ex, q), newScheduler(db, rdb, ex, q)
-	now := time.Now()
+}
+
+func (e *env_) beat(t *testing.T) {
+	if err := e.rdb.Set(context.Background(), streams.HeartbeatKey, "1", time.Minute).Err(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (e *env_) ref(t *testing.T, sym, px string, ts time.Time) {
+	ob := strings.ToLower(e.a.Dep.Kuru.Markets[sym].Orderbook)
+	r := streams.RefPrice{Market: streams.Addr(ob), Mid: d(px), Ref: d(px), Ts: ts.UnixMilli()}
+	if err := streams.Publish(context.Background(), e.rdb, "", streams.Ref(ob), r); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// race runs both instances' schedule pass concurrently, several times.
+func (e *env_) race(now time.Time) {
 	var wg sync.WaitGroup
-	for range 5 {
-		for _, s := range []*Scheduler{a, b} {
+	for range 4 {
+		for _, s := range []*Scheduler{e.a, e.b} {
 			wg.Add(1)
-			go func() { defer wg.Done(); s.recurring(ctx, now) }()
+			go func() { defer wg.Done(); s.schedules(context.Background(), now) }()
 		}
 	}
 	wg.Wait()
-	calls := ex.Calls()
-	if len(calls) != 1 || !strings.HasPrefix(calls[0], "mint:") {
-		t.Fatalf("calls = %v", calls)
+}
+
+// calls waits for async executor calls to settle and returns them.
+func (e *env_) calls(want int) []string {
+	deadline := time.Now().Add(3 * time.Second)
+	for len(e.ex.IDs()) < want && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
 	}
-	var slot int64
-	var kind, amount, minOut string
-	var gotNext time.Time
-	if err := db.QueryRow(ctx, `select e.slot, e.kind, e.amount::text, e.min_out::text, s.next_run_at
-		from executions e join schedules s on s.id = e.schedule_id where e.id = $1`, strings.TrimPrefix(calls[0], "mint:")).
-		Scan(&slot, &kind, &amount, &minOut, &gotNext); err != nil {
+	time.Sleep(200 * time.Millisecond) // let a duplicate show up
+	return e.ex.IDs()
+}
+
+func (e *env_) steps(t *testing.T, id string) (string, []planner.Step) {
+	t.Helper()
+	var kind string
+	var steps []planner.Step
+	if err := e.db.QueryRow(context.Background(), `select kind, steps from executions where id = $1`, id).Scan(&kind, &steps); err != nil {
 		t.Fatal(err)
 	}
-	if slot != Slot(next, 3600) || kind != "mint" || amount != "10500000" || minOut != "123" {
-		t.Fatalf("row slot=%d kind=%s amount=%s minOut=%s", slot, kind, amount, minOut)
+	return kind, steps
+}
+
+func TestDCAFiresOnceAcrossInstances(t *testing.T) {
+	e := setup(t)
+	next := time.Now().Add(-90 * time.Minute).Truncate(time.Second)
+	var sid string
+	if err := e.db.QueryRow(context.Background(), `insert into schedules(user_id,kind,target_type,target_id,amount_usdc,interval_seconds,next_run_at,max_slippage_bps,max_per_run_usdc)
+		values ($1,'dca','market','WETH',100,3600,$2,50,200) returning id`, user, next).Scan(&sid); err != nil {
+		t.Fatal(err)
 	}
-	if !gotNext.Equal(next.Add(2*time.Hour)) || !gotNext.After(now) {
-		t.Fatalf("next_run_at %v, want %v", gotNext, next.Add(2*time.Hour))
+	// heartbeat missing ⇒ whole tick skipped
+	e.rdb.Del(context.Background(), streams.HeartbeatKey)
+	e.a.tick(context.Background(), time.Now())
+	if n := len(e.calls(0)); n != 0 {
+		t.Fatalf("fired without heartbeat: %d", n)
 	}
-	// revoked delegation: nothing due
-	db.Exec(ctx, `update delegations set active=false`)
-	db.Exec(ctx, `update schedules set next_run_at = now() - interval '1 hour'`)
-	a.recurring(ctx, time.Now())
-	if n := len(ex.Calls()); n != 1 {
-		t.Fatalf("fired without delegation: %d calls", n)
+	e.beat(t)
+	now := time.Now()
+	e.race(now)
+	ids := e.calls(1)
+	if len(ids) != 1 {
+		t.Fatalf("calls = %v", ids)
+	}
+	kind, steps := e.steps(t, ids[0])
+	if kind != "dca" || len(steps) != 1 || steps[0].Action != "kuru.marketBuy" || steps[0].Market != "WETH" || steps[0].Quote != "100000000" {
+		t.Fatalf("%s %+v", kind, steps)
+	}
+	var slot int64
+	var gotNext time.Time
+	e.db.QueryRow(context.Background(), `select e.slot, s.next_run_at from executions e join schedules s on s.id = e.schedule_id`).Scan(&slot, &gotNext)
+	if slot != Slot(next, 3600) || !gotNext.Equal(next.Add(2*time.Hour)) {
+		t.Fatalf("slot %d next %v", slot, gotNext)
 	}
 }
 
-func TestStopLossFiresOnceAndNeverOnStale(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	db, rdb, ex, q := testDB(t), testRedis(t), newFakeExecutor(t), quoteServer(t)
-	seedUser(t, db)
-	basket := "0xTEST" + uuid.NewString()[:8]
-	lb := strings.ToLower(basket)
-	t.Cleanup(func() { rdb.Del(context.Background(), streams.Nav(lb), streams.NavLatest(lb)) })
-	if _, err := db.Exec(ctx, `insert into schedules(user_id,basket,kind,stop_nav_per_share,redeem_bps,max_slippage_bps,max_per_run_usdc)
-		values ('did:privy:u',$1,'stop_loss',0.95,5000,50,20)`, basket); err != nil {
+func TestTakeProfitFiresOnce(t *testing.T) {
+	e := setup(t)
+	e.chain.wallet["WETH"] = d("500000000000000000") // 0.5 WETH
+	e.exec(t, `insert into schedules(user_id,kind,target_type,target_id,trigger_price,sell_bps,max_slippage_bps,max_per_run_usdc)
+		values ($1,'take_profit','market','WETH',4100,5000,50,1000)`, user)
+	e.ref(t, "WETH", "4200", time.Now().Add(-5*time.Minute)) // above trigger but stale
+	e.race(time.Now())
+	e.ref(t, "WETH", "4000", time.Now()) // fresh, below trigger
+	e.race(time.Now())
+	if n := len(e.calls(0)); n != 0 {
+		t.Fatalf("fired on stale/low price: %d", n)
+	}
+	e.ref(t, "WETH", "4150", time.Now())
+	e.race(time.Now())
+	e.race(time.Now())
+	ids := e.calls(1)
+	if len(ids) != 1 {
+		t.Fatalf("calls = %v", ids)
+	}
+	kind, steps := e.steps(t, ids[0])
+	if kind != "take_profit" || len(steps) != 1 || steps[0].Action != "kuru.marketSell" || steps[0].Size != "250000000000000000" {
+		t.Fatalf("%s %+v", kind, steps)
+	}
+	var active bool
+	e.db.QueryRow(context.Background(), `select active from schedules`).Scan(&active)
+	if active {
+		t.Fatal("still active")
+	}
+}
+
+func TestBasketRebalance(t *testing.T) {
+	e := setup(t)
+	var bid string
+	e.db.QueryRow(context.Background(), `insert into basket_defs(owner,name,legs) values ($1,'b','[{"market":"WETH","weightBps":5000},{"market":"MON","weightBps":5000}]') returning id`, user).Scan(&bid)
+	// held: 0.07 WETH ($280) + 4000 MON ($120) ⇒ 70/30
+	bought, _ := json.Marshal([]planner.Step{{Action: "kuru.marketBuy", Market: "WETH", MinOut: "70000000000000000"}, {Action: "kuru.marketBuy", Market: "MON", MinOut: "4000000000000000000000"}})
+	e.exec(t, `insert into executions(user_id,slot,kind,status,steps,basket_id) values ($1,0,'basket_buy','confirmed',$2,$3)`, user, bought, bid)
+	e.chain.wallet["WETH"], e.chain.wallet["MON"] = d("1000000000000000000"), d("100000000000000000000000")
+	e.exec(t, `insert into schedules(user_id,kind,target_type,target_id,interval_seconds,next_run_at,drift_bps,max_slippage_bps,max_per_run_usdc)
+		values ($1,'rebalance','basket',$2,3600,now() - interval '1 minute',500,50,1000)`, user, bid)
+	e.race(time.Now())
+	ids := e.calls(1)
+	if len(ids) != 1 {
+		t.Fatalf("calls = %v", ids)
+	}
+	_, steps := e.steps(t, ids[0])
+	// sell $80 of WETH (0.02), buy MON with its minOut
+	if len(steps) != 2 || steps[0].Action != "kuru.marketSell" || steps[0].Market != "WETH" || steps[0].Size != "20000000000000000" ||
+		steps[1].Action != "kuru.marketBuy" || steps[1].Market != "MON" || steps[1].Quote != steps[0].MinOut {
+		t.Fatalf("%+v", steps)
+	}
+}
+
+// seedPosition: WETH strategy, 70% aave / 30% basis (2x), basis open; returns position id.
+func seedPosition(t *testing.T, e *env_, gate string) string {
+	var stid, pid string
+	sources := `[{"kind":"lending","venue":"aave","weightBps":7000},{"kind":"basis","venue":"perpl","weightBps":3000,"params":{"leverage":"2"}}]`
+	rules := `{"driftBps":500,"minRebalanceSeconds":86400,"fundingGate":{"apr":"` + gate + `","lookbackDays":7}}`
+	e.db.QueryRow(context.Background(), `insert into strategies(creator,name,asset,sources,rules) values ($1,'s','WETH',$2,$3) returning id`, user, sources, rules).Scan(&stid)
+	legs := `[{"kind":"lending","venue":"aave","asset":"140000000000000000"},{"kind":"basis","venue":"perpl","asset":"40000000000000000","collateral":"80000000","lot":"40","entryPx":"4000"}]`
+	e.db.QueryRow(context.Background(), `insert into strategy_positions(strategy_id,user_id,wallet,principal_usdc,status,legs,last_rebalance_at)
+		values ($1,$2,$3,800,'open',$4,now()) returning id`, stid, user, wallet, legs).Scan(&pid)
+	e.chain.bals = []planner.Balance{{Value: "140000000000000000", Shares: "140000000000000000"}, {Value: "60000000000000000"}}
+	e.chain.perp = healthyPerp()
+	return pid
+}
+
+func healthyPerp() Perp {
+	return Perp{Account: 7, Deposit: d("80000000"), Mark: d("400000"), Lot: d("40"), PriceDec: 2, LotDec: 3, MaintHdths: d("2000"), MarkValid: true}
+}
+
+func (e *env_) rates(t *testing.T, apr string) {
+	s := streams.RatesSnapshot{Ts: time.Now().UnixMilli(),
+		Rates:   []streams.RateInfo{{Source: "lending", Venue: "aave", Asset: "WETH", Apy: d("0.05")}},
+		Funding: []streams.FundingInfo{{PerpID: 20, Name: "ETH", AprShort7d: d(apr)}}}
+	if err := streams.Publish(context.Background(), e.rdb, "", streams.RatesLatest, s); err != nil {
 		t.Fatal(err)
 	}
-	go func() {
-		for ctx.Err() == nil {
-			streams.Beat(ctx, rdb)
-			time.Sleep(time.Second)
+}
+
+func (e *env_) evaluate(t *testing.T) {
+	var wg sync.WaitGroup
+	for _, s := range []*Scheduler{e.a, e.b} {
+		wg.Add(1)
+		go func() { defer wg.Done(); s.positions(context.Background(), time.Now()) }()
+	}
+	wg.Wait()
+}
+
+func (e *env_) confirmAll(t *testing.T) { e.exec(t, `update executions set status = 'confirmed'`) }
+
+func TestFundingGateFlips(t *testing.T) {
+	e := setup(t)
+	pid := seedPosition(t, e, "0.05")
+	series := []struct {
+		apr, action string // action: first step kind of the expected perpl order, "" = no execution
+	}{
+		{"0.08", ""},           // open, above threshold, in band
+		{"0.04", "closeShort"}, // below threshold ⇒ unwind into aave
+		{"0.06", ""},           // closed, above threshold but within hysteresis band
+		{"0.08", "openShort"},  // above threshold+band ⇒ re-enable
+	}
+	n := 0
+	for i, s := range series {
+		e.rates(t, s.apr)
+		e.evaluate(t)
+		if s.action != "" {
+			n++
 		}
-	}()
-	a, b := newScheduler(db, rdb, ex, q), newScheduler(db, rdb, ex, q)
-	a.watch(ctx)
-	b.watch(ctx)
-	time.Sleep(300 * time.Millisecond) // readers attach
-	pub := func(nav string, stale bool) {
-		p := streams.NavPoint{Basket: streams.Addr(lb), NavPerShare: decimal.RequireFromString(nav), Stale: stale}
-		if err := streams.Publish(ctx, rdb, streams.Nav(lb), streams.NavLatest(lb), p); err != nil {
+		ids := e.calls(n)
+		if len(ids) != n {
+			t.Fatalf("step %d (apr %s): calls %v", i, s.apr, ids)
+		}
+		if s.action == "" {
+			continue
+		}
+		kind, steps := e.steps(t, ids[n-1])
+		var got string
+		for _, st := range steps {
+			if st.Action == "perpl.order" {
+				got = st.Kind
+			}
+		}
+		if kind != "rebalance" || got != s.action {
+			t.Fatalf("step %d: %s %+v", i, kind, steps)
+		}
+		legs := func() []planner.LegState {
+			var l []planner.LegState
+			e.db.QueryRow(context.Background(), `select legs from strategy_positions where id = $1`, pid).Scan(&l)
+			return l
+		}
+		if !d(orZero(legs()[1].Lot)).IsPositive() != (s.action == "openShort") { // unchanged until confirmed
+			t.Fatalf("step %d: legs applied before confirm %+v", i, legs())
+		}
+		e.confirmAll(t)
+		if err := e.a.reconcile(context.Background()); err != nil {
 			t.Fatal(err)
 		}
+		if open := d(orZero(legs()[1].Lot)).IsPositive(); open != (s.action == "openShort") {
+			t.Fatalf("step %d: legs not applied on confirm %+v", i, legs())
+		}
+		if s.action == "closeShort" { // wallet now: everything in aave, no short
+			e.chain.bals = []planner.Balance{{Value: "199000000000000000", Shares: "199000000000000000"}, {Value: "0"}}
+			e.chain.perp = Perp{Account: 7}
+		}
 	}
-	pub("1.00", false)
-	pub("0.50", true)
-	time.Sleep(time.Second)
-	if c := ex.Calls(); len(c) != 0 {
-		t.Fatalf("fired on stale/high NAV: %v", c)
+}
+
+func TestLiquidationGuard(t *testing.T) {
+	e := setup(t)
+	seedPosition(t, e, "0.05")
+	e.rates(t, "0.10")
+	e.chain.wallet["USDC"] = d("500000000")
+	// ETH ran to 5800: equity 80 − 72 = 8 on notional 232 ⇒ 3.4% < 5% + 3%
+	p := healthyPerp()
+	p.Mark, p.PnL = d("580000"), d("-72000000")
+	e.chain.perp = p
+	e.evaluate(t)
+	e.evaluate(t) // pending execution blocks a second guard
+	ids := e.calls(1)
+	if len(ids) != 1 {
+		t.Fatalf("calls %v", ids)
 	}
-	pub("0.90", false)
-	pub("0.80", false)
-	deadline := time.Now().Add(5 * time.Second)
-	for len(ex.Calls()) == 0 && time.Now().Before(deadline) {
-		time.Sleep(50 * time.Millisecond)
+	kind, steps := e.steps(t, ids[0])
+	// need = 11% × 232 − 8 = 17.52 USDC
+	if kind != "margin_guard" || len(steps) != 2 || steps[0].Action != "stable.swap" || steps[0].Amount != "17520000" || steps[1].Action != "perpl.deposit" {
+		t.Fatalf("%s %+v", kind, steps)
 	}
-	time.Sleep(time.Second) // let any duplicate arrive
-	calls := ex.Calls()
-	if len(calls) != 1 || !strings.HasPrefix(calls[0], "redeem:") {
-		t.Fatalf("calls = %v", calls)
+	// no USDC left ⇒ cut the short: keep 40 × 8 / (11% × 232) = 12 lots
+	e.confirmAll(t)
+	e.chain.wallet["USDC"] = decimal.Zero
+	e.evaluate(t)
+	ids = e.calls(2)
+	if len(ids) != 2 {
+		t.Fatalf("calls %v", ids)
 	}
-	var slot int64
-	var kind, amount string
-	var active bool
-	if err := db.QueryRow(ctx, `select e.slot, e.kind, e.amount::text, s.active from executions e join schedules s on s.id = e.schedule_id`).
-		Scan(&slot, &kind, &amount, &active); err != nil {
-		t.Fatal(err)
+	kind, steps = e.steps(t, ids[1])
+	if kind != "margin_guard" || len(steps) != 1 || steps[0].Kind != "closeShort" || steps[0].Lot != "28" {
+		t.Fatalf("%s %+v", kind, steps)
 	}
-	if slot != 0 || kind != "redeem" || amount != "1000000000000000000" || active {
-		t.Fatalf("slot=%d kind=%s amount=%s active=%v", slot, kind, amount, active)
+	// wiped out ⇒ last resort: full close, spot parked in aave
+	e.confirmAll(t)
+	p.PnL = d("-80000000")
+	e.chain.perp = p
+	e.evaluate(t)
+	ids = e.calls(3)
+	if len(ids) != 3 {
+		t.Fatalf("calls %v", ids)
+	}
+	var legs []planner.LegState
+	e.db.QueryRow(context.Background(), `select legs from strategy_positions`).Scan(&legs)
+	if legs[1].Lot != "12" { // cut applied on confirm, before the close was planned
+		t.Fatalf("legs %+v", legs)
+	}
+	_, steps = e.steps(t, ids[2])
+	if steps[0].Kind != "closeShort" || steps[0].Lot != "12" || steps[len(steps)-1].Action != "lend.supply" {
+		t.Fatalf("%+v", steps)
+	}
+}
+
+func TestPositionTakeProfitPartial(t *testing.T) {
+	e := setup(t)
+	pid := seedPosition(t, e, "0.05")
+	e.exec(t, `insert into schedules(user_id,kind,target_type,target_id,trigger_price,sell_bps,max_slippage_bps,max_per_run_usdc)
+		values ($1,'take_profit','position',$2,700,5000,50,1000)`, user, pid) // position worth 0.2 WETH × 4000 = 800
+	e.race(time.Now())
+	ids := e.calls(1)
+	if len(ids) != 1 {
+		t.Fatalf("calls %v", ids)
+	}
+	_, steps := e.steps(t, ids[0])
+	var closeLot string
+	for _, st := range steps {
+		if st.Kind == "closeShort" {
+			closeLot = st.Lot
+		}
+	}
+	if closeLot != "20" || steps[len(steps)-1].Action != "kuru.marketSell" {
+		t.Fatalf("%+v", steps)
+	}
+	var status string
+	e.db.QueryRow(context.Background(), `select status from strategy_positions`).Scan(&status)
+	if status != "open" {
+		t.Fatal(status)
+	}
+	e.confirmAll(t)
+	e.a.reconcile(context.Background())
+	var legs []planner.LegState
+	e.db.QueryRow(context.Background(), `select legs from strategy_positions`).Scan(&legs)
+	if legs[0].Asset != "70000000000000000" || legs[1].Lot != "20" {
+		t.Fatalf("legs %+v", legs)
 	}
 }

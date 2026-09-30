@@ -69,6 +69,11 @@ pub enum Step {
     PerplOrder { perp: String, kind: String, price: String, lot: String, leverage_hdths: u64 },
     #[serde(rename = "perpl.withdraw")]
     PerplWithdraw { amount: String },
+    /// MON wei → WMON (value)
+    #[serde(rename = "wmon.wrap")]
+    WmonWrap { amount: String },
+    #[serde(rename = "wmon.unwrap")]
+    WmonUnwrap { amount: String },
     /// USDC atoms to the treasury (strategy open fee)
     #[serde(rename = "fee.transfer")]
     FeeTransfer { amount: String },
@@ -253,6 +258,11 @@ pub fn build(d: &Deployments, wallet: Address, step: &Step) -> Result<Call, Stri
             plain(d.perpl.exchange, IPerpl::execOrderCall { orderDesc: desc }.abi_encode())
         }
         PerplWithdraw { amount } => plain(d.perpl.exchange, IPerpl::withdrawCollateralCall { amountCNS: amt(amount)? }.abi_encode()),
+        WmonWrap { amount } => {
+            let a = amt(amount)?;
+            Call { to: token(d, "WMON")?.0, value: a, data: IWMON::depositCall {}.abi_encode(), spend: Some((Address::ZERO, a)), approve: false }
+        }
+        WmonUnwrap { amount } => plain(token(d, "WMON")?.0, IWMON::withdrawCall { amount: amt(amount)? }.abi_encode()),
         FeeTransfer { amount } => {
             let treasury = d.treasury().ok_or("treasury not set in deployments")?;
             let (usdc, a) = (token(d, "USDC")?.0, amt(amount)?);
@@ -330,6 +340,8 @@ mod tests {
         let c = b(serde_json::json!({"action":"kuru.marketSell","market":"MON","size":"250000000000000000123","minOut":"1"})).unwrap();
         assert_eq!((c.value, c.approve), (U256::from(250_000_000_000_000_000_000u128), false));
 
+        let c = b(serde_json::json!({"action":"wmon.wrap","amount":"5"})).unwrap();
+        assert_eq!((c.to, c.value, c.approve), (d.tokens["WMON"].address, U256::from(5), false));
         let c = b(serde_json::json!({"action":"shmonad.deposit","amount":"5"})).unwrap();
         assert_eq!((c.value, c.approve), (U256::from(5), false));
         let c = b(serde_json::json!({"action":"activeVault.deposit","base":"7","quote":"9"})).unwrap();

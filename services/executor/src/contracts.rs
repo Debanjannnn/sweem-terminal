@@ -36,6 +36,10 @@ sol! {
         function deposit(uint256 baseAmount, uint256 quoteAmount) external payable;
         function withdraw(uint256 shares) external;
     }
+    interface IWMON {
+        function deposit() external payable;
+        function withdraw(uint256 amount) external;
+    }
     interface IStableSwap {
         function exchange(int128 i, int128 j, uint256 dx, uint256 min_dy) external returns (uint256);
     }

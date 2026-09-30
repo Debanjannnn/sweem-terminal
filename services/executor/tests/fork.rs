@@ -110,6 +110,18 @@ async fn mainnet_fork_every_adapter() {
     f.step(json!({"action":"perpl.withdraw","amount":"80000000"})).await;
     assert_eq!(f.bal("AUSD", w).await - ausd0, u(80_000_000));
 
+    // MON lending: wrap → Neverland WMON supply → withdraw max → unwrap
+    let wmon = f.d.tokens["WMON"].address;
+    f.step(json!({"action":"wmon.wrap","amount":"10000000000000000000"})).await;
+    assert_eq!(f.bal_of(wmon).await, u(10_000_000_000_000_000_000));
+    f.step(json!({"action":"lend.supply","venue":"neverland","asset":"WMON","amount":"10000000000000000000"})).await;
+    assert_eq!(f.bal_of(wmon).await, U256::ZERO);
+    f.step(json!({"action":"lend.withdraw","venue":"neverland","asset":"WMON","amount":"max"})).await;
+    let back = f.bal_of(wmon).await;
+    assert!(back >= u(9_999_999_999_999_999_999));
+    f.step(json!({"action":"wmon.unwrap","amount":back.to_string()})).await;
+    assert_eq!(f.bal_of(wmon).await, U256::ZERO);
+
     // fee on open → treasury
     let treasury = f.d.treasury().unwrap();
     f.step(json!({"action":"fee.transfer","amount":"400000"})).await;

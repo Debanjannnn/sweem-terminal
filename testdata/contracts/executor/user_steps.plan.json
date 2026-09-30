@@ -22,5 +22,7 @@
   {"action":"perpl.deposit","amount":"10000000"},
   {"action":"perpl.order","perp":"BTC","kind":"openShort","price":"1100000","lot":"100","leverageHdths":200},
   {"action":"perpl.order","perp":"BTC","kind":"closeShort","price":"1200000","lot":"100","leverageHdths":200},
-  {"action":"perpl.withdraw","amount":"99000000"}
+  {"action":"perpl.withdraw","amount":"99000000"},
+  {"action":"wmon.wrap","amount":"10000000000000000000"},
+  {"action":"wmon.unwrap","amount":"10000000000000000000"}
 ]

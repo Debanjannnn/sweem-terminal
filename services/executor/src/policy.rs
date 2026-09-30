@@ -48,7 +48,7 @@ pub fn rules(d: &Deployments) -> Vec<Value> {
     let vaults: Vec<Address> = d.lending.erc4626.iter().map(|v| v.vault).collect();
     let (stable, perpl) = (d.swap.ausd3pool.pool, d.perpl.exchange);
     let erc20s: Vec<Address> = d.tokens.values().map(|t| t.address).filter(|a| !a.is_zero()).collect();
-    let usdc = d.tokens["USDC"].address;
+    let (usdc, wmon) = (d.tokens["USDC"].address, d.tokens["WMON"].address);
 
     let mut spenders: Vec<String> = [obs.clone(), vec![ma, router, av, stable, perpl], pools.clone(), vaults.clone()].concat().iter().map(lower).collect();
     spenders.sort();
@@ -83,6 +83,8 @@ pub fn rules(d: &Deployments) -> Vec<Value> {
         rule("ERC4626 + shMON redeem", shmon_vaults, abi("redeem", &[u("shares"), ("receiver", "address"), ("owner", "address")]), vec![]),
         rule("Kuru ActiveVault deposit", vec![av], abi("deposit", &[u("baseAmount"), u("quoteAmount")]), vec![]),
         rule("Kuru ActiveVault withdraw", vec![av], abi("withdraw", &[u("shares")]), vec![]),
+        rule("WMON wrap", vec![wmon], abi("deposit", &[]), vec![]),
+        rule("WMON unwrap", vec![wmon], abi("withdraw", &[u("wad")]), vec![]),
         rule("AUSD 3pool exchange", vec![stable], abi("exchange", &[("i", "int128"), ("j", "int128"), u("dx"), u("min_dy")]), vec![]),
         rule("Perpl createAccount", vec![perpl], abi("createAccount", &[u("amountCNS")]), vec![]),
         rule("Perpl depositCollateral", vec![perpl], abi("depositCollateral", &[u("amountCNS")]), vec![]),
@@ -130,7 +132,7 @@ mod tests {
     fn every_rule_pins_chain_targets_and_function() {
         let d = dep();
         let r = rules(&d);
-        assert_eq!(r.len(), 22);
+        assert_eq!(r.len(), 24);
         for rule in &r {
             assert_eq!(rule["method"], "eth_sendTransaction");
             assert_eq!(rule["action"], "ALLOW");

@@ -13,10 +13,6 @@ impl Leases {
     }
 }
 
-/// bot nonce: cached next value, None = re-read `pending` count from the node.
-#[derive(Default)]
-pub struct BotNonce(pub Mutex<Option<u64>>);
-
 #[cfg(test)]
 mod tests {
     use super::*;

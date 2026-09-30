@@ -1,15 +1,18 @@
-//! `executor sync-policy`: the Privy policy on user wallets is a backstop allowlist:
-//! chain 10143, USDC.approve(spender ∈ baskets), basket.mint/redeem. Anything else hits Privy's default deny.
-//! https://docs.privy.io/api-reference/policies/update · /create · https://docs.privy.io/controls/policies/overview
-use alloy::{primitives::Address, sol_types::SolCall};
+//! `executor sync-policy [--dry-run]`: the Privy policy on user wallets is the backstop allowlist (design §4):
+//! chain 143, every venue contract + method the adapters use, approve only to venue spenders, USDC transfer only to treasury.
+//! Anything else hits Privy's default deny. https://docs.privy.io/controls/policies/overview
+use alloy::primitives::Address;
 use reqwest::Method;
 use serde_json::{json, Value};
 
-use crate::{config::Deployments, contracts::basketsCall, privy::Privy, rpc::Rpc};
+use crate::{config::{Deployments, CHAIN_ID}, privy::Privy};
+
+fn abi_item(name: &str, inputs: Value) -> Value {
+    json!([{"name": name, "type": "function", "inputs": inputs, "outputs": [], "stateMutability": "nonpayable"}])
+}
 
 fn abi(name: &str, inputs: &[(&str, &str)]) -> Value {
-    let inputs: Vec<Value> = inputs.iter().map(|(n, t)| json!({"name": n, "type": t})).collect();
-    json!([{"name": name, "type": "function", "inputs": inputs, "outputs": [], "stateMutability": "nonpayable"}])
+    abi_item(name, inputs.iter().map(|(n, t)| json!({"name": n, "type": t})).collect())
 }
 
 fn cond(source: &str, field: &str, op: &str, value: Value) -> Value {
@@ -22,65 +25,79 @@ fn call_cond(abi: &Value, field: &str, op: &str, value: Value) -> Value {
     c
 }
 
-pub fn rules(usdc: Address, baskets: &[Address]) -> Vec<Value> {
-    let lower = |a: &Address| a.to_string().to_lowercase();
-    let baskets: Vec<String> = baskets.iter().map(lower).collect();
-    let chain = cond("ethereum_transaction", "chain_id", "eq", json!("10143"));
-    let to_baskets = cond("ethereum_transaction", "to", "in", json!(baskets));
+fn lower(a: &Address) -> String {
+    a.to_string().to_lowercase()
+}
+
+pub const TREASURY_PLACEHOLDER: &str = "<treasury: unset in 143.json>";
+
+pub fn rules(d: &Deployments) -> Vec<Value> {
+    let chain = cond("ethereum_transaction", "chain_id", "eq", json!(CHAIN_ID.to_string()));
+    let rule = |name: &str, to: Vec<Address>, abi: Value, extra: Vec<Value>| {
+        let f = abi[0]["name"].as_str().unwrap().to_string();
+        let mut to: Vec<String> = to.iter().map(lower).collect();
+        to.sort();
+        to.dedup();
+        let mut c = vec![chain.clone(), cond("ethereum_transaction", "to", "in", json!(to)), call_cond(&abi, "function_name", "eq", json!(f))];
+        c.extend(extra);
+        json!({"name": name, "method": "eth_sendTransaction", "action": "ALLOW", "conditions": c})
+    };
+    let obs: Vec<Address> = d.kuru.markets.values().map(|m| m.orderbook).collect();
+    let (ma, router, av) = (d.kuru.margin_account, d.kuru.router, d.kuru.active_vault);
+    let pools = vec![d.lending.aave_v3.pool, d.lending.neverland.pool];
+    let vaults: Vec<Address> = d.lending.erc4626.iter().map(|v| v.vault).collect();
+    let (stable, perpl) = (d.swap.ausd3pool.pool, d.perpl.exchange);
+    let erc20s: Vec<Address> = d.tokens.values().map(|t| t.address).filter(|a| !a.is_zero()).collect();
+    let usdc = d.tokens["USDC"].address;
+
+    let mut spenders: Vec<String> = [obs.clone(), vec![ma, router, av, stable, perpl], pools.clone(), vaults.clone()].concat().iter().map(lower).collect();
+    spenders.sort();
+    spenders.dedup();
     let approve = abi("approve", &[("spender", "address"), ("amount", "uint256")]);
-    let mint = abi("mint", &[("usdcIn", "uint256"), ("minShares", "uint256"), ("deadline", "uint256")]);
-    let redeem = abi("redeem", &[("shares", "uint256"), ("minUsdcOut", "uint256"), ("deadline", "uint256")]);
-    let rule = |name: &str, conditions: Vec<Value>| json!({"name": name, "method": "eth_sendTransaction", "action": "ALLOW", "conditions": conditions});
+    let transfer = abi("transfer", &[("to", "address"), ("amount", "uint256")]);
+    let treasury = d.treasury().map(|a| lower(&a)).unwrap_or_else(|| TREASURY_PLACEHOLDER.into());
+    let shmon_vaults = [vaults.clone(), vec![d.staking.shmonad]].concat();
+    let u = |n: &'static str| (n, "uint256");
+    let components: Vec<Value> = [
+        "orderDescId:uint256", "perpId:uint256", "orderType:uint8", "orderId:uint256", "pricePNS:uint256", "lotLNS:uint256",
+        "expiryBlock:uint256", "postOnly:bool", "fillOrKill:bool", "immediateOrCancel:bool", "maxMatches:uint256",
+        "leverageHdths:uint256", "lastExecutionBlock:uint256", "amountCNS:uint256", "maxNegPnlCollatBPS:uint256",
+    ].iter().map(|s| { let (n, t) = s.split_once(':').unwrap(); json!({"name": n, "type": t}) }).collect();
+    let order_desc = json!([{"name": "orderDesc", "type": "tuple", "components": components}]);
+
     vec![
-        rule("USDC approve to sweem baskets", vec![
-            chain.clone(),
-            cond("ethereum_transaction", "to", "eq", json!(lower(&usdc))),
-            call_cond(&approve, "function_name", "eq", json!("approve")),
-            call_cond(&approve, "approve.spender", "in", json!(baskets)),
-        ]),
-        rule("Sweem basket mint", vec![chain.clone(), to_baskets.clone(), call_cond(&mint, "function_name", "eq", json!("mint"))]),
-        rule("Sweem basket redeem", vec![chain, to_baskets, call_cond(&redeem, "function_name", "eq", json!("redeem"))]),
+        rule("ERC20 approve to venue spenders", erc20s, approve.clone(), vec![call_cond(&approve, "approve.spender", "in", json!(spenders))]),
+        rule("USDC transfer to treasury only", vec![usdc], transfer.clone(), vec![call_cond(&transfer, "transfer.to", "eq", json!(treasury))]),
+        rule("Kuru market buy", obs.clone(), abi("placeAndExecuteMarketBuy", &[("quoteSize", "uint96"), u("minAmountOut"), ("isMargin", "bool"), ("isFillOrKill", "bool")]), vec![]),
+        rule("Kuru market sell", obs.clone(), abi("placeAndExecuteMarketSell", &[("size", "uint96"), u("minAmountOut"), ("isMargin", "bool"), ("isFillOrKill", "bool")]), vec![]),
+        rule("Kuru limit buy", obs.clone(), abi("addBuyOrder", &[("price", "uint32"), ("size", "uint96"), ("postOnly", "bool")]), vec![]),
+        rule("Kuru limit sell", obs.clone(), abi("addSellOrder", &[("price", "uint32"), ("size", "uint96"), ("postOnly", "bool")]), vec![]),
+        rule("Kuru cancel orders", obs, abi("batchCancelOrders", &[("orderIds", "uint40[]")]), vec![]),
+        rule("Kuru margin deposit", vec![ma], abi("deposit", &[("user", "address"), ("token", "address"), u("amount")]), vec![]),
+        rule("Kuru margin withdraw", vec![ma], abi("withdraw", &[u("amount"), ("token", "address")]), vec![]),
+        rule("Kuru router swap", vec![router], abi("anyToAnySwap", &[("markets", "address[]"), ("isBuy", "bool[]"), ("nativeSend", "bool[]"), ("debitToken", "address"), ("creditToken", "address"), u("amount"), u("minAmountOut")]), vec![]),
+        rule("Aave/Neverland supply", pools.clone(), abi("supply", &[("asset", "address"), u("amount"), ("onBehalfOf", "address"), ("referralCode", "uint16")]), vec![]),
+        rule("Aave/Neverland withdraw", pools, abi("withdraw", &[("asset", "address"), u("amount"), ("to", "address")]), vec![]),
+        rule("ERC4626 + shMON deposit", shmon_vaults.clone(), abi("deposit", &[u("assets"), ("receiver", "address")]), vec![]),
+        rule("ERC4626 + shMON withdraw", shmon_vaults.clone(), abi("withdraw", &[u("assets"), ("receiver", "address"), ("owner", "address")]), vec![]),
+        rule("ERC4626 + shMON redeem", shmon_vaults, abi("redeem", &[u("shares"), ("receiver", "address"), ("owner", "address")]), vec![]),
+        rule("Kuru ActiveVault deposit", vec![av], abi("deposit", &[u("baseAmount"), u("quoteAmount")]), vec![]),
+        rule("Kuru ActiveVault withdraw", vec![av], abi("withdraw", &[u("shares")]), vec![]),
+        rule("AUSD 3pool exchange", vec![stable], abi("exchange", &[("i", "int128"), ("j", "int128"), u("dx"), u("min_dy")]), vec![]),
+        rule("Perpl createAccount", vec![perpl], abi("createAccount", &[u("amountCNS")]), vec![]),
+        rule("Perpl depositCollateral", vec![perpl], abi("depositCollateral", &[u("amountCNS")]), vec![]),
+        rule("Perpl execOrder", vec![perpl], abi_item("execOrder", order_desc), vec![]),
+        rule("Perpl withdrawCollateral", vec![perpl], abi("withdrawCollateral", &[u("amountCNS")]), vec![]),
     ]
 }
 
-const NAME: &str = "sweem baskets executor";
+const NAME: &str = "sweem executor v2 (monad 143)";
 
-pub async fn baskets(rpc: &Rpc, dep: &Deployments) -> Result<Vec<Address>, String> {
-    let out = rpc.eth_call(dep.factory, &basketsCall {}.abi_encode()).await?;
-    let mut b = basketsCall::abi_decode_returns(&out).map_err(|e| e.to_string())?;
-    b.sort();
-    Ok(b)
-}
-
-/// policy only needs rewriting when the sorted basket set moved.
-pub fn changed(last: Option<&[Address]>, now: &[Address]) -> bool {
-    last != Some(now)
-}
-
-/// startup sync, then every 60s only when factory baskets() differs. a failed sync retries next tick.
-pub async fn watch(privy: std::sync::Arc<Privy>, rpc: std::sync::Arc<Rpc>, dep: Deployments, policy_id: Option<String>, quorum: Option<String>) {
-    let mut last: Option<Vec<Address>> = None;
-    loop {
-        match baskets(&rpc, &dep).await {
-            Ok(now) if changed(last.as_deref(), &now) => match apply(&privy, &dep, &now, policy_id.clone(), quorum.clone()).await {
-                Ok(p) => {
-                    tracing::info!(policy = %p["id"], baskets = now.len(), "privy policy synced");
-                    last = Some(now);
-                }
-                Err(e) => tracing::error!(error = %e, "privy policy sync"),
-            },
-            Ok(_) => {}
-            Err(e) => tracing::warn!(error = %e, "read factory baskets"),
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+pub async fn apply(privy: &Privy, dep: &Deployments, policy_id: Option<String>, quorum: Option<String>) -> Result<Value, String> {
+    if dep.treasury().is_none() {
+        return Err("treasury unset in deployments: refusing to push a policy with a placeholder".into());
     }
-}
-
-pub async fn apply(privy: &Privy, dep: &Deployments, baskets: &[Address], policy_id: Option<String>, quorum: Option<String>) -> Result<Value, String> {
-    if baskets.is_empty() {
-        return Err("factory has no baskets: refusing a policy that allows nothing but approve".into());
-    }
-    let rules = rules(dep.kuru.usdc, baskets);
+    let rules = rules(dep);
     let existing = match &policy_id {
         Some(id) => match privy.request(Method::GET, &format!("/v1/policies/{id}"), None).await {
             Ok(_) => Some(id.clone()),
@@ -105,30 +122,38 @@ pub async fn apply(privy: &Privy, dep: &Deployments, baskets: &[Address], policy
 mod tests {
     use super::*;
 
+    fn dep() -> Deployments {
+        Deployments::load(concat!(env!("CARGO_MANIFEST_DIR"), "/../../contracts/deployments/143.json")).unwrap()
+    }
+
     #[test]
-    fn rules_pin_chain_targets_and_functions() {
-        let usdc: Address = "0xEe0722ead54f1B4fe97bE399Be43BC0226a6f97E".parse().unwrap();
-        let b: Address = "0xE0b3bAafa8EDD1db95b49e62ea0fB18c04353870".parse().unwrap();
-        let r = rules(usdc, &[b]);
-        assert_eq!(r.len(), 3);
+    fn every_rule_pins_chain_targets_and_function() {
+        let d = dep();
+        let r = rules(&d);
+        assert_eq!(r.len(), 22);
         for rule in &r {
             assert_eq!(rule["method"], "eth_sendTransaction");
             assert_eq!(rule["action"], "ALLOW");
             assert!(rule["name"].as_str().unwrap().len() <= 50);
-            assert_eq!(rule["conditions"][0], json!({"field_source":"ethereum_transaction","field":"chain_id","operator":"eq","value":"10143"}));
+            let c = rule["conditions"].as_array().unwrap();
+            assert_eq!(c[0], json!({"field_source":"ethereum_transaction","field":"chain_id","operator":"eq","value":"143"}));
+            assert_eq!((c[1]["field"].as_str(), c[1]["operator"].as_str()), (Some("to"), Some("in")));
+            assert!(!c[1]["value"].as_array().unwrap().is_empty());
+            assert_eq!(c[2]["field"], "function_name");
         }
-        assert_eq!(r[0]["conditions"][1]["value"], "0xee0722ead54f1b4fe97be399be43bc0226a6f97e");
-        assert_eq!(r[0]["conditions"][3]["value"], json!(["0xe0b3baafa8edd1db95b49e62ea0fb18c04353870"]));
-        assert_eq!(r[1]["conditions"][2]["value"], "mint");
-        assert_eq!(r[2]["conditions"][2]["value"], "redeem");
+        let spenders = r[0]["conditions"][3]["value"].as_array().unwrap();
+        assert_eq!(spenders.len(), 4 + 5 + 2 + 8);
+        assert!(spenders.contains(&json!(lower(&d.lending.aave_v3.pool))));
+        assert!(!r[0]["conditions"][1]["value"].as_array().unwrap().contains(&json!(lower(&Address::ZERO))), "native MON is no approve target");
+        assert_eq!(r[1]["conditions"][3]["value"], TREASURY_PLACEHOLDER);
     }
 
     #[test]
-    fn diff_detection() {
-        let (a, b) = (Address::repeat_byte(1), Address::repeat_byte(2));
-        assert!(changed(None, &[a]), "first tick always syncs");
-        assert!(!changed(Some(&[a, b]), &[a, b]));
-        assert!(changed(Some(&[a]), &[a, b]), "new basket");
-        assert!(changed(Some(&[a, b]), &[a]), "removed basket");
+    fn treasury_pins_transfer_recipient() {
+        let mut d = dep();
+        d.treasury = "0x7777777777777777777777777777777777777777".into();
+        let r = rules(&d);
+        assert_eq!(r[1]["conditions"][1]["value"], json!([lower(&d.tokens["USDC"].address)]));
+        assert_eq!(r[1]["conditions"][3]["value"], "0x7777777777777777777777777777777777777777");
     }
 }

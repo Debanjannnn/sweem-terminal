@@ -4,12 +4,8 @@ use tokio_postgres::NoTls;
 #[derive(Debug, Clone, Default)]
 pub struct Execution {
     pub status: String,
-    pub kind: String,
-    pub amount: Option<String>,
-    pub min_out: Option<String>,
+    pub steps: Option<String>,
     pub schedule_active: bool,
-    pub basket: String,
-    pub within_cap: bool,
     pub wallet_id: Option<String>,
     pub wallet_address: Option<String>,
 }
@@ -31,49 +27,27 @@ async fn conn(db: &Db) -> Result<deadpool_postgres::Object, String> {
     db.get().await.map_err(|e| format!("postgres: {e}"))
 }
 
-/// submitted rows with a hash: receipts to (re)watch after a restart.
-pub async fn submitted(db: &Db) -> Result<Vec<(String, String)>, String> {
-    let rows = conn(db)
-        .await?
-        .query("select id::text, tx_hash from executions where status = 'submitted' and tx_hash is not null", &[])
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(rows.iter().map(|r| (r.get(0), r.get(1))).collect())
-}
-
 pub async fn load(db: &Db, id: &str) -> Result<Option<Execution>, String> {
     let row = conn(db)
-            .await?
+        .await?
         .query_opt(
             // the scheduler deactivates a stop-loss when it claims the fire, so its one execution still counts as active
-            "select e.status, e.kind, e.amount::text, e.min_out::text, s.active or s.kind = 'stop_loss', s.basket,
-                    coalesce(e.amount <= s.max_per_run_usdc * 1000000, false),
-                    d.privy_wallet_id, d.wallet_address
+            "select e.status, e.steps::text, coalesce(s.active or s.kind = 'stop_loss', true), d.privy_wallet_id, d.wallet_address
              from executions e
-             join schedules s on s.id = e.schedule_id
-             left join delegations d on d.user_id = s.user_id and d.active
+             left join schedules s on s.id = e.schedule_id
+             left join delegations d on d.user_id = coalesce(e.user_id, s.user_id) and d.active
              where e.id = $1::text::uuid",
             &[&id],
         )
         .await
         .map_err(|e| e.to_string())?;
-    Ok(row.map(|r| Execution {
-        status: r.get(0),
-        kind: r.get(1),
-        amount: r.get(2),
-        min_out: r.get(3),
-        schedule_active: r.get(4),
-        basket: r.get(5),
-        within_cap: r.get(6),
-        wallet_id: r.get(7),
-        wallet_address: r.get(8),
-    }))
+    Ok(row.map(|r| Execution { status: r.get(0), steps: r.get(1), schedule_active: r.get(2), wallet_id: r.get(3), wallet_address: r.get(4) }))
 }
 
 /// conditional transition; false = the row was not in `from` (a replay or a race lost).
 pub async fn transition(db: &Db, id: &str, from: &str, to: &str, error: Option<&str>) -> Result<bool, String> {
     let n = conn(db)
-            .await?
+        .await?
         .execute(
             "update executions set status = $3, error = coalesce($4, error), updated_at = now()
              where id = $1::text::uuid and status = $2",
@@ -84,9 +58,26 @@ pub async fn transition(db: &Db, id: &str, from: &str, to: &str, error: Option<&
     Ok(n == 1)
 }
 
-pub async fn set_tx(db: &Db, id: &str, hash: &str) -> Result<(), String> {
-    conn(db).await?.execute("update executions set tx_hash = $2, updated_at = now() where id = $1::text::uuid", &[&id, &hash])
+/// one step confirmed: its hash appended, step_done advanced, tx_hash = latest.
+pub async fn step_done(db: &Db, id: &str, hash: &str) -> Result<(), String> {
+    conn(db)
+        .await?
+        .execute(
+            "update executions set step_done = step_done + 1, tx_hashes = array_append(tx_hashes, $2), tx_hash = $2, updated_at = now()
+             where id = $1::text::uuid and status = 'submitted'",
+            &[&id, &hash],
+        )
         .await
         .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// a restart abandons in-flight plans: fail them; step_done/tx_hashes keep what confirmed.
+// ponytail: the step in flight at the crash is not re-watched; the caller reconciles from chain if it matters
+pub async fn fail_interrupted(db: &Db) -> Result<u64, String> {
+    conn(db)
+        .await?
+        .execute("update executions set status = 'failed', error = 'interrupted', updated_at = now() where status = 'submitted'", &[])
+        .await
         .map_err(|e| e.to_string())
 }

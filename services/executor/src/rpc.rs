@@ -41,8 +41,12 @@ fn quantity(v: &Value) -> Result<u128, String> {
 
 impl Rpc {
     pub fn new(url: String) -> Self {
-        let http = reqwest::Client::builder().timeout(Duration::from_secs(15)).build().expect("reqwest client");
-        Self { http, url }
+        Self::with_timeout(url, Duration::from_secs(15))
+    }
+
+    /// anvil forks fetch cold state from the public RPC and need longer.
+    pub fn with_timeout(url: String, t: Duration) -> Self {
+        Self { http: reqwest::Client::builder().timeout(t).build().expect("reqwest client"), url }
     }
 
     /// Err carries the node's error object: the revert selector lives there.

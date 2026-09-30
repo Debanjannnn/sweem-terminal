@@ -9,7 +9,7 @@ use p256::{
 use reqwest::Method;
 use serde_json::{json, Value};
 
-use crate::gas::Fees;
+use crate::{config::CHAIN_ID, gas::Fees};
 
 pub const API: &str = "https://api.privy.io";
 
@@ -61,13 +61,13 @@ pub struct Privy {
 pub fn tx_body(to: Address, value: U256, data: &[u8], fees: &Fees) -> Value {
     json!({
         "method": "eth_sendTransaction",
-        "caip2": "eip155:10143",
+        "caip2": format!("eip155:{CHAIN_ID}"),
         "chain_type": "ethereum",
         "params": { "transaction": {
             "to": to.to_string(),
             "value": format!("{value:#x}"),
             "data": format!("0x{}", hex::encode(data)),
-            "chain_id": 10143,
+            "chain_id": CHAIN_ID,
             "type": 2,
             "gas_limit": format!("{:#x}", fees.gas_limit),
             "max_fee_per_gas": format!("{:#x}", fees.max_fee_per_gas),
@@ -103,9 +103,9 @@ impl Privy {
 
     /// POST /v1/wallets/{id}/rpc eth_sendTransaction → data.hash.
     /// https://docs.privy.io/api-reference/wallets/ethereum/eth-send-transaction
-    pub async fn send_transaction(&self, wallet_id: &str, to: Address, data: &[u8], fees: &Fees) -> Result<String, String> {
+    pub async fn send_transaction(&self, wallet_id: &str, to: Address, value: U256, data: &[u8], fees: &Fees) -> Result<String, String> {
         let v = self
-            .request(Method::POST, &format!("/v1/wallets/{wallet_id}/rpc"), Some(tx_body(to, U256::ZERO, data, fees)))
+            .request(Method::POST, &format!("/v1/wallets/{wallet_id}/rpc"), Some(tx_body(to, value, data, fees)))
             .await?;
         v.pointer("/data/hash").and_then(Value::as_str).map(str::to_string).ok_or_else(|| format!("privy: no data.hash in {v}"))
     }
@@ -159,10 +159,12 @@ mod tests {
     }
 
     #[test]
-    fn tx_has_explicit_gas_and_monad_testnet_caip2() {
+    fn tx_has_explicit_gas_value_and_monad_mainnet_caip2() {
         let f = Fees { gas_limit: 900_000, max_fee_per_gas: 201_000_000_000, max_priority_fee_per_gas: 1 };
-        let b = tx_body(Address::repeat_byte(0x11), U256::ZERO, &[0xde, 0xad], &f);
-        assert_eq!(b["caip2"], "eip155:10143");
+        let b = tx_body(Address::repeat_byte(0x11), U256::from(1000), &[0xde, 0xad], &f);
+        assert_eq!(b["caip2"], "eip155:143");
+        assert_eq!(b["params"]["transaction"]["chain_id"], 143);
+        assert_eq!(b["params"]["transaction"]["value"], "0x3e8");
         assert_eq!(b["params"]["transaction"]["gas_limit"], "0xdbba0");
         assert_eq!(b["params"]["transaction"]["data"], "0xdead");
     }

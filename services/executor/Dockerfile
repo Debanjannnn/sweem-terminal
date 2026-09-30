@@ -13,7 +13,7 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY contracts/deployments /deployments
 COPY --from=build /src/target/release/executor /usr/local/bin/executor
-ENV EXECUTOR_ADDR=0.0.0.0:8083 DEPLOYMENTS_PATH=/deployments/10143.json
+ENV EXECUTOR_ADDR=0.0.0.0:8083 DEPLOYMENTS_PATH=/deployments/143.json
 EXPOSE 8083
 USER nobody
 ENTRYPOINT ["/usr/local/bin/executor"]

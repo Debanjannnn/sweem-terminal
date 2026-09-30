@@ -1,4 +1,3 @@
-pub mod bot;
 pub mod config;
 pub mod contracts;
 pub mod gas;
@@ -7,6 +6,8 @@ pub mod nonce;
 pub mod policy;
 pub mod privy;
 pub mod rpc;
+pub mod signer;
+pub mod steps;
 pub mod store;
 pub mod user;
 
@@ -17,9 +18,9 @@ pub async fn app(cfg: config::Config, privy: Arc<privy::Privy>, rpc: Arc<rpc::Rp
         db: store::pool(&cfg.database_url)?,
         rpc,
         privy,
-        bot: bot::Bot::new(&cfg.bot_private_key, config::opt("KURU_GATEWAY_URL").unwrap_or_else(|| "https://gateway.testnet.kuru.io".into()))?,
         dep: cfg.deployments,
         secret: cfg.internal_secret,
+        max_step_usd: cfg.max_step_usd,
         leases: Default::default(),
     }))
 }
@@ -28,7 +29,7 @@ pub async fn app(cfg: config::Config, privy: Arc<privy::Privy>, rpc: Arc<rpc::Rp
 pub async fn app_from_env() -> Result<http::App, String> {
     let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
     if config::opt("DEPLOYMENTS_PATH").is_none_or(|p| !std::path::Path::new(&p).exists()) {
-        unsafe { std::env::set_var("DEPLOYMENTS_PATH", format!("{root}/contracts/deployments/10143.json")) };
+        unsafe { std::env::set_var("DEPLOYMENTS_PATH", format!("{root}/contracts/deployments/143.json")) };
     }
     config::load_dotenv(&format!("{root}/.env.executor"));
     config::load_dotenv(&format!("{root}/.env"));

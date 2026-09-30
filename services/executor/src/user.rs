@@ -1,136 +1,111 @@
-//! user mint/redeem through the user's Privy wallet. re-checks everything; decides nothing.
-use alloy::{
-    primitives::{hex, Address, U256},
-    sol_types::{SolCall, SolError},
-};
+//! runs a planned execution's steps from the user's Privy wallet, in order. re-checks everything; decides nothing.
+use alloy::primitives::{Address, U256};
 use axum::http::StatusCode;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::{
-    contracts::*,
-    gas,
+    config::Deployments,
     http::{App, Fail},
+    signer::Signer,
+    steps::{self, Call, Step},
     store::{self, Execution},
 };
 
-pub fn recheck(e: &Execution, route: &str) -> Result<(), &'static str> {
+pub const MAX_STEPS: usize = 32;
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Outcome {
+    pub execution_id: String,
+    pub status: String,
+    pub steps_done: usize,
+    pub tx_hashes: Vec<String>,
+    pub error: Option<String>,
+}
+
+/// every step must build (known venue, allowlisted target, wallet as receiver) and fit the cap before anything is signed.
+pub fn recheck(e: &Execution, dep: &Deployments, max_step_usd: u64) -> Result<(Address, Vec<Call>), &'static str> {
     if e.status != "pending" {
         return Err("not_pending");
     }
-    if e.kind != route {
-        return Err("bad_request");
-    }
-    if e.wallet_id.is_none() || e.wallet_address.is_none() {
-        return Err("delegation_inactive");
-    }
+    let (Some(_), Some(addr)) = (&e.wallet_id, &e.wallet_address) else { return Err("delegation_inactive") };
     if !e.schedule_active {
         return Err("schedule_inactive");
     }
-    let amount = e.amount.as_deref().map(u256_str);
-    let min_out = e.min_out.as_deref().map(u256_str);
-    if !matches!(amount, Some(Ok(a)) if !a.is_zero()) || !matches!(min_out, Some(Ok(_))) {
+    let wallet: Address = addr.parse().map_err(|_| "bad_request")?;
+    let plan: Vec<Step> = serde_json::from_str(e.steps.as_deref().ok_or("bad_request")?).map_err(|_| "bad_request")?;
+    if plan.is_empty() || plan.len() > MAX_STEPS {
         return Err("bad_request");
     }
-    if route == "mint" && !e.within_cap {
+    let calls = plan.iter().map(|s| steps::build(dep, wallet, s)).collect::<Result<Vec<_>, _>>().map_err(|err| {
+        tracing::debug!(%err, "step rejected");
+        "bad_request"
+    })?;
+    let cap = U256::from(max_step_usd) * U256::from(1_000_000);
+    if calls.iter().any(|c| steps::stable_spend(dep, c) > cap) {
         return Err("cap_exceeded");
     }
-    Ok(())
+    Ok((wallet, calls))
 }
 
-fn chain_code(err: &str) -> &'static str {
-    if err.contains(&hex::encode(Slippage::SELECTOR)) { "slippage" } else { "chain_error" }
-}
-
-pub async fn execute(app: &App, id: &str, route: &str) -> Result<String, Fail> {
+pub async fn execute(app: &App, id: &str) -> Result<Outcome, Fail> {
     let db_err = |e: String| {
         tracing::error!(error = %e, "db");
         Fail(StatusCode::INTERNAL_SERVER_ERROR, "chain_error")
     };
     let e = store::load(&app.db, id).await.map_err(db_err)?.ok_or(Fail(StatusCode::NOT_FOUND, "bad_request"))?;
-    if let Err(code) = recheck(&e, route) {
-        if code != "not_pending" {
-            store::transition(&app.db, id, "pending", "rejected", Some(code)).await.map_err(db_err)?;
+    let (wallet, calls) = match recheck(&e, &app.dep, app.max_step_usd) {
+        Ok(v) => v,
+        Err(code) => {
+            if code != "not_pending" {
+                store::transition(&app.db, id, "pending", "rejected", Some(code)).await.map_err(db_err)?;
+            }
+            return Err(Fail(StatusCode::CONFLICT, code));
         }
-        return Err(Fail(StatusCode::CONFLICT, code));
-    }
+    };
     if !store::transition(&app.db, id, "pending", "submitted", None).await.map_err(db_err)? {
         return Err(Fail(StatusCode::CONFLICT, "not_pending"));
     }
-    match send(app, &e, route).await {
-        Ok(hash) => {
-            store::set_tx(&app.db, id, &hash).await.map_err(db_err)?;
-            tokio::spawn(watch(app.db.clone(), app.rpc.clone(), id.to_string(), hash.clone()));
-            Ok(hash)
-        }
-        Err(err) => {
-            tracing::warn!(execution = id, error = %err, "user tx failed");
-            let code = chain_code(&err);
-            store::transition(&app.db, id, "submitted", "failed", Some(code)).await.map_err(db_err)?;
-            Err(Fail(StatusCode::BAD_GATEWAY, code))
-        }
-    }
-}
-
-/// receipt → confirmed|failed. rows left `submitted` by a restart are re-watched by `resume`.
-pub async fn watch(db: store::Db, rpc: std::sync::Arc<crate::rpc::Rpc>, id: String, hash: String) {
-    let Some(r) = rpc.wait_receipt(&hash, Duration::from_secs(120)).await else {
-        tracing::warn!(execution = id, tx = hash, "no receipt yet; resumed on next start");
-        return;
-    };
-    let (to, err) = if r.ok() { ("confirmed", None) } else { ("failed", Some("reverted")) };
-    if let Err(e) = store::transition(&db, &id, "submitted", to, err).await {
-        tracing::error!(error = %e, "receipt status write");
-    }
-}
-
-pub async fn resume(app: &App) -> Result<Vec<tokio::task::JoinHandle<()>>, String> {
-    let rows = store::submitted(&app.db).await?;
-    tracing::info!(count = rows.len(), "resuming receipt watch");
-    Ok(rows.into_iter().map(|(id, h)| tokio::spawn(watch(app.db.clone(), app.rpc.clone(), id, h))).collect())
-}
-
-async fn send(app: &App, e: &Execution, route: &str) -> Result<String, String> {
-    let wallet_id = e.wallet_id.as_deref().unwrap_or_default();
-    let owner: Address = e.wallet_address.as_deref().unwrap_or_default().parse().map_err(|_| "bad wallet address")?;
-    let basket: Address = e.basket.parse().map_err(|_| "bad basket address")?;
-    let amount = u256_str(e.amount.as_deref().unwrap_or_default())?;
-    let min_out = u256_str(e.min_out.as_deref().unwrap_or_default())?;
-    let deadline = U256::from(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() + 300);
-    let _lease = app.leases.lease(wallet_id).await;
-
-    let data = if route == "mint" {
-        let usdc = app.dep.kuru.usdc;
-        let out = app.rpc.eth_call(usdc, &allowanceCall { owner, spender: basket }.abi_encode()).await?;
-        if allowanceCall::abi_decode_returns(&out).map_err(|e| e.to_string())? < amount {
-            let approve = approveCall { spender: basket, amount }.abi_encode();
-            let fees = gas::fees(&app.rpc, owner, usdc, U256::ZERO, &approve).await?;
-            let h = app.privy.send_transaction(wallet_id, usdc, &approve, &fees).await?;
-            match app.rpc.wait_receipt(&h, Duration::from_secs(30)).await {
-                Some(r) if r.ok() => {}
-                _ => return Err(format!("approve {h} did not confirm")),
+    let wallet_id = e.wallet_id.unwrap_or_default();
+    // own task: a caller that hangs up must not cancel a plan half-way
+    let (app, id) = (app.clone(), id.to_string());
+    tokio::spawn(async move {
+        let _lease = app.leases.lease(&wallet_id).await;
+        let signer = Signer::Privy(app.privy.clone(), wallet_id);
+        let mut out = Outcome { execution_id: id.clone(), status: "confirmed".into(), steps_done: 0, tx_hashes: vec![], error: None };
+        for c in &calls {
+            match signer.perform(&app.rpc, wallet, c).await {
+                Ok(h) => {
+                    store::step_done(&app.db, &id, &h).await.map_err(db_err)?;
+                    out.steps_done += 1;
+                    out.tx_hashes.push(h);
+                }
+                Err(err) => {
+                    tracing::warn!(execution = id, step = out.steps_done, error = %err, "step failed");
+                    (out.status, out.error) = ("failed".into(), Some("chain_error".into()));
+                    break;
+                }
             }
         }
-        mintCall { usdcIn: amount, minShares: min_out, deadline }.abi_encode()
-    } else {
-        redeemCall { shares: amount, minUsdcOut: min_out, deadline }.abi_encode()
-    };
-    let fees = gas::fees(&app.rpc, owner, basket, U256::ZERO, &data).await?;
-    app.privy.send_transaction(wallet_id, basket, &data, &fees).await
+        store::transition(&app.db, &id, "submitted", &out.status, out.error.as_deref()).await.map_err(db_err)?;
+        Ok(out)
+    })
+    .await
+    .map_err(|_| Fail(StatusCode::INTERNAL_SERVER_ERROR, "chain_error"))?
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn dep() -> Deployments {
+        Deployments::load(concat!(env!("CARGO_MANIFEST_DIR"), "/../../contracts/deployments/143.json")).unwrap()
+    }
+
     fn ok() -> Execution {
         Execution {
             status: "pending".into(),
-            kind: "mint".into(),
-            amount: Some("10000000".into()),
-            min_out: Some("0".into()),
+            steps: Some(r#"[{"action":"kuru.marketBuy","market":"WETH","quote":"100000000","minOut":"1"},{"action":"lend.supply","venue":"aaveV3","asset":"USDC","amount":"5000000"}]"#.into()),
             schedule_active: true,
-            basket: "0xe0b3baafa8edd1db95b49e62ea0fb18c04353870".into(),
-            within_cap: true,
             wallet_id: Some("w".into()),
             wallet_address: Some("0x0000000000000000000000000000000000000001".into()),
         }
@@ -138,31 +113,29 @@ mod tests {
 
     #[test]
     fn recheck_matrix() {
-        let cases: Vec<(&str, fn(&mut Execution), Result<(), &str>)> = vec![
-            ("mint", |_| {}, Ok(())),
-            ("redeem", |e| e.kind = "redeem".into(), Ok(())),
-            ("redeem", |e| { e.kind = "redeem".into(); e.within_cap = false }, Ok(())),
-            ("mint", |e| e.status = "submitted".into(), Err("not_pending")),
-            ("mint", |e| e.status = "rejected".into(), Err("not_pending")),
-            ("redeem", |_| {}, Err("bad_request")),
-            ("mint", |e| e.wallet_id = None, Err("delegation_inactive")),
-            ("mint", |e| e.schedule_active = false, Err("schedule_inactive")),
-            ("mint", |e| e.amount = None, Err("bad_request")),
-            ("mint", |e| e.amount = Some("0".into()), Err("bad_request")),
-            ("mint", |e| e.amount = Some("1.5".into()), Err("bad_request")),
-            ("mint", |e| e.min_out = None, Err("bad_request")),
-            ("mint", |e| e.within_cap = false, Err("cap_exceeded")),
+        let d = dep();
+        type Case = (fn(&mut Execution), Result<usize, &'static str>);
+        let cases: Vec<Case> = vec![
+            (|_| {}, Ok(2)),
+            (|e| e.status = "submitted".into(), Err("not_pending")),
+            (|e| e.status = "rejected".into(), Err("not_pending")),
+            (|e| e.wallet_id = None, Err("delegation_inactive")),
+            (|e| e.wallet_address = None, Err("delegation_inactive")),
+            (|e| e.schedule_active = false, Err("schedule_inactive")),
+            (|e| e.steps = None, Err("bad_request")),
+            (|e| e.steps = Some("[]".into()), Err("bad_request")),
+            (|e| e.steps = Some(r#"[{"action":"kuru.marketBuy","market":"PEPE","quote":"1","minOut":"0"}]"#.into()), Err("bad_request")),
+            (|e| e.steps = Some(format!("[{}]", vec![r#"{"action":"shmonad.redeem","shares":"1"}"#; MAX_STEPS + 1].join(","))), Err("bad_request")),
+            // 1000 USDC cap: exactly at cap passes, one atom over fails, on any stable
+            (|e| e.steps = Some(r#"[{"action":"lend.supply","venue":"aaveV3","asset":"USDC","amount":"1000000000"}]"#.into()), Ok(1)),
+            (|e| e.steps = Some(r#"[{"action":"lend.supply","venue":"aaveV3","asset":"USDC","amount":"1000000001"}]"#.into()), Err("cap_exceeded")),
+            (|e| e.steps = Some(r#"[{"action":"stable.swap","from":"AUSD","to":"USDC","amount":"1000000001","minOut":"0"}]"#.into()), Err("cap_exceeded")),
+            (|e| e.steps = Some(r#"[{"action":"lend.supply","venue":"aaveV3","asset":"WETH","amount":"1000000000000000000000"}]"#.into()), Ok(1)),
         ];
-        for (route, f, want) in cases {
+        for (f, want) in cases {
             let mut e = ok();
             f(&mut e);
-            assert_eq!(recheck(&e, route), want, "{route} {e:?}");
+            assert_eq!(recheck(&e, &d, 1000).map(|(_, c)| c.len()), want, "{e:?}");
         }
-    }
-
-    #[test]
-    fn slippage_revert_is_named() {
-        assert_eq!(chain_code(&format!("execution reverted data 0x{}", hex::encode(Slippage::SELECTOR))), "slippage");
-        assert_eq!(chain_code("insufficient funds"), "chain_error");
     }
 }

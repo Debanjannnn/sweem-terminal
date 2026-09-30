@@ -5,7 +5,6 @@ out/
 cache/
 broadcast/
 generated/
-bun.lock
 .env
 .env.*
 !.env.example

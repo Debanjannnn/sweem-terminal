@@ -12,7 +12,7 @@ async fn main() -> anyhow::Result<()> {
         cfg.database_url.clone(),
         last_ok.clone(),
     ));
-    let mut ix = Indexer::new(&cfg, "main").await?;
+    let mut ix = Indexer::new(cfg, "mainnet").await?;
     loop {
         match ix.step().await {
             Ok(more) => {
@@ -23,7 +23,7 @@ async fn main() -> anyhow::Result<()> {
             }
             Err(e) => eprintln!("indexer step: {e:#}"),
         }
-        // HyperSync token budget is 30 req/min; one step = one query
+        // at head: one query per 5s keeps well under the shared 30 req/min budget
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
 }

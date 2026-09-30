@@ -1,7 +1,6 @@
 # build context: repo root
 FROM rust:1-slim-bookworm AS build
 WORKDIR /src
-COPY abi abi
 COPY services/indexer services/indexer
 RUN cargo build --release --locked --manifest-path services/indexer/Cargo.toml
 

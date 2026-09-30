@@ -1,10 +1,14 @@
-use crate::decode::{addr, TOPICS_BASKET, TOPICS_FACTORY, TOPIC_TRADES};
+use crate::config::Config;
+use crate::decode::*;
 use alloy_primitives::{Address, B256};
 use anyhow::{Context, Result};
-use hypersync_client::net_types::{BlockField, LogField, LogFilter, Query, TransactionField};
-use hypersync_client::simple_types::Transaction;
-use hypersync_client::{format::Hex, Client};
+use hypersync_client::net_types::{BlockField, LogField, LogFilter, Query};
+use hypersync_client::{format::Hex, Client, RateLimitResponse};
 use std::collections::{BTreeSet, HashMap};
+use std::time::Duration;
+
+/// Requests left in the shared 30/min window below which we wait for the reset (history service shares the token).
+const RESERVE: u64 = 10;
 
 pub struct RawLog {
     pub block: u64,
@@ -14,8 +18,6 @@ pub struct RawLog {
     pub address: Address,
     pub topics: Vec<B256>,
     pub data: Vec<u8>,
-    /// Lowercase tx sender.
-    pub from: Option<String>,
 }
 
 pub struct Page {
@@ -31,16 +33,69 @@ fn hexes(t: &[B256]) -> Vec<String> {
     t.iter().map(|t| t.to_string()).collect()
 }
 
-/// tx hash -> lowercase sender.
-fn senders<'a>(txs: impl IntoIterator<Item = &'a Transaction>) -> HashMap<String, String> {
-    txs.into_iter()
-        .filter_map(|t| {
-            Some((
-                t.hash.as_ref()?.encode_hex(),
-                addr(t.from.as_ref()?.as_ref()),
-            ))
-        })
+/// Wallets as 32-byte topic values.
+fn topics(wallets: &BTreeSet<String>) -> Vec<String> {
+    wallets
+        .iter()
+        .map(|w| format!("0x{:0>64}", &w[2..]))
         .collect()
+}
+
+/// Log filters for one query. Wallet-indexed events are filtered server-side; Kuru/Perpl/ActiveVault
+/// index nothing, so they come unfiltered and are matched against wallets after decoding.
+pub fn filters(cfg: &Config, wallets: &BTreeSet<String>) -> Result<Vec<LogFilter>> {
+    let mut f = vec![
+        LogFilter::all()
+            .and_address(cfg.markets.iter().map(String::as_str))?
+            .and_topic0(hexes(&KURU_TOPICS))?,
+        LogFilter::all()
+            .and_address([cfg.perpl.as_str()])?
+            .and_topic0(hexes(&PERPL_TOPICS))?,
+        LogFilter::all()
+            .and_address([cfg.active_vault.as_str()])?
+            .and_topic0(hexes(&ACTIVE_VAULT_TOPICS))?,
+    ];
+    // an empty topic list would match every wallet, so skip instead
+    if wallets.is_empty() {
+        return Ok(f);
+    }
+    let w = topics(wallets);
+    let pools: Vec<&str> = cfg.pools.keys().map(String::as_str).collect();
+    let vaults: Vec<&str> = cfg.vaults.keys().map(String::as_str).collect();
+    f.push(
+        LogFilter::all()
+            .and_address(pools.clone())?
+            .and_topic0([SUPPLY.to_string()])?
+            .and_topic2(w.clone())?,
+    );
+    f.push(
+        LogFilter::all()
+            .and_address(pools.clone())?
+            .and_topic0([AAVE_WITHDRAW.to_string()])?
+            .and_topic2(w.clone())?,
+    );
+    f.push(
+        LogFilter::all()
+            .and_address(vaults.clone())?
+            .and_topic0([DEPOSIT_4626.to_string()])?
+            .and_topic2(w.clone())?,
+    );
+    f.push(
+        LogFilter::all()
+            .and_address(vaults.clone())?
+            .and_topic0([WITHDRAW_4626.to_string()])?
+            .and_topic3(w.clone())?,
+    );
+    if !cfg.treasury.is_empty() {
+        f.push(
+            LogFilter::all()
+                .and_address([cfg.usdc.as_str()])?
+                .and_topic0([TRANSFER.to_string()])?
+                .and_topic1(w)?
+                .and_topic2(topics(&[cfg.treasury.clone()].into()))?,
+        );
+    }
+    Ok(f)
 }
 
 impl Source {
@@ -48,31 +103,7 @@ impl Source {
         Ok(Source(Client::builder().url(url).api_token(token).build()?))
     }
 
-    pub async fn fetch(
-        &self,
-        from: u64,
-        factory: &str,
-        baskets: &BTreeSet<String>,
-        markets: &BTreeSet<String>,
-    ) -> Result<Page> {
-        let mut filters = vec![LogFilter::all()
-            .and_address([factory])?
-            .and_topic0(hexes(&TOPICS_FACTORY))?];
-        // an empty address list would match every contract, so skip the filter instead
-        if !baskets.is_empty() {
-            filters.push(
-                LogFilter::all()
-                    .and_address(baskets.iter().map(String::as_str))?
-                    .and_topic0(hexes(&TOPICS_BASKET))?,
-            );
-        }
-        if !markets.is_empty() {
-            filters.push(
-                LogFilter::all()
-                    .and_address(markets.iter().map(String::as_str))?
-                    .and_topic0(hexes(&[TOPIC_TRADES]))?,
-            );
-        }
+    pub async fn fetch(&self, from: u64, filters: Vec<LogFilter>) -> Result<Page> {
         let mut q = Query::new()
             .from_block(from)
             .select_log_fields([
@@ -86,10 +117,32 @@ impl Source {
                 LogField::Topic3,
                 LogField::Data,
             ])
-            .select_block_fields([BlockField::Number, BlockField::Timestamp])
-            .select_transaction_fields([TransactionField::Hash, TransactionField::From]);
+            .select_block_fields([BlockField::Number, BlockField::Timestamp]);
         q.logs = filters.into_iter().map(Into::into).collect();
-        let r = self.0.get(&q).await?;
+        let r = loop {
+            match self.0.get_with_rate_limit(&q).await? {
+                RateLimitResponse::Success {
+                    response,
+                    rate_limit,
+                } => {
+                    // remaining is budget units; cost = units per request
+                    if rate_limit
+                        .remaining
+                        .is_some_and(|r| r / rate_limit.cost.unwrap_or(1).max(1) <= RESERVE)
+                    {
+                        let secs = rate_limit.reset_secs.unwrap_or(5);
+                        eprintln!("hypersync budget low ({rate_limit}), pausing {secs}s");
+                        tokio::time::sleep(Duration::from_secs(secs)).await;
+                    }
+                    break response;
+                }
+                RateLimitResponse::RateLimited(info) => {
+                    let secs = info.suggested_wait_secs().unwrap_or(5) + 1;
+                    eprintln!("hypersync 429 ({info}), retry in {secs}s");
+                    tokio::time::sleep(Duration::from_secs(secs)).await;
+                }
+            }
+        };
 
         let mut ts = HashMap::new();
         for b in r.data.blocks.iter().flatten() {
@@ -99,18 +152,15 @@ impl Source {
                 t.iter().fold(0i64, |a, x| a << 8 | *x as i64),
             );
         }
-        let from = senders(r.data.transactions.iter().flatten());
         let mut logs = Vec::new();
         for l in r.data.logs.into_iter().flatten() {
             let block: u64 = l.block_number.context("log block")?.into();
-            let tx_hash = l.transaction_hash.context("tx hash")?.encode_hex();
             logs.push(RawLog {
                 block,
-                from: from.get(&tx_hash).cloned(),
                 ts: *ts
                     .get(&block)
                     .with_context(|| format!("no header for block {block}"))?,
-                tx_hash,
+                tx_hash: l.transaction_hash.context("tx hash")?.encode_hex(),
                 log_index: u64::from(l.log_index.context("log index")?) as i32,
                 address: Address::from_slice(l.address.context("address")?.as_ref()),
                 topics: l
@@ -133,18 +183,12 @@ impl Source {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
-    fn senders_lowercase_by_hash() {
-        let h = "0x0101010101010101010101010101010101010101010101010101010101010101";
-        let tx = Transaction {
-            hash: Some(Hex::decode_hex(h).unwrap()),
-            from: Some(Hex::decode_hex("0x6A8846D4C910911181A73CAE3910CC981354EF74").unwrap()),
-            ..Default::default()
-        };
-        let m = senders([&tx, &Transaction::default()]);
-        assert_eq!(m.len(), 1);
-        assert_eq!(m[h], "0x6a8846d4c910911181a73cae3910cc981354ef74");
+    fn wallet_topic_is_left_padded() {
+        let t = super::topics(&["0x52efc37fd2e56f61eb035978c9c4eed3864e4fca".to_string()].into());
+        assert_eq!(
+            t,
+            ["0x00000000000000000000000052efc37fd2e56f61eb035978c9c4eed3864e4fca"]
+        );
     }
 }

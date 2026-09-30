@@ -1,6 +1,6 @@
-use crate::decode::Event;
+use crate::decode::Venue;
 use anyhow::Result;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use tokio_postgres::{Client, NoTls};
 
 pub struct Row {
@@ -8,8 +8,36 @@ pub struct Row {
     pub log_index: i32,
     pub block: i64,
     pub ts: i64,
-    pub from: Option<String>,
-    pub event: Event,
+    /// Emitting contract.
+    pub contract: String,
+    pub rec: Rec,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Rec {
+    Trade {
+        role: &'static str,
+        wallet: String,
+        side: &'static str,
+        order_id: i64,
+        price: String,
+        size: String,
+        updated_size: String,
+    },
+    Order {
+        order_id: i64,
+        wallet: String,
+        kind: &'static str,
+        side: Option<&'static str>,
+        price: Option<String>,
+        size: Option<String>,
+    },
+    PerplAccount {
+        id: String,
+        wallet: String,
+    },
+    /// `account` already resolved to the wallet.
+    Venue(Venue),
 }
 
 pub async fn connect(url: &str) -> Result<Client> {
@@ -29,88 +57,92 @@ pub async fn cursor(db: &Client, name: &str) -> Result<Option<u64>> {
     Ok(r.map(|r| r.get::<_, i64>(0) as u64))
 }
 
-pub async fn known(db: &Client) -> Result<(BTreeSet<String>, BTreeSet<String>)> {
-    let col = |rows: Vec<tokio_postgres::Row>| rows.iter().map(|r| r.get(0)).collect();
-    Ok((
-        col(db.query("select address from baskets", &[]).await?),
-        col(db.query("select market from market_allowlist", &[]).await?),
-    ))
+/// Our users' wallets. A wallet not yet in `indexed_wallets` rewinds `name` to startBlock so its
+/// history is picked up; replays are idempotent.
+// ponytail: full rescan per new wallet; per-wallet backfill cursor if startBlock drifts far behind head.
+pub async fn sync_wallets(db: &mut Client, name: &str) -> Result<BTreeSet<String>> {
+    let tx = db.transaction().await?;
+    let added = tx
+        .execute(
+            "insert into indexed_wallets (name, wallet) select distinct $1, lower(wallet_address) from delegations on conflict do nothing",
+            &[&name],
+        )
+        .await?;
+    if added > 0 {
+        tx.execute("delete from indexer_cursor where name = $1", &[&name])
+            .await?;
+    }
+    let rows = tx
+        .query(
+            "select wallet from indexed_wallets where name = $1",
+            &[&name],
+        )
+        .await?;
+    tx.commit().await?;
+    Ok(rows.iter().map(|r| r.get(0)).collect())
 }
 
-/// Rewinds `name` to startBlock while any basket lacks a creator; re-processing is idempotent and fills it.
-pub async fn backfill_creators(db: &Client, name: &str) -> Result<()> {
-    db.execute(
-        "delete from indexer_cursor where name = $1 and exists (select 1 from baskets where creator is null)",
-        &[&name],
-    )
-    .await?;
-    Ok(())
+pub async fn perpl_accounts(db: &Client) -> Result<HashMap<String, String>> {
+    let rows = db
+        .query("select account_id::text, wallet from perpl_accounts", &[])
+        .await?;
+    Ok(rows.iter().map(|r| (r.get(0), r.get(1))).collect())
 }
 
-/// Writes rows (in chain order) and advances the cursor atomically.
+/// Writes rows and advances the cursor atomically.
 pub async fn write(db: &mut Client, name: &str, rows: &[Row], cursor: u64) -> Result<()> {
     let tx = db.transaction().await?;
     for r in rows {
-        let (h, i, b, ts) = (&r.tx_hash, &r.log_index, &r.block, &r.ts);
-        match &r.event {
-            Event::MarketAllowed { market, allowed } => {
-                tx.execute(
-                    "insert into market_allowlist (market, allowed, updated_block) values ($1, $2, $3)
-                     on conflict (market) do update set allowed = excluded.allowed, updated_block = excluded.updated_block
-                     where market_allowlist.updated_block <= excluded.updated_block",
-                    &[market, allowed, b],
-                )
-                .await?;
-            }
-            Event::BasketCreated {
-                basket,
-                name,
-                symbol,
-                components,
+        let (h, i, b, ts, c) = (&r.tx_hash, &r.log_index, &r.block, &r.ts, &r.contract);
+        match &r.rec {
+            Rec::Trade {
+                role,
+                wallet,
+                side,
+                order_id,
+                price,
+                size,
+                updated_size,
             } => {
                 tx.execute(
-                    "insert into baskets (address, name, symbol, components, created_block, created_tx, creator)
-                     values ($1, $2, $3, $4, $5, $6, $7)
-                     on conflict (address) do update set creator = coalesce(excluded.creator, baskets.creator)",
-                    &[basket, name, symbol, components, b, h, &r.from],
+                    "insert into user_trades (tx_hash, log_index, role, market, wallet, side, order_id, price, size, updated_size, block, ts)
+                     values ($1, $2, $3, $4, $5, $6, $7, $8::text::numeric, $9::text::numeric, $10::text::numeric, $11, to_timestamp($12::bigint))
+                     on conflict do nothing",
+                    &[h, i, role, c, wallet, side, order_id, price, size, updated_size, b, ts],
                 )
                 .await?;
             }
-            Event::Minted {
-                basket,
-                account,
-                usdc,
-                shares,
+            Rec::Order {
+                order_id,
+                wallet,
+                kind,
+                side,
+                price,
+                size,
             } => {
                 tx.execute(
-                    "insert into mints (tx_hash, log_index, basket, account, usdc, shares, block, ts)
-                     values ($1, $2, $3, $4, $5::text::numeric, $6::text::numeric, $7, to_timestamp($8::bigint)) on conflict do nothing",
-                    &[h, i, basket, account, usdc, shares, b, ts],
+                    "insert into user_orders_events (tx_hash, log_index, order_id, market, wallet, kind, side, price, size, block, ts)
+                     values ($1, $2, $3, $4, $5, $6, $7, $8::text::numeric, $9::text::numeric, $10, to_timestamp($11::bigint))
+                     on conflict do nothing",
+                    &[h, i, order_id, c, wallet, kind, side, price, size, b, ts],
                 )
                 .await?;
             }
-            Event::Redeemed {
-                basket,
-                account,
-                shares,
-                usdc,
-            } => {
+            Rec::PerplAccount { id, wallet } => {
                 tx.execute(
-                    "insert into redeems (tx_hash, log_index, basket, account, shares, usdc, block, ts)
-                     values ($1, $2, $3, $4, $5::text::numeric, $6::text::numeric, $7, to_timestamp($8::bigint)) on conflict do nothing",
-                    &[h, i, basket, account, shares, usdc, b, ts],
+                    "insert into perpl_accounts (account_id, wallet) values ($1::text::numeric, $2) on conflict do nothing",
+                    &[id, wallet],
                 )
                 .await?;
             }
-            Event::Trades { market, trades } => {
-                for (idx, t) in trades.iter().enumerate() {
-                    tx.execute(
-                        "insert into kuru_trades (tx_hash, log_index, idx, market, price, size, side, block, ts)
-                         values ($1, $2, $3, $4, $5::text::numeric, $6::text::numeric, $7, $8, to_timestamp($9::bigint)) on conflict do nothing",
-                        &[h, i, &(idx as i32), market, &t.price.to_string(), &t.size.to_string(), &t.side, b, ts],
-                    )
-                    .await?;
-                }
+            Rec::Venue(v) => {
+                tx.execute(
+                    "insert into venue_events (tx_hash, log_index, venue, contract, kind, wallet, asset, amount, shares, extra, block, ts)
+                     values ($1, $2, $3, $4, $5, $6, $7, $8::text::numeric, $9::text::numeric, $10, $11, to_timestamp($12::bigint))
+                     on conflict do nothing",
+                    &[h, i, &v.venue, c, &v.kind, &v.account, &v.asset, &v.amount, &v.shares, &v.extra, b, ts],
+                )
+                .await?;
             }
         }
     }

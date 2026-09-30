@@ -134,7 +134,7 @@ services:
     ports: ["8085:8085"]
     depends_on: *deps
     environment:
-      <<: *base-env
+      <<: *mainnet-env
       DATABASE_URL: *db
       ENVIO_API_TOKEN: ${ENVIO_API_TOKEN}
 

@@ -420,7 +420,7 @@ func (p *Planner) WithdrawBps(ctx context.Context, s Strategy, legs []LegState, 
 
 // ResizeBasis changes the Perpl hedge of a basis leg without touching spot (liquidation guard / re-hedge).
 // Perpl margin is isolated (fork-verified): deposits and closed shares land in the free account balance, so collateral only
-// reaches the position through perpl.addMargin.
+// reaches the position through perpl.order kind addMargin.
 // lotDelta: perp lot units, < 0 reduces the short, > 0 adds to it (at the source leverage). collateralDelta: > 0 USDC atoms
 // swapped to AUSD, deposited and added as position margin; < 0 AUSD atoms of free balance withdrawn back to USDC.
 // margin: extra free-balance AUSD atoms (e.g. released by the close) moved into the position at the end. Plan.Legs = the updated leg.

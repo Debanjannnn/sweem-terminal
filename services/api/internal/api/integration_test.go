@@ -5,6 +5,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +16,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/shopspring/decimal"
+	"github.com/snehendu098/sweem-terminal/internal/planner"
 )
 
 // testDB applies every migration into a throwaway schema and returns a pool pinned to it.
@@ -52,36 +55,71 @@ func testDB(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
+// fake market-data: fakeQ prices over the real quote route shape, plus rates.
+func fakeMarketData(t *testing.T) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/rates" {
+			w.Write([]byte(`{"ts":1,"rates":[{"source":"lending","venue":"aave","asset":"USDC","address":"0x69a5f9ad4f96ebf0a0c792dd42a01cc5c0102fef","apy":"0.039","kind":"supply","ts":1}],"funding":[],"stale":false}`))
+			return
+		}
+		ob := strings.TrimPrefix(r.URL.Path, "/api/v1/quote/")
+		q := r.URL.Query()
+		var slip int
+		fmt.Sscan(q.Get("slippageBps"), &slip)
+		res, _ := fakeQ{}.Quote(r.Context(), ob, q.Get("side"), mustDec(q.Get("amount")), slip)
+		json.NewEncoder(w).Encode(res)
+	}))
+}
+
+// fake executor: accepts only the api caller, confirms every step in the DB like the real one.
+func fakeExecutor(t *testing.T, db *pgxpool.Pool) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct{ ExecutionID string }
+		json.NewDecoder(r.Body).Decode(&req)
+		if r.URL.Path != "/api/v1/user/steps" || r.Header.Get("X-Caller") != "api" || r.Header.Get("X-Internal-Secret") != "s" {
+			w.WriteHeader(403)
+			return
+		}
+		hash := "0x" + strings.Repeat("ab", 32)
+		var n int
+		if err := db.QueryRow(r.Context(), `update executions set status='confirmed', step_done=jsonb_array_length(steps),
+  tx_hashes=array[$2], tx_hash=$2 where id=$1 and status='pending' returning step_done`, req.ExecutionID, hash).Scan(&n); err != nil {
+			w.WriteHeader(409)
+			w.Write([]byte(`{"error":"not_pending"}`))
+			return
+		}
+		json.NewEncoder(w).Encode(planner.Outcome{ExecutionID: req.ExecutionID, Status: "confirmed", StepsDone: n, TxHashes: []string{hash}})
+	}))
+}
+
 func TestFlow(t *testing.T) {
 	ctx := context.Background()
 	db := testDB(t)
-	const (
-		b1     = "0x00000000000000000000000000000000000000a1"
-		b2     = "0x00000000000000000000000000000000000000a2"
-		wallet = "0x00000000000000000000000000000000000000bb"
-	)
-	seed := `
-insert into baskets values ('` + b1 + `','Blue','BLU','[{"market":"0xm","token":"0xt","weightBps":10000}]',10,'0xc1','` + wallet + `'),
-                           ('` + b2 + `','Red','RED','[]',11,'0xc2',null);
-insert into mints values ('0x1',0,'` + b1 + `','` + wallet + `',10000000,10000000000000000000,100,now()-interval '3 min'),
-                         ('0x2',0,'` + b1 + `','` + wallet + `',5000000,5000000000000000000,101,now()-interval '2 min'),
-                         ('0x3',0,'` + b1 + `','0xother',1000000,1000000000000000000,101,now()-interval '2 min'),
-                         ('0x4',0,'` + b2 + `','` + wallet + `',1000000,1000000000000000000,102,now()-interval '2 min');
-insert into redeems values ('0x5',0,'` + b1 + `','` + wallet + `',3000000000000000000,3100000,103,now()-interval '1 min'),
-                           ('0x6',0,'` + b2 + `','` + wallet + `',1000000000000000000,990000,104,now()-interval '1 min');
-insert into nav_points values ('` + b1 + `',now()-interval '2 min',1.0,16,16),('` + b1 + `',now()-interval '1 min',1.25,15,12);`
-	if _, err := db.Exec(ctx, seed); err != nil {
-		t.Fatal(err)
-	}
+	md, ex := fakeMarketData(t), fakeExecutor(t, db)
+	defer md.Close()
+	defer ex.Close()
+	var histReq []byte
+	hist := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		histReq = make([]byte, r.ContentLength)
+		r.Body.Read(histReq)
+		w.Write([]byte(`{"from":"2025-10-01","to":"2026-09-29","days":364,"apyUsd":"0.041000","apyAsset":"0.041000","maxDrawdownUsd":"0.000000","finalUsd":"1041.000000","hodl":{"apyUsd":"0.000000"},"curve":[]}`))
+	}))
+	defer hist.Close()
 
+	srv := &Server{Store: PG{DB: db}, Auth: fakeAuth{}, Privy: fakePrivy{}, QuorumID: "q1",
+		Plan:  &planner.Planner{Dep: testDep(t), Q: planner.MarketData{URL: md.URL, HTTP: md.Client()}, MaxStepUSD: 1000},
+		Exec:  planner.Executor{URL: ex.URL, Secret: "s", Caller: "api", HTTP: ex.Client()},
+		Chain: fakeChain{7_000_000_000_000_000}, Rates: planner.MarketData{URL: md.URL, HTTP: md.Client()},
+		History: History{URL: hist.URL, HTTP: hist.Client()}}
 	mux := http.NewServeMux()
-	(&Server{Store: PG{DB: db}, Auth: fakeAuth{}, Privy: fakePrivy{}, QuorumID: "q1"}).Routes(mux)
+	srv.Routes(mux)
 	call := func(method, path, body string, wantCode int, out any) {
 		t.Helper()
 		req := httptest.NewRequest(method, path, strings.NewReader(body))
 		req.Header.Set("Authorization", "Bearer good")
 		w := httptest.NewRecorder()
 		mux.ServeHTTP(w, req)
+		srv.bg.Wait()
 		if w.Code != wantCode {
 			t.Fatalf("%s %s: %d %s", method, path, w.Code, w.Body)
 		}
@@ -91,102 +129,122 @@ insert into nav_points values ('` + b1 + `',now()-interval '2 min',1.0,16,16),('
 			}
 		}
 	}
+	const wallet = "0x00000000000000000000000000000000000000bb"
 
-	var baskets []Basket
-	call("GET", "/api/v1/baskets", "", 200, &baskets)
-	if len(baskets) != 2 || baskets[0].Nav == nil || baskets[0].Nav.NavPerShare != "1.25" || baskets[1].Nav != nil {
-		t.Fatalf("baskets: %+v", baskets)
+	var b Basket
+	call("POST", "/api/v1/me/baskets", `{"name":"Blue","legs":[{"market":"WETH","weightBps":6000},{"market":"cbBTC","weightBps":4000}],"public":true}`, 201, &b)
+	call("POST", "/api/v1/me/baskets/"+b.ID, `{"name":"Blue2","legs":[{"market":"WETH","weightBps":10000}],"public":true}`, 200, &b)
+	var bs []Basket
+	call("GET", "/api/v1/baskets", "", 200, &bs)
+	if len(bs) != 1 || bs[0].Name != "Blue2" || len(bs[0].Legs) != 1 {
+		t.Fatalf("public baskets: %+v", bs)
 	}
-	if baskets[0].Creator == nil || *baskets[0].Creator != wallet || baskets[1].Creator != nil {
-		t.Fatalf("creators: %+v", baskets)
-	}
-	call("GET", "/api/v1/baskets?creator=0x00000000000000000000000000000000000000BB", "", 200, &baskets)
-	if len(baskets) != 1 || baskets[0].Address != b1 {
-		t.Fatalf("by creator: %+v", baskets)
-	}
-	call("GET", "/api/v1/baskets?creator=nope", "", 400, nil)
-	var bd Basket
-	call("GET", "/api/v1/baskets/0x00000000000000000000000000000000000000A1", "", 200, &bd)
-	if s := bd.Stats; s == nil || s.Mints != 3 || s.Redeems != 1 || s.UsdcInRaw != "16000000" || s.SharesRaw != "13000000000000000000" || s.Holders != 2 {
-		t.Fatalf("stats: %+v", bd.Stats)
-	}
-	if bd.Creator == nil || *bd.Creator != wallet {
-		t.Fatalf("detail creator: %+v", bd.Creator)
-	}
-	call("GET", "/api/v1/baskets/0xnope", "", 404, nil)
-	var nav []NavPoint
-	call("GET", "/api/v1/baskets/"+b1+"/nav/history", "", 200, &nav)
-	if len(nav) != 2 || nav[1].NavPerShare != "1.25" {
-		t.Fatalf("nav: %+v", nav)
-	}
-	call("GET", "/api/v1/baskets/"+b1+"/nav/history?from=bad", "", 400, nil)
+	call("POST", "/api/v1/me/baskets/"+b.ID+"/buy", `{"amountUsdc":"40"}`, 409, nil) // no delegation yet
+	call("POST", "/api/v1/me/delegation", `{"walletId":"w1","walletAddress":"`+wallet+`"}`, 200, nil)
 
-	var u User
-	call("GET", "/api/v1/me", "", 200, &u)
-	if u.ID != "did:privy:u1" || u.Delegation != nil || u.WalletAddress != nil {
-		t.Fatalf("me: %+v", u)
+	var acc struct {
+		ExecutionID string         `json:"executionId"`
+		Steps       []planner.Step `json:"steps"`
+		PositionID  string         `json:"positionId"`
+		OrderID     string         `json:"orderId"`
 	}
+	call("POST", "/api/v1/me/baskets/"+b.ID+"/buy", `{"amountUsdc":"40","slippageBps":0}`, 202, &acc)
+	var e Execution
+	call("GET", "/api/v1/me/executions/"+acc.ExecutionID, "", 200, &e)
+	if e.Status != "confirmed" || e.StepsTotal != 1 || e.StepDone != 1 || e.BasketID == nil || *e.BasketID != b.ID || e.Kind != "basket_buy" {
+		t.Fatalf("basket buy execution: %+v", e)
+	}
+	var h struct {
+		Tokens  []TokenBalance  `json:"tokens"`
+		Baskets []BasketHolding `json:"baskets"`
+	}
+	call("GET", "/api/v1/me/holdings", "", 200, &h)
+	if len(h.Tokens) != 9 || len(h.Baskets) != 1 || h.Baskets[0].Legs[0].Raw != "10000000000000000" || h.Baskets[0].Legs[0].Amount != "0.01" {
+		t.Fatalf("holdings: %+v", h)
+	}
+	call("POST", "/api/v1/me/baskets/"+b.ID+"/sell", `{"bps":5000,"slippageBps":0}`, 202, &acc)
+	if len(acc.Steps) != 1 || acc.Steps[0].Size != "5000000000000000" {
+		t.Fatalf("basket sell: %+v", acc.Steps)
+	}
+
+	// strategy: create (backtest stored), explore with apy, deploy, withdraw
+	var st Strategy
+	call("POST", "/api/v1/strategies", `{"name":"Safe USDC","asset":"USDC","sources":[{"kind":"lending","venue":"aave","weightBps":10000}],"rules":{"driftBps":300}}`, 201, &st)
+	if !strings.Contains(string(st.Backtest), `"apyUsd":"0.041000"`) || !strings.Contains(string(histReq), `"venue":"aave-v3"`) {
+		t.Fatalf("backtest: %s / req %s", st.Backtest, histReq)
+	}
+	var list []Strategy
+	call("GET", "/api/v1/strategies", "", 200, &list)
+	if len(list) != 1 || list[0].APY == nil || list[0].APY.Estimate != "0.039000" || list[0].Rules.DriftBps != 300 || list[0].CreatorWallet == nil {
+		t.Fatalf("strategies: %+v", list)
+	}
+	srv.Plan.Dep.Treasury = ""
+	call("POST", "/api/v1/me/strategies/"+st.ID+"/deploy", `{"amountUsdc":"100"}`, 422, nil)
+	srv.Plan.Dep.Treasury = "0x7777777777777777777777777777777777777777"
+	call("POST", "/api/v1/me/strategies/"+st.ID+"/deploy", `{"amountUsdc":"100"}`, 202, &acc)
 	var pos []Position
 	call("GET", "/api/v1/me/positions", "", 200, &pos)
-	if len(pos) != 0 {
-		t.Fatalf("positions before wallet known: %+v", pos)
-	}
-
-	sched := `{"basket":"` + b1 + `","kind":"recurring","amountUsdc":"10","intervalSeconds":3600,"maxSlippageBps":50,"maxPerRunUsdc":"12.5"}`
-	call("POST", "/api/v1/me/schedules", sched, 409, nil)
-
-	del := `{"walletId":"w1","walletAddress":"0x00000000000000000000000000000000000000BB"}`
-	call("POST", "/api/v1/me/delegation", del, 200, nil)
-	var d2 Delegation
-	call("POST", "/api/v1/me/delegation", strings.Replace(del, "w1", "w2", 1), 200, &d2)
-	var active int
-	db.QueryRow(ctx, `select count(*) from delegations where user_id='did:privy:u1' and active`).Scan(&active)
-	call("GET", "/api/v1/me", "", 200, &u)
-	if active != 1 || u.Delegation == nil || u.Delegation.ID != d2.ID || u.Delegation.WalletID != "w2" || *u.WalletAddress != wallet {
-		t.Fatalf("delegation: active=%d %+v", active, u)
-	}
-
-	call("GET", "/api/v1/me/positions", "", 200, &pos)
-	if len(pos) != 1 || pos[0].Basket != b1 || pos[0].SharesRaw != "12000000000000000000" || *pos[0].ValueUSDC != "15.000000" {
+	if len(pos) != 1 || pos[0].Status != "open" || pos[0].PrincipalUSDC != "100" || pos[0].Legs[0].Asset != "99600000" {
 		t.Fatalf("positions: %+v", pos)
 	}
-	var hist []Transfer
-	call("GET", "/api/v1/me/history", "", 200, &hist)
-	if len(hist) != 5 || hist[0].Kind != "redeem" || hist[0].Block != 104 {
-		t.Fatalf("history: %+v", hist)
+	var fee, owed string
+	db.QueryRow(ctx, `select fee_usdc::text, creator_owed_usdc::text from fee_ledger where execution_id=$1`, acc.ExecutionID).Scan(&fee, &owed)
+	if fee != "0.4" || owed != "0" {
+		t.Fatalf("fee ledger: %s %s", fee, owed)
 	}
+	call("POST", "/api/v1/me/positions/"+pos[0].ID+"/withdraw", ``, 202, &acc)
+	if acc.Steps[0].Action != "lend.withdraw" || acc.Steps[0].Amount != "7000000000000000" {
+		t.Fatalf("withdraw steps: %+v", acc.Steps)
+	}
+	call("GET", "/api/v1/me/positions", "", 200, &pos)
+	if pos[0].Status != "closed" || pos[0].ClosedAt == nil {
+		t.Fatalf("after withdraw: %+v", pos[0])
+	}
+	call("POST", "/api/v1/me/positions/"+pos[0].ID+"/withdraw", ``, 409, nil)
 
-	var rs, ss Schedule
-	call("POST", "/api/v1/me/schedules", sched, 201, &rs)
-	call("POST", "/api/v1/me/schedules", `{"basket":"`+b1+`","kind":"stop_loss","stopNavPerShare":"0.9","redeemBps":5000,"maxSlippageBps":100,"maxPerRunUsdc":"1000"}`, 201, &ss)
-	call("POST", "/api/v1/me/schedules", strings.Replace(sched, b1, "0x00000000000000000000000000000000000000ff", 1), 404, nil)
-	if rs.NextRunAt == nil || *rs.AmountUSDC != "10" || rs.MaxPerRunUSDC != "12.5" || ss.NextRunAt != nil || *ss.StopNavPerShare != "0.9" || *ss.RedeemBps != 5000 {
-		t.Fatalf("created: %+v %+v", rs, ss)
-	}
-	var list []Schedule
-	call("GET", "/api/v1/me/schedules", "", 200, &list)
-	if len(list) != 2 {
-		t.Fatalf("schedules: %+v", list)
-	}
-
-	if _, err := db.Exec(ctx, `insert into executions(schedule_id,slot,kind,amount,min_out) values ($1,1,'mint',10000000,9900000000000000000)`, rs.ID); err != nil {
+	// limit order: id resolved from the indexer's OrderCreated row for the placing tx
+	call("POST", "/api/v1/me/orders", `{"market":"WETH","side":"buy","price":"3600","size":"0.01","fund":true}`, 202, &acc)
+	if _, err := db.Exec(ctx, `insert into user_orders_events values ($1,3,777,'weth',$2,'created','buy',36000000,100000000,1,now())`, "0x"+strings.Repeat("ab", 32), wallet); err != nil {
 		t.Fatal(err)
 	}
-	var ex []Execution
-	call("GET", "/api/v1/me/executions", "", 200, &ex)
-	if len(ex) != 1 || ex[0].Status != "pending" || *ex[0].AmountRaw != "10000000" || *ex[0].MinOutRaw != "9900000000000000000" || ex[0].Basket != b1 {
-		t.Fatalf("executions: %+v", ex)
+	var orders []Order
+	call("GET", "/api/v1/me/orders", "", 200, &orders)
+	if len(orders) != 1 || orders[0].Status != "open" || orders[0].KuruOrderID == nil || *orders[0].KuruOrderID != "777" || orders[0].Price != "3600" || orders[0].Size != "0.01" {
+		t.Fatalf("orders: %+v", orders)
+	}
+	call("DELETE", "/api/v1/me/orders/"+acc.OrderID, "", 202, &acc)
+	call("GET", "/api/v1/me/orders", "", 200, &orders)
+	if orders[0].Status != "cancelled" {
+		t.Fatalf("after cancel: %+v", orders[0])
 	}
 
-	call("DELETE", "/api/v1/me/schedules/"+rs.ID, "", 200, nil)
-	call("DELETE", "/api/v1/me/schedules/"+uuid.NewString(), "", 404, nil)
-	call("DELETE", "/api/v1/me/delegation", "", 200, nil)
-	call("DELETE", "/api/v1/me/delegation", "", 404, nil)
-	var stillActive int
-	db.QueryRow(ctx, `select count(*) from schedules where active`).Scan(&stillActive)
-	call("GET", "/api/v1/me", "", 200, &u)
-	if stillActive != 0 || u.Delegation != nil {
-		t.Fatalf("after revoke: active schedules=%d delegation=%+v", stillActive, u.Delegation)
+	var sc Schedule
+	call("POST", "/api/v1/me/schedules", `{"kind":"rebalance","target":{"type":"basket","id":"`+b.ID+`"},"intervalSeconds":3600,"driftBps":500,"maxSlippageBps":50,"maxPerRunUsdc":"100"}`, 201, &sc)
+	call("POST", "/api/v1/me/schedules", `{"kind":"stop_loss","target":{"type":"market","id":"WETH"},"triggerPrice":"3000","sellBps":10000,"maxSlippageBps":50,"maxPerRunUsdc":"100"}`, 201, nil)
+	call("POST", "/api/v1/me/schedules", `{"kind":"rebalance","target":{"type":"position","id":"`+uuid.NewString()+`"},"intervalSeconds":3600,"maxSlippageBps":50,"maxPerRunUsdc":"100"}`, 404, nil)
+	var scs []Schedule
+	call("GET", "/api/v1/me/schedules", "", 200, &scs)
+	if len(scs) != 2 || sc.NextRunAt == nil || *sc.DriftBps != 500 || sc.Target.ID != b.ID {
+		t.Fatalf("schedules: %+v %+v", sc, scs)
 	}
-	call("POST", "/api/v1/me/schedules", sched, 409, nil)
+	var exs []Execution
+	call("GET", "/api/v1/me/executions", "", 200, &exs)
+	if len(exs) != 6 {
+		t.Fatalf("executions: %d", len(exs))
+	}
+
+	p := PG{DB: db}
+	has, err := p.HasPerplAccount(ctx, "did:privy:u1", wallet)
+	if err != nil || has {
+		t.Fatalf("perpl before: %v %v", has, err)
+	}
+	db.Exec(ctx, `insert into executions(user_id,slot,kind,status,step_done,steps) values ('did:privy:u1',0,'deploy','failed',2,
+  '[{"action":"fee.transfer","amount":"1"},{"action":"perpl.createAccount","amount":"1"},{"action":"perpl.order"}]')`)
+	if has, _ = p.HasPerplAccount(ctx, "did:privy:u1", wallet); !has {
+		t.Fatal("createAccount step confirmed but not seen")
+	}
+	call("DELETE", "/api/v1/me/delegation", "", 200, nil)
+	call("POST", "/api/v1/me/trade", `{"market":"WETH","side":"buy","amount":"10"}`, 409, nil)
 }
+
+func mustDec(s string) decimal.Decimal { return decimal.RequireFromString(s) }

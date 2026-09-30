@@ -1,0 +1,380 @@
+package api
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/shopspring/decimal"
+	"github.com/snehendu098/sweem-terminal/internal/httpx"
+	"github.com/snehendu098/sweem-terminal/internal/planner"
+	"github.com/snehendu098/sweem-terminal/internal/streams"
+)
+
+// History is the Backtester over the history service.
+type History struct {
+	URL  string
+	HTTP *http.Client
+}
+
+func (h History) Backtest(ctx context.Context, body []byte) (int, []byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.URL+"/api/v1/backtest", bytes.NewReader(body))
+	if err != nil {
+		return 0, nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	res, err := h.HTTP.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer res.Body.Close()
+	b, err := io.ReadAll(io.LimitReader(res.Body, 4<<20))
+	return res.StatusCode, b, err
+}
+
+type APYSource struct {
+	Kind  string  `json:"kind"`
+	Venue string  `json:"venue"`
+	APY   *string `json:"apy"`
+}
+
+type APY struct {
+	Estimate string      `json:"estimate"`
+	Sources  []APYSource `json:"sources"`
+}
+
+// liveAPY: Σ weight × current venue rate; basis earns short funding (7d) on the L/(L+1) spot notional. Missing rates count 0.
+func (s *Server) liveAPY(st planner.Strategy, r streams.RatesSnapshot) *APY {
+	out := &APY{Sources: []APYSource{}}
+	est := decimal.Zero
+	asset := st.Asset
+	for _, src := range st.Sources {
+		var apy *decimal.Decimal
+		for _, x := range r.Rates {
+			a := asset
+			if src.Kind == "lending" && asset == "MON" {
+				a = "WMON"
+			}
+			if x.Source == src.Kind && x.Venue == src.Venue && x.Asset == a {
+				v := x.Apy
+				apy = &v
+			}
+		}
+		if src.Kind == "basis" {
+			perpID := s.Plan.Dep.Perpl.PerpIds[map[string]string{"WETH": "ETH", "cbBTC": "BTC", "MON": "MON"}[asset]]
+			for _, f := range r.Funding {
+				if f.PerpID == perpID {
+					l, _ := decimal.NewFromString(src.Params.Leverage)
+					v := f.AprShort7d.Mul(l).Div(l.Add(decimal.NewFromInt(1)))
+					apy = &v
+				}
+			}
+		}
+		as := APYSource{Kind: src.Kind, Venue: src.Venue}
+		if apy != nil {
+			str := apy.StringFixed(6)
+			as.APY = &str
+			est = est.Add(apy.Mul(decimal.NewFromInt(int64(src.WeightBps))).Div(decimal.NewFromInt(10_000)))
+		}
+		out.Sources = append(out.Sources, as)
+	}
+	out.Estimate = est.StringFixed(6)
+	return out
+}
+
+func (s *Server) withAPY(ctx context.Context, xs []Strategy) {
+	r, err := s.Rates.Rates(ctx)
+	if err != nil {
+		slog.Warn("rates", "err", err)
+		return
+	}
+	for i := range xs {
+		xs[i].APY = s.liveAPY(xs[i].Strategy, r)
+	}
+}
+
+func (s *Server) strategies(w http.ResponseWriter, r *http.Request) {
+	v, err := s.Store.Strategies(r.Context(), r.URL.Query().Get("creator"), false)
+	if err == nil {
+		s.withAPY(r.Context(), v)
+	}
+	reply(w, "strategies", v, err)
+}
+
+func (s *Server) myStrategies(w http.ResponseWriter, r *http.Request) {
+	v, err := s.Store.Strategies(r.Context(), did(r), true)
+	if err == nil {
+		s.withAPY(r.Context(), v)
+	}
+	reply(w, "my strategies", v, err)
+}
+
+func (s *Server) strategy(w http.ResponseWriter, r *http.Request) {
+	if id, ok := id(w, r); ok {
+		v, err := s.Store.Strategy(r.Context(), id, did(r))
+		if err == nil {
+			xs := []Strategy{v}
+			s.withAPY(r.Context(), xs)
+			v = xs[0]
+		}
+		reply(w, "strategy", v, err)
+	}
+}
+
+type StrategyInput struct {
+	Name string `json:"name"`
+	planner.Strategy
+	Public *bool `json:"public"`
+}
+
+func (s *Server) createStrategy(w http.ResponseWriter, r *http.Request) {
+	var in StrategyInput
+	if !decode(w, r, &in) {
+		return
+	}
+	in.Name = strings.TrimSpace(in.Name)
+	if in.Name == "" || len(in.Name) > 64 {
+		httpx.Error(w, http.StatusBadRequest, "invalid_name")
+		return
+	}
+	if err := s.Plan.Validate(in.Strategy); err != nil {
+		fail(w, "validate strategy", err)
+		return
+	}
+	v, err := s.Store.CreateStrategy(r.Context(), did(r), in)
+	if err != nil {
+		fail(w, "create strategy", err)
+		return
+	}
+	// best effort: a strategy is listed without a backtest when history is down or lacks data
+	if status, _, sum, err := s.runBacktest(r.Context(), v, BacktestInput{}); err == nil && status == 200 {
+		v.Backtest = sum
+	}
+	httpx.JSON(w, http.StatusCreated, v)
+}
+
+type BacktestInput struct {
+	From   string `json:"from,omitempty"`
+	To     string `json:"to,omitempty"`
+	Amount string `json:"amount,omitempty"`
+}
+
+// historyLeg maps a source to history's backtest leg (venue ids differ: history uses DefiLlama project names).
+func (s *Server) historyLeg(src planner.Source) map[string]any {
+	leg := map[string]any{"kind": src.Kind, "venue": src.Venue, "weight": decimal.NewFromInt(int64(src.WeightBps)).Div(decimal.NewFromInt(10_000)).String()}
+	switch {
+	case src.Kind == "lp":
+		leg["venue"] = "kuru_activevault"
+	case src.Kind == "basis":
+		leg["venue"] = ""
+	case src.Venue == "aave":
+		leg["venue"] = "aave-v3"
+	case src.Kind == "lending" && src.Venue != "neverland":
+		for _, v := range s.Plan.Dep.Lending.ERC4626 {
+			if planner.Slug(v.Name) == src.Venue {
+				leg["venue"] = map[string]string{"euler": "euler-earn", "morpho": "morpho"}[v.Protocol]
+			}
+		}
+	}
+	return leg
+}
+
+// runBacktest calls history; on 200 it stores and returns the summary next to history's full response.
+func (s *Server) runBacktest(ctx context.Context, st Strategy, in BacktestInput) (status int, full []byte, summary json.RawMessage, err error) {
+	amount := in.Amount
+	if amount == "" {
+		amount = "1"
+		if st.Asset == "USDC" {
+			amount = "1000"
+		}
+	}
+	legs := []map[string]any{}
+	rules := map[string]any{}
+	for _, src := range st.Sources {
+		leg := s.historyLeg(src)
+		if src.Kind == "basis" {
+			leg["perpId"] = s.Plan.Dep.Perpl.PerpIds[map[string]string{"WETH": "ETH", "cbBTC": "BTC", "MON": "MON"}[st.Asset]]
+			rules["basisLeverage"] = src.Params.Leverage
+		}
+		legs = append(legs, leg)
+	}
+	if d := st.Rules.DriftBps; d > 0 {
+		rules["driftBps"] = fmt.Sprint(d)
+	}
+	if m := st.Rules.MinRebalanceSeconds; m > 0 {
+		rules["minIntervalDays"] = int(m / 86400)
+	}
+	if g := st.Rules.FundingGate; g != nil {
+		rules["fundingGate"] = map[string]any{"apr": g.APR, "lookbackDays": g.LookbackDays}
+	}
+	req := map[string]any{"asset": st.Asset, "amount": amount, "legs": legs, "rules": rules}
+	if in.From != "" {
+		req["from"] = in.From
+	}
+	if in.To != "" {
+		req["to"] = in.To
+	}
+	body, _ := json.Marshal(req)
+	status, full, err = s.History.Backtest(ctx, body)
+	if err != nil || status != 200 {
+		return status, full, nil, err
+	}
+	var res struct {
+		From, To                                   string
+		Days                                       int
+		ApyUsd, ApyAsset, MaxDrawdownUsd, FinalUsd string
+		Hodl                                       struct{ ApyUsd string }
+	}
+	if err := json.Unmarshal(full, &res); err != nil {
+		return 0, nil, nil, err
+	}
+	summary, _ = json.Marshal(map[string]any{"from": res.From, "to": res.To, "days": res.Days, "apyUsd": res.ApyUsd, "apyAsset": res.ApyAsset,
+		"maxDrawdownUsd": res.MaxDrawdownUsd, "finalUsd": res.FinalUsd, "hodlApyUsd": res.Hodl.ApyUsd, "ranAt": time.Now().UTC()})
+	if err := s.Store.SetBacktest(ctx, st.ID, summary); err != nil {
+		slog.Error("store backtest", "err", err)
+	}
+	return status, full, summary, nil
+}
+
+func (s *Server) backtest(w http.ResponseWriter, r *http.Request) {
+	sid, ok := id(w, r)
+	var in BacktestInput
+	if !ok || (r.ContentLength != 0 && !decode(w, r, &in)) {
+		return
+	}
+	st, err := s.Store.Strategy(r.Context(), sid, "")
+	if err != nil {
+		fail(w, "strategy", err)
+		return
+	}
+	status, full, _, err := s.runBacktest(r.Context(), st, in)
+	if err != nil {
+		slog.Error("history", "err", err)
+		httpx.Error(w, http.StatusBadGateway, "history_unavailable")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	w.Write(full)
+}
+
+func (s *Server) deploy(w http.ResponseWriter, r *http.Request) {
+	sid, ok := id(w, r)
+	var in struct {
+		AmountUsdc  string
+		SlippageBps *int
+	}
+	if !ok || !decode(w, r, &in) {
+		return
+	}
+	amt, oka := human(in.AmountUsdc)
+	sl, oks := slip(in.SlippageBps)
+	if !oka || !oks {
+		httpx.Error(w, http.StatusBadRequest, "bad_request")
+		return
+	}
+	ctx, me := r.Context(), did(r)
+	st, err := s.Store.Strategy(ctx, sid, me)
+	var wallet string
+	if err == nil {
+		wallet, err = s.Store.Wallet(ctx, me)
+	}
+	var perpl bool
+	if err == nil {
+		perpl, err = s.Store.HasPerplAccount(ctx, me, wallet)
+	}
+	if err != nil {
+		fail(w, "deploy", err)
+		return
+	}
+	atoms, _ := s.Plan.ToAtoms("USDC", amt)
+	plan, err := s.Plan.Deploy(ctx, st.Strategy, atoms, perpl, sl)
+	if err != nil {
+		fail(w, "plan deploy", err)
+		return
+	}
+	fee := decimal.RequireFromString(plan.FeeUSDC).Shift(-6)
+	owed := decimal.Zero
+	if st.Creator != me {
+		owed = fee.Mul(decimal.NewFromInt(planner.CreatorBps)).Div(decimal.NewFromInt(planner.FeeBps))
+	}
+	posID, execID, err := s.Store.OpenPosition(ctx, me, wallet, st, amt.String(), plan, fee.String(), owed.String())
+	if err != nil {
+		fail(w, "open position", err)
+		return
+	}
+	s.start(execID, s.settle(posID, "open", "failed"))
+	accepted(w, execID, "deploy", plan.Steps, map[string]any{"positionId": posID, "feeUsdc": fee.String()})
+}
+
+// settle moves a position to okStatus or failStatus once its execution ends.
+func (s *Server) settle(posID, okStatus, failStatus string) func(context.Context, bool) {
+	return func(ctx context.Context, ok bool) {
+		st := failStatus
+		if ok {
+			st = okStatus
+		}
+		if err := s.Store.SettlePosition(ctx, posID, st); err != nil {
+			slog.Error("settle position", "position", posID, "err", err)
+		}
+	}
+}
+
+func (s *Server) positions(w http.ResponseWriter, r *http.Request) {
+	v, err := s.Store.Positions(r.Context(), did(r))
+	reply(w, "positions", v, err)
+}
+
+func (s *Server) withdraw(w http.ResponseWriter, r *http.Request) {
+	pid, ok := id(w, r)
+	var in struct{ SlippageBps *int }
+	if !ok || (r.ContentLength != 0 && !decode(w, r, &in)) {
+		return
+	}
+	sl, oks := slip(in.SlippageBps)
+	if !oks {
+		httpx.Error(w, http.StatusBadRequest, "bad_request")
+		return
+	}
+	ctx, me := r.Context(), did(r)
+	pos, st, err := s.Store.Position(ctx, me, pid)
+	if err == nil && pos.Status != "open" {
+		err = ErrNotOpen
+	}
+	var peers []planner.Peer
+	if err == nil {
+		_, err = s.Store.Wallet(ctx, me)
+	}
+	if err == nil {
+		peers, err = s.Store.Peers(ctx, me, pid)
+	}
+	if err != nil {
+		fail(w, "withdraw", err)
+		return
+	}
+	bals, err := planner.Balances(ctx, s.Chain, s.Plan.Dep, pos.Wallet, st, pos.Legs, peers)
+	if err != nil {
+		slog.Error("balances", "err", err)
+		httpx.Error(w, http.StatusBadGateway, "rpc_unavailable")
+		return
+	}
+	plan, err := s.Plan.Withdraw(ctx, st, pos.Legs, bals, sl)
+	if err != nil {
+		fail(w, "plan withdraw", err)
+		return
+	}
+	execID, err := s.Store.StartWithdraw(ctx, me, pid, NewExec{Kind: "withdraw", Steps: plan.Steps, PositionID: &pid})
+	if err != nil {
+		fail(w, "start withdraw", err)
+		return
+	}
+	// ponytail: a failed unwind returns the position to open; partial unwinds are reconciled by re-reading balances on retry
+	s.start(execID, s.settle(pid, "closed", "open"))
+	accepted(w, execID, "withdraw", plan.Steps, map[string]any{"positionId": pid})
+}

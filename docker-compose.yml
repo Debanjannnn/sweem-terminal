@@ -84,6 +84,8 @@ services:
       DATABASE_URL: *db
       EXECUTOR_URL: http://executor:8083
       INTERNAL_SECRET: ${INTERNAL_SECRET}
+      MARKET_DATA_URL: http://market-data:8082
+      HISTORY_URL: http://history:8087
       PRIVY_APP_ID: ${PRIVY_APP_ID}
       PRIVY_KEY_QUORUM_ID: ${PRIVY_KEY_QUORUM_ID}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
@@ -93,7 +95,7 @@ services:
     ports: ["8084:8084"]
     depends_on: *deps
     environment:
-      <<: *base-env
+      <<: *mainnet-env
       DATABASE_URL: *db
       REDIS_URL: *redis
       INTERNAL_SECRET: ${INTERNAL_SECRET}

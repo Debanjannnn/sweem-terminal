@@ -23,7 +23,7 @@ type Tab = "market" | "limit" | "auto";
 export default function TradePage() {
   const market = marketOf(decodeURIComponent(useParams<{ symbol: string }>().symbol));
   const [range, setRange] = useState<Range>("1D");
-  const [mode, setMode] = useState<"line" | "candle">("line");
+  const [mode, setMode] = useState<"line" | "candle">("candle");
   const [tab, setTab] = useState<Tab>("market");
   const [key, setKey] = useState(0);
   const { book, stale, error: bookErr } = useBook(market?.orderbook);
@@ -47,7 +47,7 @@ export default function TradePage() {
   const t = market.token;
   const lastClose = Number(day24.candles.at(-1)?.c ?? chart.candles.at(-1)?.c ?? 0);
   const price = mid(book) ?? (lastClose || null);
-  const points = chart.candles.map((c) => ({ t: c.t, v: Number(c.c), o: Number(c.o), h: Number(c.h), l: Number(c.l) }));
+  const points = chart.candles.map((c) => ({ t: c.t, v: Number(c.c), o: Number(c.o), h: Number(c.h), l: Number(c.l), vol: Number(c.q) }));
   const hs = day24.candles.map((c) => Number(c.h));
   const ls = day24.candles.map((c) => Number(c.l));
   const vol = day24.candles.reduce((s, c) => s + Number(c.q), 0);
@@ -77,6 +77,7 @@ export default function TradePage() {
             loading={chart.loading}
             error={chart.error}
             caption={`${t.symbol} / USDC`}
+            dataKey={`${market.orderbook}:${range}`}
           />
 
           <Card title="Statistics">

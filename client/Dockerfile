@@ -21,26 +21,32 @@ COPY . .
 ARG NEXT_PUBLIC_PRIVY_APP_ID
 ARG NEXT_PUBLIC_PRIVY_SIGNER_ID
 ARG NEXT_PUBLIC_PRIVY_POLICY_ID
-ARG NEXT_PUBLIC_WALLET_URL=http://localhost:8080
-ARG NEXT_PUBLIC_MARKET_DATA_URL=http://localhost:8081
-ARG NEXT_PUBLIC_CHAIN=Base
+ARG NEXT_PUBLIC_CHAIN_ID=143
+ARG NEXT_PUBLIC_RPC_URL=https://rpc.monad.xyz
+ARG NEXT_PUBLIC_API_URL=http://localhost:8080
+ARG NEXT_PUBLIC_MARKET_DATA_URL=http://localhost:8082
+ARG NEXT_PUBLIC_MARKET_DATA_WS_URL=ws://localhost:8082/api/v1/ws
+ARG NEXT_PUBLIC_HISTORY_URL=http://localhost:8087
 ENV NEXT_PUBLIC_PRIVY_APP_ID=$NEXT_PUBLIC_PRIVY_APP_ID \
     NEXT_PUBLIC_PRIVY_SIGNER_ID=$NEXT_PUBLIC_PRIVY_SIGNER_ID \
     NEXT_PUBLIC_PRIVY_POLICY_ID=$NEXT_PUBLIC_PRIVY_POLICY_ID \
-    NEXT_PUBLIC_WALLET_URL=$NEXT_PUBLIC_WALLET_URL \
+    NEXT_PUBLIC_CHAIN_ID=$NEXT_PUBLIC_CHAIN_ID \
+    NEXT_PUBLIC_RPC_URL=$NEXT_PUBLIC_RPC_URL \
+    NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL \
     NEXT_PUBLIC_MARKET_DATA_URL=$NEXT_PUBLIC_MARKET_DATA_URL \
-    NEXT_PUBLIC_CHAIN=$NEXT_PUBLIC_CHAIN \
+    NEXT_PUBLIC_MARKET_DATA_WS_URL=$NEXT_PUBLIC_MARKET_DATA_WS_URL \
+    NEXT_PUBLIC_HISTORY_URL=$NEXT_PUBLIC_HISTORY_URL \
     NEXT_TELEMETRY_DISABLED=1
 RUN ./node_modules/.bin/next build && rm -rf .next/cache
 
 FROM node:22-bookworm-slim AS runner
 WORKDIR /app
 ENV NODE_ENV=production PORT=3000 NEXT_TELEMETRY_DISABLED=1
-# standalone output already contains the pruned node_modules it needs
-COPY --from=build /app/.next/standalone ./
-COPY --from=build /app/.next/static ./.next/static
+# no standalone output (next.config.ts targets Vercel): run `next start` on prod deps
+COPY --from=prod-deps /app/node_modules ./node_modules
+COPY --from=build /app/.next ./.next
 COPY --from=build /app/public ./public
 COPY package.json next.config.ts ./
 EXPOSE 3000
 USER node
-CMD ["node", "server.js"]
+CMD ["node", "node_modules/next/dist/bin/next", "start"]

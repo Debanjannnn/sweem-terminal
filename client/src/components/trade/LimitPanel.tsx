@@ -33,7 +33,7 @@ export function LimitPanel({ market, mid }: { market: MarketDef; mid: number | n
   const reason = !ready
     ? "Loading…"
     : !delegated
-      ? "Enable delegation to trade"
+      ? "Limit orders need automation enabled"
       : !DEC.test(price.trim()) || Number(price) <= 0
         ? "Enter a price"
         : !DEC.test(size.trim()) || Number(size) <= 0

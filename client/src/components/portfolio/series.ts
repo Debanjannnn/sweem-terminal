@@ -1,18 +1,27 @@
-export const RANGES = { "1D": 86400e3, "1W": 7 * 86400e3, "1M": 30 * 86400e3, "3M": 90 * 86400e3, "1Y": 365 * 86400e3, ALL: 730 * 86400e3 } as const;
+import type { Candle, Interval } from "@/lib/types";
+
+const D = 86400e3;
+export const RANGES = {
+  "1D": { ms: D, iv: "5m" },
+  "1W": { ms: 7 * D, iv: "1h" },
+  "1M": { ms: 30 * D, iv: "1h" },
+  ALL: { ms: null, iv: "1d" },
+} as const satisfies Record<string, { ms: number | null; iv: Interval }>;
 export type Range = keyof typeof RANGES;
 
-// Illustrative history: deterministic random walk per address+range, scaled so the last point equals `total`.
-export function dummySeries(address: string, range: Range, total: number, now: number, points = 160) {
-  let seed = 2166136261;
-  for (const c of address.toLowerCase() + range) seed = Math.imul(seed ^ c.charCodeAt(0), 16777619);
-  const rand = () => {
-    seed = Math.imul(seed ^ (seed >>> 15), 2246822507) ^ Math.imul(seed ^ (seed >>> 13), 3266489909);
-    return ((seed ^= seed >>> 16) >>> 0) / 4294967296;
-  };
-  const vol = 0.004 * Math.sqrt(RANGES[range] / RANGES["1D"]);
-  const walk = [1];
-  for (let i = 1; i < points; i++) walk.push(walk[i - 1] * (1 + (rand() - 0.5) * vol));
-  const k = total / walk[points - 1];
-  const step = RANGES[range] / (points - 1);
-  return walk.map((w, i) => ({ t: now - (points - 1 - i) * step, v: w * k }));
+// Today's holdings marked at each past close (legs forward-filled, back-filled with their first open); flat = stables etc.
+export function holdingsSeries(legs: { amount: number; candles: Candle[] }[], flat: number, now: number, live: number) {
+  const withData = legs.filter((l) => l.candles.length);
+  const times = [...new Set(withData.flatMap((l) => l.candles.map((c) => c.t)))].filter((t) => t < now).sort((a, b) => a - b);
+  const cur = withData.map(() => 0);
+  const px = withData.map((l) => Number(l.candles[0].o));
+  const pts = times.map((t) => {
+    let v = flat;
+    withData.forEach((l, i) => {
+      while (cur[i] < l.candles.length && l.candles[cur[i]].t <= t) px[i] = Number(l.candles[cur[i]++].c);
+      v += l.amount * px[i];
+    });
+    return { t, v };
+  });
+  return [...pts, { t: now, v: live }];
 }

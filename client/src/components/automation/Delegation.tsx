@@ -36,7 +36,7 @@ export function DelegationCard({ compact = false }: { compact?: boolean }) {
       <p className="text-xs leading-5 text-muted-foreground">
         {delegated
           ? `Enabled ${fmtTime(me!.delegation!.createdAt)}. Revoking also stops every schedule.`
-          : "Trades, baskets, DCA, TP/SL and Earn strategies run from your own Privy wallet via a delegated signer — even while you're offline."}{" "}
+          : "Only needed for automation: DCA, take-profit / stop-loss, rebalancing and Earn strategy deploy / withdraw run from your own Privy wallet via a delegated signer, even while you're offline. Manual trades don't need it; you sign those yourself."}{" "}
         {POLICY_COPY}
       </p>
       {!signerConfigured && <ErrorBox message="NEXT_PUBLIC_PRIVY_SIGNER_ID is not set" />}

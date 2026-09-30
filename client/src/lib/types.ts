@@ -94,6 +94,7 @@ export type Step = { action: string; market?: string; token?: string; amount?: s
 export type Execution = {
   id: string;
   kind: string;
+  signer?: "executor" | "client";
   status: ExecutionStatus;
   stepDone: number;
   stepsTotal: number;
@@ -199,3 +200,11 @@ export type Backtest = {
   curve: BacktestPoint[];
   notes: string[];
 };
+
+// POST /me/trade/prepare
+export type PrepareInput =
+  | { kind: "trade"; market: string; side: "buy" | "sell"; amount: string; slippageBps?: number }
+  | { kind: "basket_buy"; basketId: string; amountUsdc: string; slippageBps?: number }
+  | { kind: "basket_sell"; basketId: string; bps: number; slippageBps?: number };
+export type TxRequest = { to: string; data: string; value: string; chainId: number; description: string; step: number };
+export type Prepared = { prepareId: string; kind: string; steps: Step[]; txs: TxRequest[]; expiresAt: string };

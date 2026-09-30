@@ -15,6 +15,8 @@ import type {
   Me,
   Order,
   Position,
+  PrepareInput,
+  Prepared,
   Quote,
   Rates,
   Schedule,
@@ -104,12 +106,9 @@ export const putDelegation = (walletId: string, walletAddress: string) =>
 export const deleteDelegation = () => authed<{ revoked: boolean }>("/me/delegation", "DELETE");
 export const getMyBaskets = () => authed<Basket[]>("/me/baskets");
 export const createBasket = (b: { name: string; legs: Leg[]; public: boolean }) => authed<Basket>("/me/baskets", "POST", b);
-export const trade = (b: { market: string; side: "buy" | "sell"; amount: string; slippageBps?: number }) =>
-  authed<Accepted>("/me/trade", "POST", b);
-export const buyBasket = (id: string, amountUsdc: string, slippageBps?: number) =>
-  authed<Accepted>(`/me/baskets/${id}/buy`, "POST", { amountUsdc, slippageBps });
-export const sellBasket = (id: string, bps: number, slippageBps?: number) =>
-  authed<Accepted>(`/me/baskets/${id}/sell`, "POST", { bps, slippageBps });
+// client-signed: unsigned txs for the user's own wallet (no delegation), then hashes back for on-chain verification
+export const prepareTrade = (b: PrepareInput & { wallet: string }) => authed<Prepared>("/me/trade/prepare", "POST", b);
+export const recordTrade = (prepareId: string, txHashes: string[]) => authed<Execution>("/me/trade/record", "POST", { prepareId, txHashes });
 export const placeOrder = (b: { market: string; side: "buy" | "sell"; price: string; size: string; postOnly?: boolean; fund?: boolean }) =>
   authed<Accepted>("/me/orders", "POST", b);
 export const getOrders = () => authed<Order[]>("/me/orders");
@@ -158,12 +157,11 @@ export const runBacktest = (body: BacktestBody) => request<Backtest>(`${HISTORY_
 export const fmtUsdCompact = (n: number) =>
   n.toLocaleString("en-US", { style: "currency", currency: "USD", notation: "compact", maximumFractionDigits: 1 });
 
+// sub-cent values keep 2 significant digits (MON moves) instead of rounding to $0.00
 export const fmtUsd = (n: number) =>
-  n.toLocaleString("en-US", {
-    style: "currency",
-    currency: "USD",
-    maximumFractionDigits: n !== 0 && Math.abs(n) < 1 ? 4 : 2,
-  });
+  n !== 0 && Math.abs(n) < 0.01
+    ? n.toLocaleString("en-US", { style: "currency", currency: "USD", maximumSignificantDigits: 2 })
+    : n.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: Math.abs(n) < 1 ? 4 : 2 });
 
 export const fmtPct = (n: number, digits = 2) => `${n.toFixed(digits)}%`;
 
@@ -204,6 +202,10 @@ const COPY: Record<string, string> = {
   stale: "Price feed is stale, try again shortly.",
   unavailable: "No liquidity on this side right now.",
   unauthorized: "Session expired, sign in again.",
+  invalid_wallet: "Wallet address is invalid.",
+  tx_mismatch: "A sent transaction doesn't match the prepared one.",
+  tx_pending: "Transaction not mined yet, retrying.",
+  quote_expired: "Quote expired before every transaction was sent. Nothing more was sent; review and trade again.",
   not_found: "Not found.",
   no_data: "Not enough history for this setup.",
   invalid_name: "Name is invalid.",

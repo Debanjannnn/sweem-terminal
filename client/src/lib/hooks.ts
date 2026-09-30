@@ -1,11 +1,13 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { getBook, getCandles, getExecution, getHoldings, getRates } from "./api";
+import { erc20Abi, formatUnits, zeroAddress } from "viem";
+import { ApiError, getBook, getCandles, getExecution, getHoldings, getRates } from "./api";
+import { DEPLOYMENTS, publicClient } from "./config";
 import { useAsync, useSession } from "./session";
 import { MARKETS } from "./tokens";
 import { subscribe, useTopic } from "./ws";
-import type { Book, Candle, Execution, Interval, Rates } from "./types";
+import type { Book, Candle, Execution, Holdings, Interval, Rates } from "./types";
 
 const H = 3600e3;
 
@@ -53,9 +55,32 @@ export function useTickers() {
   return { tickers: out, loading: hist.loading, error: hist.error };
 }
 
+// wallet balances straight from chain (api has no holdings row before the first trade/delegation)
+async function chainHoldings(wallet: `0x${string}`): Promise<Holdings> {
+  const toks = Object.entries(DEPLOYMENTS.tokens).filter(([, t]) => BigInt(t.address) !== BigInt(0));
+  const [mon, erc20] = await Promise.all([
+    publicClient.getBalance({ address: wallet }),
+    publicClient.multicall({
+      allowFailure: false,
+      contracts: toks.map(([, t]) => ({ address: t.address as `0x${string}`, abi: erc20Abi, functionName: "balanceOf", args: [wallet] }) as const),
+    }),
+  ]);
+  const row = (symbol: string, address: string, raw: bigint, decimals: number) => ({ symbol, address: address.toLowerCase(), raw: raw.toString(), amount: formatUnits(raw, decimals) });
+  return {
+    wallet,
+    tokens: [row("MON", zeroAddress, mon, 18), ...toks.map(([sym, t], i) => row(sym, t.address, erc20[i], t.decimals))],
+    baskets: [],
+  };
+}
+
 export function useHoldings() {
-  const { ready, authenticated } = useSession();
-  return useAsync(ready && authenticated ? "holdings" : null, getHoldings);
+  const { ready, authenticated, address } = useSession();
+  return useAsync(ready && authenticated && address ? `holdings:${address}` : null, () =>
+    getHoldings().catch((e) => {
+      if (e instanceof ApiError && e.status === 404) return chainHoldings(address!);
+      throw e;
+    }),
+  );
 }
 
 // polled every 30s; WS `rates` topic overrides when the socket is up
@@ -98,8 +123,9 @@ export function useExecution(id: string | null) {
 export const settled = (e: Execution | null | undefined) => !!e && DONE.has(e.status);
 
 // candles for a chart range, with the live WS candle merged in by open time
-export function useCandles(orderbook: string | undefined, iv: Interval, ms: number) {
-  const hist = useAsync(orderbook ? `candles:${orderbook}:${iv}:${ms}` : null, () => getCandles(orderbook!, iv, Date.now() - ms));
+// ms null = full history the feed keeps
+export function useCandles(orderbook: string | undefined, iv: Interval, ms: number | null) {
+  const hist = useAsync(orderbook ? `candles:${orderbook}:${iv}:${ms}` : null, () => getCandles(orderbook!, iv, ms === null ? undefined : Date.now() - ms));
   const live = useTopic<Candle>(orderbook ? `candles.${orderbook}.${iv}` : null);
   const rows = hist.data ?? [];
   const merged = live && live.interval === iv && rows.length && live.t >= rows[rows.length - 1].t

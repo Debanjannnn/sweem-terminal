@@ -1,3 +1,4 @@
+import { createPublicClient, http } from "viem";
 import { monad } from "viem/chains";
 import deployments from "@/abi/deployments.json";
 
@@ -20,3 +21,5 @@ export const addressUrl = (addr: string) => `${EXPLORER}/address/${addr}`;
 export const DEPLOYMENTS = deployments;
 export const TOTAL_BPS = 10000;
 export const FEE_BPS = 40;
+
+export const publicClient = createPublicClient({ chain, transport: http(RPC_URL) });

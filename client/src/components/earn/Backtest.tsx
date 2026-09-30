@@ -25,7 +25,7 @@ export function BacktestView({ bt, loading, error }: { bt: Backtest | null; load
         <Stat label="Final" value={fmtUsd(Number(bt.finalUsd))} note={`from ${fmtUsd(Number(bt.initialUsd))} · ${bt.days}d`} />
       </dl>
       <div className="h-64">
-        <ResponsiveContainer width="100%" height="100%">
+        <ResponsiveContainer width="100%" height="100%" initialDimension={{ width: 1, height: 1 }}>
           <LineChart data={data} margin={{ top: 4, right: 0, bottom: 0, left: 0 }}>
             <CartesianGrid vertical={false} strokeDasharray="3 4" stroke="var(--border)" />
             <XAxis dataKey="day" tick={{ fill: "var(--muted-foreground)", fontSize: 10 }} axisLine={false} tickLine={false} minTickGap={48} />
@@ -66,7 +66,7 @@ export function AllocationDonut({ sources }: { sources: Source[] }) {
   return (
     <div className="flex flex-wrap items-center gap-6">
       <div className="size-40">
-        <ResponsiveContainer width="100%" height="100%">
+        <ResponsiveContainer width="100%" height="100%" initialDimension={{ width: 1, height: 1 }}>
           <PieChart>
             <Pie data={data} dataKey="value" innerRadius="62%" outerRadius="100%" stroke="var(--card)" strokeWidth={2} isAnimationActive={false}>
               {data.map((_, i) => (
@@ -76,7 +76,7 @@ export function AllocationDonut({ sources }: { sources: Source[] }) {
           </PieChart>
         </ResponsiveContainer>
       </div>
-      <ul className="min-w-0 flex-1 space-y-2 text-sm">
+      <ul className="min-w-40 flex-1 space-y-2 text-sm">
         {data.map((d, i) => (
           <li key={d.name} className="flex items-center gap-2">
             <span className="size-2.5 shrink-0 rounded-full" style={{ background: COLORS[i % COLORS.length] }} />

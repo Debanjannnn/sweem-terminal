@@ -1,22 +1,32 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { Triangle } from "lucide-react";
-import { fmtPctSigned, fmtUsd } from "@/lib/api";
+import { fmtPctSigned, fmtUsd, getCandles } from "@/lib/api";
+import { useAsync } from "@/lib/session";
+import { marketOf } from "@/lib/tokens";
 import { Panel, Skeleton } from "@/components/ui";
 import { cn } from "@/lib/utils";
 import { Flash, TabPill } from "@/components/motion";
-import { dummySeries, RANGES, type Range } from "./series";
+import { holdingsSeries, RANGES, type Range } from "./series";
 
 const usd2 = (n: number) => n.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-export function ValueChart({ address, total, loading }: { address: string; total: number; loading: boolean }) {
+// legs = held tokens with a Kuru market (symbol = market); flat = USD that doesn't move with price (stables, principal)
+export function ValueChart({ legs, flat, total, loading }: { legs: { market: string; amount: number }[]; flat: number; total: number; loading: boolean }) {
   const [range, setRange] = useState<Range>("1D");
-  // anchored once per mount so the walk doesn't reshuffle every render
-  const [now] = useState(() => Date.now());
-  const points = useMemo(() => dummySeries(address, range, total, now), [address, range, total, now]);
-  const first = points[0].v;
+  const { iv, ms } = RANGES[range];
+  const legKey = legs.map((l) => `${l.market}:${l.amount}`).join();
+  const hist = useAsync(loading ? null : `pf:${legKey}:${range}`, async () => {
+    const now = Date.now();
+    const candles = await Promise.all(legs.map((l) => getCandles(marketOf(l.market)!.orderbook, iv, ms === null ? undefined : now - ms)));
+    return { now, candles };
+  });
+  const series = hist.data ? holdingsSeries(legs.map((l, i) => ({ amount: l.amount, candles: hist.data!.candles[i] })), flat, hist.data.now, total) : [];
+  // nothing price-sensitive held: value is flat over the range
+  const points = series.length === 1 && legs.length === 0 ? [{ t: series[0].t - (ms ?? 30 * 86400e3), v: total }, ...series] : series;
+  const first = points[0]?.v ?? total;
   const diff = total - first;
   const up = diff >= 0;
   const [whole, cents] = usd2(total).split(".");
@@ -60,10 +70,14 @@ export function ValueChart({ address, total, loading }: { address: string; total
         </div>
       </div>
       <div className="mt-6 h-56 sm:h-64">
-        {loading ? (
+        {loading || (hist.loading && !hist.data) ? (
           <Skeleton className="h-full" />
+        ) : hist.error ? (
+          <div className="grid h-full place-items-center text-sm text-muted-foreground">Price history unavailable: {hist.error}</div>
+        ) : points.length < 2 ? (
+          <div className="grid h-full place-items-center text-sm text-muted-foreground">No price history for your holdings in this range yet.</div>
         ) : (
-          <ResponsiveContainer width="100%" height="100%">
+          <ResponsiveContainer width="100%" height="100%" initialDimension={{ width: 1, height: 1 }}>
             <AreaChart data={points} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
               <defs>
                 <linearGradient id="pfFill" x1="0" y1="0" x2="0" y2="1">
@@ -101,7 +115,7 @@ export function ValueChart({ address, total, loading }: { address: string; total
           </ResponsiveContainer>
         )}
       </div>
-      <p className="mt-2 text-[11px] text-muted-foreground">History is illustrative; current value is live.</p>
+      <p className="mt-2 text-[11px] text-muted-foreground">Your current holdings valued at past Kuru prices; the last point is live.</p>
     </Panel>
   );
 }

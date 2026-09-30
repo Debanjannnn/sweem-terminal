@@ -2,14 +2,13 @@
 
 import { useEffect, useState } from "react";
 import { ArrowDown } from "lucide-react";
-import { errText, fmtUsd, getQuote, trade } from "@/lib/api";
+import { errText, fmtUsd, getQuote } from "@/lib/api";
 import { useAsync, useSession } from "@/lib/session";
 import { fmtUnits, parseAmount, USDC, type MarketDef } from "@/lib/tokens";
 import type { Holdings } from "@/lib/types";
 import { Button, Notice, Spinner } from "@/components/ui";
 import { TokenIcon } from "@/components/TokenIcon";
-import { ExecutionProgress } from "@/components/Execution";
-import { DelegationCard } from "@/components/automation/Delegation";
+import { ClientRunProgress, useClientTrade } from "@/components/ClientTrade";
 import { cn } from "@/lib/utils";
 import { Flash, TabPill } from "@/components/motion";
 import { formatUnits } from "viem";
@@ -86,17 +85,15 @@ export const pill = (sym: string) => (
 
 export const actionBtn = "w-full rounded-xl py-3.5 text-base hover:rounded-xl";
 
-// Market buy/sell via POST /me/trade (executor, delegated signer); quote from market-data for preview + caps.
+// Market buy/sell signed by the user (prepare → Privy wallet → record); quote from market-data for preview + caps.
 export function MarketPanel({ market, holdings, onDone }: { market: MarketDef; holdings: Holdings | null; onDone: () => void }) {
-  const { ready, authenticated, login, delegated } = useSession();
+  const { ready, authenticated, login, address } = useSession();
   const [side, setSide] = useState<"buy" | "sell">("buy");
   const [amount, setAmount] = useState("");
   const [slippage, setSlippage] = useState(100);
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-  const [execId, setExecId] = useState<string | null>(null);
 
   const sym = market.symbol;
+  const { run, start, busy } = useClientTrade(`${side === "buy" ? "Buy" : "Sell"} ${sym}`);
   const inTok = side === "buy" ? USDC : market.token;
   const outTok = side === "buy" ? market.token : USDC;
   const raw = parseAmount(amount, inTok.decimals);
@@ -112,8 +109,8 @@ export function MarketPanel({ market, holdings, onDone }: { market: MarketDef; h
 
   const reason = !ready
     ? "Loading…"
-    : !delegated
-      ? "Enable delegation to trade"
+    : !address
+      ? "Wallet loading…"
       : amount.trim() === ""
         ? "Enter an amount"
         : raw === null || raw === BigInt(0)
@@ -129,17 +126,9 @@ export function MarketPanel({ market, holdings, onDone }: { market: MarketDef; h
                   : null;
 
   async function submit() {
-    setBusy(true);
-    setErr(null);
-    try {
-      const r = await trade({ market: sym, side, amount: amount.trim(), slippageBps: slippage });
-      setExecId(r.executionId);
-      setAmount("");
-    } catch (e) {
-      setErr(errText(e));
-    } finally {
-      setBusy(false);
-    }
+    const ex = await start({ kind: "trade", market: sym, side, amount: amount.trim(), slippageBps: slippage });
+    if (ex?.status === "confirmed") setAmount("");
+    onDone();
   }
 
   return (
@@ -216,22 +205,20 @@ export function MarketPanel({ market, holdings, onDone }: { market: MarketDef; h
           </button>
         </Notice>
       )}
-      {authenticated && !delegated && <DelegationCard compact />}
-      {err && <Notice tone="bad">{err}</Notice>}
 
       {!authenticated && ready ? (
         <Button className={actionBtn} onClick={login}>
           Log in to trade
         </Button>
       ) : (
-        <Button className={actionBtn} pending={busy} disabled={reason !== null} onClick={() => void submit()}>
-          {busy ? "Submitting…" : (reason ?? `${side === "buy" ? "Buy" : "Sell"} ${sym}`)}
+        <Button className={actionBtn} pending={busy} disabled={busy || reason !== null} onClick={() => void submit()}>
+          {busy ? "Sign in your wallet…" : (reason ?? `${side === "buy" ? "Buy" : "Sell"} ${sym}`)}
         </Button>
       )}
-      {execId && <ExecutionProgress id={execId} onSettled={onDone} />}
+      {run && <ClientRunProgress run={run} />}
       <p className="text-[11px] leading-4 text-muted-foreground">
-        Monad mainnet, real funds. Market order on the Kuru {sym}/USDC book, run from your own wallet by sweem&apos;s delegated signer.
-        Reverts if you&apos;d receive less than the minimum at your slippage.
+        Monad mainnet, real funds. Market order on the Kuru {sym}/USDC book, signed by you from your Privy wallet (an approve first when
+        needed). Reverts if you&apos;d receive less than the minimum at your slippage. Gas is paid in MON.
       </p>
     </div>
   );

@@ -44,7 +44,7 @@ export default function BasketPage() {
   const { iv, ms } = RANGES[range];
   const series = useAsync(b ? `bidx:${legKey}:${range}` : null, async () =>
     basketIndex(
-      await Promise.all(legs.map(async (l) => ({ weightBps: l.weightBps, candles: await getCandles(marketOf(l.market)!.orderbook, iv, Date.now() - ms) }))),
+      await Promise.all(legs.map(async (l) => ({ weightBps: l.weightBps, candles: await getCandles(marketOf(l.market)!.orderbook, iv, ms === null ? undefined : Date.now() - ms) }))),
     ),
   );
   const prices = useAsync(b ? `bpx:${legKey}` : null, async () => {
@@ -93,6 +93,7 @@ export default function BasketPage() {
             loading={!b || series.loading}
             error={series.error}
             caption="Value of $100, weighted"
+            dataKey={`${id}:${range}`}
             empty="No candle history for every leg in this range yet."
           />
 

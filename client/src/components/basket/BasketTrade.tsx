@@ -1,17 +1,16 @@
 "use client";
 
 import { useState } from "react";
-import { buyBasket, errText, fmtUsd, getBasketQuote, sellBasket } from "@/lib/api";
+import { errText, fmtUsd, getBasketQuote } from "@/lib/api";
 import { useAsync, useSession } from "@/lib/session";
 import { fmtUnits, marketOf, parseAmount, USDC } from "@/lib/tokens";
 import type { Basket, Holdings } from "@/lib/types";
 import { Button, Notice, Spinner } from "@/components/ui";
-import { ExecutionProgress } from "@/components/Execution";
-import { DelegationCard } from "@/components/automation/Delegation";
+import { ClientRunProgress, useClientTrade } from "@/components/ClientTrade";
 import { actionBtn, balanceOf, pill, Row, SidePicker, Slippage, useDebounced } from "@/components/trade/MarketPanel";
 import { formatUnits } from "viem";
 
-// Basket buy (one market buy per leg) / sell (bps of the attributed holding), both executor-run.
+// Basket buy (one market buy per leg) / sell (bps of the attributed holding), signed by the user leg by leg.
 export function BasketTrade({
   basket,
   holdings,
@@ -23,14 +22,12 @@ export function BasketTrade({
   heldUsd: number | null;
   onDone: () => void;
 }) {
-  const { ready, authenticated, login, delegated } = useSession();
+  const { ready, authenticated, login, address } = useSession();
   const [side, setSide] = useState<"buy" | "sell">("buy");
   const [amount, setAmount] = useState("");
   const [pct, setPct] = useState(100);
   const [slippage, setSlippage] = useState(100);
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-  const [execId, setExecId] = useState<string | null>(null);
+  const { run, start, busy } = useClientTrade(`${side === "buy" ? "Buy" : "Sell"} ${basket.name}`);
 
   const raw = parseAmount(amount, USDC.decimals);
   const debounced = useDebounced(side === "buy" && raw && raw > BigInt(0) ? raw : null);
@@ -44,8 +41,8 @@ export function BasketTrade({
 
   const reason = !ready
     ? "Loading…"
-    : !delegated
-      ? "Enable delegation to trade"
+    : !address
+      ? "Wallet loading…"
       : side === "sell"
         ? holds
           ? null
@@ -65,17 +62,13 @@ export function BasketTrade({
                     : null;
 
   async function submit() {
-    setBusy(true);
-    setErr(null);
-    try {
-      const r = side === "buy" ? await buyBasket(basket.id, amount.trim(), slippage) : await sellBasket(basket.id, pct * 100, slippage);
-      setExecId(r.executionId);
-      setAmount("");
-    } catch (e) {
-      setErr(errText(e));
-    } finally {
-      setBusy(false);
-    }
+    const ex = await start(
+      side === "buy"
+        ? { kind: "basket_buy", basketId: basket.id, amountUsdc: amount.trim(), slippageBps: slippage }
+        : { kind: "basket_sell", basketId: basket.id, bps: pct * 100, slippageBps: slippage },
+    );
+    if (ex?.status === "confirmed") setAmount("");
+    onDone();
   }
 
   return (
@@ -150,21 +143,19 @@ export function BasketTrade({
       {q?.legs.some((l) => l.quote && BigInt(l.quote.amount) > BigInt(l.quote.maxSafeAmount)) && (
         <Notice>At least one leg is above its safe size for current book depth; consider a smaller amount.</Notice>
       )}
-      {authenticated && !delegated && <DelegationCard compact />}
-      {err && <Notice tone="bad">{err}</Notice>}
       {!authenticated && ready ? (
         <Button className={actionBtn} onClick={login}>
           Log in to trade
         </Button>
       ) : (
-        <Button className={actionBtn} pending={busy} disabled={reason !== null} onClick={() => void submit()}>
-          {busy ? "Submitting…" : (reason ?? `${side === "buy" ? "Buy" : "Sell"} ${basket.name}`)}
+        <Button className={actionBtn} pending={busy} disabled={busy || reason !== null} onClick={() => void submit()}>
+          {busy ? "Sign in your wallet…" : (reason ?? `${side === "buy" ? "Buy" : "Sell"} ${basket.name}`)}
         </Button>
       )}
-      {execId && <ExecutionProgress id={execId} onSettled={onDone} />}
+      {run && <ClientRunProgress run={run} />}
       <p className="text-[11px] leading-4 text-muted-foreground">
-        Monad mainnet, real funds. One Kuru market order per leg, run sequentially from your wallet by the delegated signer. Tokens stay in
-        your wallet; the basket is just a label on them.
+        Monad mainnet, real funds. One Kuru market order per leg (plus approvals), each signed by you in order from your Privy wallet.
+        Tokens stay in your wallet; the basket is just a label on them.
       </p>
     </div>
   );

@@ -85,6 +85,9 @@ export default function PortfolioPage() {
   const open = (positions.data ?? []).filter((p) => p.status !== "closed");
   const posUsd = open.reduce((s, p) => s + Number(p.principalUsdc), 0);
   const total = tokensUsd + posUsd;
+  const legs = (h?.tokens ?? [])
+    .map((t) => ({ market: PRICE_OF[t.symbol] ?? t.symbol, amount: Number(t.amount) }))
+    .filter((l) => l.amount > 0 && tickers[l.market]);
   const loading = !ready || holdings.loading || pxLoading;
   const mon = raw("MON");
   const names = Object.fromEntries([...(baskets.data ?? []), ...(mine.data ?? [])].map((b) => [b.id, b.name]));
@@ -104,7 +107,7 @@ export default function PortfolioPage() {
           {ready && <Clock />}
         </header>
 
-        <ValueChart address={address ?? "0x"} total={total} loading={loading} />
+        <ValueChart legs={legs} flat={total - legs.reduce((s, l) => s + l.amount * (priceOf(l.market) ?? 0), 0)} total={total} loading={loading} />
 
         {holdings.error && <ErrorBox message={`Wallet balances unavailable: ${errText(new Error(holdings.error))}`} />}
 

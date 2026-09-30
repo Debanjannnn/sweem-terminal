@@ -1,4 +1,4 @@
-// Package routes serves the publisher's Redis state read-only (architecture §3 market-data).
+// Package routes serves the publisher's Redis state and candles read-only (architecture §3 market-data).
 package routes
 
 import (
@@ -8,9 +8,12 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 	"github.com/shopspring/decimal"
 	"github.com/snehendu098/sweem-terminal/internal/httpx"
@@ -21,13 +24,25 @@ import (
 
 var (
 	addrRE = regexp.MustCompile(`^0x[0-9a-f]{40}$`)
-	intRE  = regexp.MustCompile(`^[0-9]{1,78}$`)
+	intRE  = regexp.MustCompile(`^[0-9]{1,30}$`)
 )
 
+const (
+	bookMaxAge    = 30 * time.Second
+	maxCandles    = 1000
+	defaultSlip   = 50
+	defaultImpact = 100
+)
+
+var intervals = map[string]time.Duration{"1m": time.Minute, "5m": 5 * time.Minute, "1h": time.Hour, "1d": 24 * time.Hour}
+
 // New serves the routes; origins are CORS origins (scheme://host[:port] or "*"), also allowed on the WebSocket.
-func New(ctx context.Context, rdb *redis.Client, origins []string) http.Handler {
-	s := srv{rdb}
-	mux := httpx.NewMux(map[string]httpx.Check{"redis": func(ctx context.Context) error { return rdb.Ping(ctx).Err() }})
+func New(ctx context.Context, rdb *redis.Client, db *pgxpool.Pool, origins []string) http.Handler {
+	s := srv{rdb, db}
+	mux := httpx.NewMux(map[string]httpx.Check{
+		"redis":    func(ctx context.Context) error { return rdb.Ping(ctx).Err() },
+		"postgres": func(ctx context.Context) error { return db.Ping(ctx) },
+	})
 	h := hub.New(ctx, rdb)
 	for _, o := range origins {
 		if _, host, ok := strings.Cut(o, "://"); ok {
@@ -37,13 +52,18 @@ func New(ctx context.Context, rdb *redis.Client, origins []string) http.Handler 
 	}
 	mux.HandleFunc("GET /api/v1/ws", h.Serve)
 	mux.HandleFunc("GET /api/v1/markets", s.markets)
-	mux.HandleFunc("GET /api/v1/baskets/{address}/nav", s.nav)
 	mux.HandleFunc("GET /api/v1/books/{market}", s.book)
-	mux.HandleFunc("GET /api/v1/quote/{basket}", s.quote)
+	mux.HandleFunc("GET /api/v1/quote/{market}", s.quote)
+	mux.HandleFunc("POST /api/v1/quote/basket", s.basket)
+	mux.HandleFunc("GET /api/v1/candles/{market}", s.candles)
+	mux.HandleFunc("GET /api/v1/rates", s.rates)
 	return httpx.CORS(origins, mux)
 }
 
-type srv struct{ rdb *redis.Client }
+type srv struct {
+	rdb *redis.Client
+	db  *pgxpool.Pool
+}
 
 // addr lowercases a path address and reports whether it is well formed.
 func addr(r *http.Request, name string) (string, bool) {
@@ -81,18 +101,6 @@ func (s srv) markets(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s srv) nav(w http.ResponseWriter, r *http.Request) {
-	a, ok := addr(r, "address")
-	if !ok {
-		httpx.Error(w, http.StatusBadRequest, "bad_request")
-		return
-	}
-	if n, ok := load[streams.NavPoint](s, w, r, streams.NavLatest(a), http.StatusNotFound); ok {
-		n.Stale = n.Stale || s.stale(r)
-		httpx.JSON(w, http.StatusOK, n)
-	}
-}
-
 func (s srv) book(w http.ResponseWriter, r *http.Request) {
 	a, ok := addr(r, "market")
 	if !ok {
@@ -107,71 +115,199 @@ func (s srv) book(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s srv) rates(w http.ResponseWriter, r *http.Request) {
+	if v, ok := load[streams.RatesSnapshot](s, w, r, streams.RatesLatest, http.StatusServiceUnavailable); ok {
+		httpx.JSON(w, http.StatusOK, struct {
+			streams.RatesSnapshot
+			Stale bool `json:"stale"`
+		}{v, s.stale(r)})
+	}
+}
+
+// bpsParam parses an optional 0..10000 query param.
+func bpsParam(r *http.Request, name string, def int64) (int64, bool) {
+	v := r.URL.Query().Get(name)
+	if v == "" {
+		return def, true
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	return n, err == nil && n >= 0 && n <= 10_000
+}
+
+// legState loads the market params and a fresh book for one market; false means a response was written.
+func (s srv) legState(w http.ResponseWriter, r *http.Request, markets []streams.MarketInfo, market string) (streams.MarketInfo, streams.BookSnapshot, bool) {
+	i := slices.IndexFunc(markets, func(m streams.MarketInfo) bool { return strings.EqualFold(string(m.Market), market) })
+	if i < 0 {
+		httpx.Error(w, http.StatusNotFound, "not_found")
+		return streams.MarketInfo{}, streams.BookSnapshot{}, false
+	}
+	b, ok := load[streams.BookSnapshot](s, w, r, streams.BookLatest(market), http.StatusServiceUnavailable)
+	return markets[i], b, ok
+}
+
+// stateStale: publisher heartbeat gone or a book older than bookMaxAge; quotes then refuse with 503 stale.
+func (s srv) stateStale(r *http.Request, books ...streams.BookSnapshot) bool {
+	for _, b := range books {
+		if time.Since(time.UnixMilli(b.Ts)) > bookMaxAge {
+			return true
+		}
+	}
+	return s.stale(r)
+}
+
+func quoteErr(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, quote.ErrBadInput), errors.Is(err, quote.ErrMinSize):
+		httpx.Error(w, http.StatusBadRequest, err.Error())
+	default:
+		httpx.Error(w, http.StatusServiceUnavailable, "unavailable")
+	}
+}
+
 func (s srv) quote(w http.ResponseWriter, r *http.Request) {
-	a, ok := addr(r, "basket")
+	a, ok := addr(r, "market")
 	q := r.URL.Query()
 	side, amt := q.Get("side"), q.Get("amount")
-	slip := int64(50)
-	if v := q.Get("slippageBps"); v != "" {
-		n, err := strconv.ParseInt(v, 10, 64)
-		if err != nil || n < 0 || n > 10_000 {
-			ok = false
-		}
-		slip = n
-	}
-	if !ok || (side != "mint" && side != "redeem") || !intRE.MatchString(amt) {
+	slip, ok1 := bpsParam(r, "slippageBps", defaultSlip)
+	impact, ok2 := bpsParam(r, "maxImpactBps", defaultImpact)
+	if !ok || !ok1 || !ok2 || (side != "buy" && side != "sell") || !intRE.MatchString(amt) {
 		httpx.Error(w, http.StatusBadRequest, "bad_request")
-		return
-	}
-	if s.stale(r) {
-		httpx.Error(w, http.StatusServiceUnavailable, "stale")
-		return
-	}
-	baskets, ok := load[[]streams.BasketInfo](s, w, r, streams.RegistryBaskets, http.StatusServiceUnavailable)
-	if !ok {
-		return
-	}
-	st := quote.State{Markets: map[streams.Addr]streams.MarketInfo{}, Books: map[streams.Addr]streams.BookSnapshot{}}
-	found := false
-	for _, b := range baskets {
-		if strings.EqualFold(string(b.Address), a) {
-			st.Basket, found = b, true
-		}
-	}
-	if !found {
-		httpx.Error(w, http.StatusNotFound, "not_found")
-		return
-	}
-	if st.Nav, ok = load[streams.NavPoint](s, w, r, streams.NavLatest(a), http.StatusServiceUnavailable); !ok {
 		return
 	}
 	markets, ok := load[[]streams.MarketInfo](s, w, r, streams.RegistryMarkets, http.StatusServiceUnavailable)
 	if !ok {
 		return
 	}
-	for _, m := range markets {
-		st.Markets[streams.Addr(strings.ToLower(string(m.Market)))] = m
+	m, b, ok := s.legState(w, r, markets, a)
+	if !ok {
+		return
 	}
-	for _, c := range st.Basket.Components {
-		m := strings.ToLower(string(c.Market))
-		b, ok := load[streams.BookSnapshot](s, w, r, streams.BookLatest(m), http.StatusServiceUnavailable)
+	if s.stateStale(r, b) {
+		httpx.Error(w, http.StatusServiceUnavailable, "stale")
+		return
+	}
+	res, err := quote.Market(m, b, side, decimal.RequireFromString(amt), slip, impact)
+	if err != nil {
+		quoteErr(w, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, res)
+}
+
+type basketReq struct {
+	Side         string `json:"side"` // buy (default) | sell
+	AmountUsdc   string `json:"amountUsdc"`
+	SlippageBps  *int64 `json:"slippageBps"`
+	MaxImpactBps *int64 `json:"maxImpactBps"`
+	Legs         []struct {
+		Market    string `json:"market"`
+		WeightBps int64  `json:"weightBps"` // buy
+		Amount    string `json:"amount"`    // sell: base atoms
+	} `json:"legs"`
+}
+
+// basket: buy splits amountUsdc by weightBps (sum 10000); sell takes per-leg base amounts.
+func (s srv) basket(w http.ResponseWriter, r *http.Request) {
+	var req basketReq
+	err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10)).Decode(&req)
+	if req.Side == "" {
+		req.Side = "buy"
+	}
+	slip, impact := int64(defaultSlip), int64(defaultImpact)
+	if req.SlippageBps != nil {
+		slip = *req.SlippageBps
+	}
+	if req.MaxImpactBps != nil {
+		impact = *req.MaxImpactBps
+	}
+	buy := req.Side == "buy"
+	valid := err == nil && (buy || req.Side == "sell") && (!buy || intRE.MatchString(req.AmountUsdc)) &&
+		len(req.Legs) > 0 && len(req.Legs) <= 10 && slip >= 0 && slip <= 10_000 && impact >= 0 && impact <= 10_000
+	var sum int64
+	seen := map[string]bool{}
+	for i, l := range req.Legs {
+		m := strings.ToLower(l.Market)
+		if !addrRE.MatchString(m) || seen[m] || (buy && l.WeightBps <= 0) || (!buy && !intRE.MatchString(l.Amount)) {
+			valid = false
+		}
+		seen[m], req.Legs[i].Market, sum = true, m, sum+l.WeightBps
+	}
+	if !valid || (buy && sum != 10_000) {
+		httpx.Error(w, http.StatusBadRequest, "bad_request")
+		return
+	}
+	markets, ok := load[[]streams.MarketInfo](s, w, r, streams.RegistryMarkets, http.StatusServiceUnavailable)
+	if !ok {
+		return
+	}
+	var ms []streams.MarketInfo
+	var bs []streams.BookSnapshot
+	var ws []int64
+	var amts []decimal.Decimal
+	for _, l := range req.Legs {
+		m, b, ok := s.legState(w, r, markets, l.Market)
 		if !ok {
 			return
 		}
-		st.Books[streams.Addr(m)] = b
+		ms, bs, ws = append(ms, m), append(bs, b), append(ws, l.WeightBps)
+		if !buy {
+			amts = append(amts, decimal.RequireFromString(l.Amount))
+		}
 	}
+	if s.stateStale(r, bs...) {
+		httpx.Error(w, http.StatusServiceUnavailable, "stale")
+		return
+	}
+	if buy {
+		httpx.JSON(w, http.StatusOK, quote.BuyBasket(decimal.RequireFromString(req.AmountUsdc), ws, ms, bs, slip, impact))
+	} else {
+		httpx.JSON(w, http.StatusOK, quote.SellBasket(amts, ms, bs, slip, impact))
+	}
+}
 
-	fn := quote.Mint
-	if side == "redeem" {
-		fn = quote.Redeem
-	}
-	res, err := fn(st, decimal.RequireFromString(amt), slip)
-	switch {
-	case errors.Is(err, quote.ErrBadInput):
+// candles returns up to 1000 candles in [from, to) (unix ms), newest last; default is the latest 1000.
+func (s srv) candles(w http.ResponseWriter, r *http.Request) {
+	a, ok := addr(r, "market")
+	q := r.URL.Query()
+	iv := q.Get("interval")
+	d, ok2 := intervals[iv]
+	now := time.Now().UnixMilli()
+	to, err1 := msParam(q.Get("to"), now+1)
+	from, err2 := msParam(q.Get("from"), to-maxCandles*d.Milliseconds())
+	if !ok || !ok2 || err1 != nil || err2 != nil || from >= to {
 		httpx.Error(w, http.StatusBadRequest, "bad_request")
-	case err != nil:
-		httpx.Error(w, http.StatusServiceUnavailable, "unavailable")
-	default:
-		httpx.JSON(w, http.StatusOK, res)
+		return
 	}
+	rows, err := s.db.Query(r.Context(), `select * from (
+		select extract(epoch from t)::bigint * 1000, o, h, l, c, v, q, n from candles
+		where market = $1 and interval = $2 and t >= $3 and t < $4 order by t desc limit $5) x order by 1`,
+		a, iv, time.UnixMilli(from), time.UnixMilli(to), maxCandles)
+	if err != nil {
+		slog.Error("candles", "err", err)
+		httpx.Error(w, http.StatusServiceUnavailable, "unavailable")
+		return
+	}
+	defer rows.Close()
+	out := []streams.Candle{}
+	for rows.Next() {
+		c := streams.Candle{Market: streams.Addr(a), Interval: iv}
+		if err := rows.Scan(&c.T, &c.O, &c.H, &c.L, &c.C, &c.V, &c.Q, &c.N); err != nil {
+			slog.Error("candles scan", "err", err)
+			httpx.Error(w, http.StatusServiceUnavailable, "unavailable")
+			return
+		}
+		out = append(out, c)
+	}
+	if rows.Err() != nil {
+		httpx.Error(w, http.StatusServiceUnavailable, "unavailable")
+		return
+	}
+	httpx.JSON(w, http.StatusOK, out)
+}
+
+func msParam(v string, def int64) (int64, error) {
+	if v == "" {
+		return def, nil
+	}
+	return strconv.ParseInt(v, 10, 64)
 }

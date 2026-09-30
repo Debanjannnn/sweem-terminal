@@ -23,7 +23,7 @@ const (
 	writeWait  = 10 * time.Second
 )
 
-var topicRE = regexp.MustCompile(`^(book|nav|trades)\.0x[0-9a-f]{40}$`)
+var topicRE = regexp.MustCompile(`^((book|trades)\.0x[0-9a-f]{40}|candles\.0x[0-9a-f]{40}\.(1m|5m|1h|1d)|rates)$`)
 
 func ValidTopic(t string) bool { return topicRE.MatchString(t) }
 
@@ -35,7 +35,7 @@ type Client struct {
 
 type topic struct {
 	subs   map[*Client]struct{}
-	last   []byte // latest snapshot frame, replayed to new subscribers (book/nav only)
+	last   []byte // latest snapshot frame, replayed to new subscribers (all but trades)
 	cancel context.CancelFunc
 }
 
@@ -51,16 +51,19 @@ type Hub struct {
 
 func New(ctx context.Context, rdb *redis.Client) *Hub {
 	return &Hub{ctx: ctx, topics: map[string]*topic{}, run: func(ctx context.Context, t string, emit func(any)) error {
-		kind, addr, _ := strings.Cut(t, ".")
-		switch kind {
+		p := strings.Split(t, ".")
+		switch p[0] {
 		case "book":
-			return streams.Reader[streams.BookSnapshot]{RDB: rdb, Stream: streams.Book(addr), Latest: streams.BookLatest(addr),
+			return streams.Reader[streams.BookSnapshot]{RDB: rdb, Stream: streams.Book(p[1]), Latest: streams.BookLatest(p[1]),
 				Seq: func(b streams.BookSnapshot) uint64 { return b.Seq }}.Run(ctx, func(v streams.BookSnapshot) { emit(v) })
-		case "nav":
-			return streams.Reader[streams.NavPoint]{RDB: rdb, Stream: streams.Nav(addr), Latest: streams.NavLatest(addr)}.
-				Run(ctx, func(v streams.NavPoint) { emit(v) })
+		case "candles":
+			return streams.Reader[streams.Candle]{RDB: rdb, Stream: streams.Candles(p[1], p[2]), Latest: streams.CandlesLatest(p[1], p[2])}.
+				Run(ctx, func(v streams.Candle) { emit(v) })
+		case "rates":
+			return streams.Reader[streams.RatesSnapshot]{RDB: rdb, Stream: streams.Rates, Latest: streams.RatesLatest}.
+				Run(ctx, func(v streams.RatesSnapshot) { emit(v) })
 		default:
-			return streams.Reader[streams.Trade]{RDB: rdb, Stream: streams.Trades(addr)}.Run(ctx, func(v streams.Trade) { emit(v) })
+			return streams.Reader[streams.Trade]{RDB: rdb, Stream: streams.Trades(p[1])}.Run(ctx, func(v streams.Trade) { emit(v) })
 		}
 	}}
 }

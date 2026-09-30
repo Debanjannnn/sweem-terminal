@@ -12,13 +12,14 @@ import (
 	"github.com/snehendu098/sweem-terminal/internal/config"
 	"github.com/snehendu098/sweem-terminal/internal/httpx"
 	"github.com/snehendu098/sweem-terminal/internal/logx"
+	"github.com/snehendu098/sweem-terminal/internal/pg"
 	"github.com/snehendu098/sweem-terminal/services/market-data/internal/routes"
 )
 
 func main() {
 	logx.Setup("market-data")
 	var e config.Env
-	redisURL := e.Str("REDIS_URL")
+	redisURL, dbURL := e.Str("REDIS_URL"), e.Str("DATABASE_URL")
 	addr := ":" + e.Opt("PORT", "8082")
 	origins := strings.Split(e.Opt("CORS_ORIGINS", "http://localhost:3000"), ",")
 	if err := e.Err(); err != nil {
@@ -35,8 +36,14 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	db, err := pg.Open(ctx, dbURL)
+	if err != nil {
+		slog.Error("postgres", "err", err)
+		os.Exit(1)
+	}
+	defer db.Close()
 	slog.Info("listening", "addr", addr)
-	if err := httpx.Run(ctx, addr, routes.New(ctx, rdb, origins)); err != nil {
+	if err := httpx.Run(ctx, addr, routes.New(ctx, rdb, db, origins)); err != nil {
 		slog.Error("serve", "err", err)
 		os.Exit(1)
 	}

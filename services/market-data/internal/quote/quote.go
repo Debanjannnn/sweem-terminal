@@ -1,9 +1,8 @@
-// Package quote mirrors SweemBasket.mint/redeem against the publisher's book snapshots.
+// Package quote prices Kuru V1 wallet market orders (placeAndExecuteMarketBuy/Sell) against the publisher's top-20 book.
 package quote
 
 import (
 	"errors"
-	"strings"
 
 	"github.com/shopspring/decimal"
 	"github.com/snehendu098/sweem-terminal/internal/streams"
@@ -11,239 +10,204 @@ import (
 
 var (
 	ErrBadInput    = errors.New("bad_request")
-	ErrUnavailable = errors.New("unavailable") // missing book/market/liquidity
-)
-
-const (
-	shareDecimals = 18
-	defaultFeePps = 7000 // live getMarketParams value on every testnet market
-	ppsDigits     = 7    // fee = amount * pps / 1e7
+	ErrMinSize     = errors.New("below_min_size")
+	ErrUnavailable = errors.New("unavailable") // empty book side
 )
 
 var bps = decimal.NewFromInt(10_000)
 
-type Leg struct {
-	Market    streams.Addr `json:"market"`
-	In        string       `json:"in"`  // raw atoms of input token
-	Out       string       `json:"out"` // raw atoms of output token, after taker fee
-	AvgPx     streams.Dec  `json:"avgPx"`
-	ImpactBps int64        `json:"impactBps"` // avgPx vs best level on the walked side
+// Quote amounts are raw integer strings: buy in = USDC atoms, out = base atoms; sell the reverse.
+type Quote struct {
+	Market        streams.Addr `json:"market"`
+	Side          string       `json:"side"`
+	Amount        string       `json:"amount"`
+	Fillable      string       `json:"fillable"` // part of amount the book absorbs
+	Partial       bool         `json:"partial"`
+	ExpectedOut   string       `json:"expectedOut"`
+	MinOut        string       `json:"minOut"`
+	OrderSize     string       `json:"orderSize"` // first arg of the Kuru call: buy quoteSize (USD×pricePrecision), sell size (sizePrecision units)
+	AvgPx         streams.Dec  `json:"avgPx"`
+	BestPx        streams.Dec  `json:"bestPx"`
+	ImpactBps     int64        `json:"impactBps"` // avgPx vs best level
+	MaxSafeAmount string       `json:"maxSafeAmount"`
+	MaxImpactBps  int64        `json:"maxImpactBps"`
 }
 
-type Result struct {
-	ExpectedOut string `json:"expectedOut"`
-	MinOut      string `json:"minOut"`
-	Legs        []Leg  `json:"legs"`
-	Stale       bool   `json:"stale"`
+// Market quotes a buy (amount = USDC atoms) or sell (amount = base atoms) walking the book.
+func Market(m streams.MarketInfo, b streams.BookSnapshot, side string, amount decimal.Decimal, slippageBps, maxImpactBps int64) (Quote, error) {
+	if !amount.IsPositive() || slippageBps < 0 || slippageBps > 10_000 || maxImpactBps < 0 || m.SizePrecision.IsZero() || m.PricePrecision.IsZero() {
+		return Quote{}, ErrBadInput
+	}
+	qd, bd := int32(m.QuoteDecimals), int32(m.BaseDecimals)
+	step := decimal.NewFromInt(1).Div(m.SizePrecision)
+	levels := b.Asks
+	if side == "sell" {
+		levels = b.Bids
+	} else if side != "buy" {
+		return Quote{}, ErrBadInput
+	}
+	if len(levels) == 0 || !levels[0][0].IsPositive() {
+		return Quote{}, ErrUnavailable
+	}
+	q := Quote{Market: m.Market, Side: side, Amount: amount.String(), BestPx: levels[0][0], MaxImpactBps: maxImpactBps}
+
+	var in, base, quote decimal.Decimal // display units
+	var exhausted bool
+	if side == "buy" {
+		qs := amount.Shift(-qd).Mul(m.PricePrecision).Floor()
+		q.OrderSize = qs.String()
+		in = qs.Div(m.PricePrecision)
+		base, quote, exhausted = walk(levels, in, step, true)
+	} else {
+		in = amount.Shift(-bd).Div(step).Floor().Mul(step)
+		q.OrderSize = in.Mul(m.SizePrecision).String()
+		base, quote, exhausted = walk(levels, in, step, false)
+	}
+	if base.LessThan(m.MinSize.Div(m.SizePrecision)) || !base.IsPositive() {
+		return Quote{}, ErrMinSize
+	}
+	var out decimal.Decimal
+	if side == "buy" {
+		q.Fillable, out = quote.Shift(qd).Ceil().String(), base.Shift(bd).Floor()
+	} else {
+		q.Fillable, out = base.Shift(bd).String(), quote.Shift(qd).Floor()
+	}
+	q.Partial = exhausted
+	q.ExpectedOut = out.String()
+	q.MinOut = out.Mul(bps.Sub(decimal.NewFromInt(slippageBps))).Div(bps).Floor().String()
+	q.AvgPx = quote.DivRound(base, 18)
+	q.ImpactBps = q.AvgPx.Sub(q.BestPx).Abs().Mul(bps).Div(q.BestPx).Round(0).IntPart()
+	safe := maxSafe(levels, step, maxImpactBps, side == "buy")
+	if side == "buy" {
+		q.MaxSafeAmount = safe.Shift(qd).Floor().String()
+	} else {
+		q.MaxSafeAmount = safe.Shift(bd).Floor().String()
+	}
+	return q, nil
 }
 
-// State is everything the contract reads, as the publisher last saw it (display units).
-type State struct {
-	Basket  streams.BasketInfo
-	Nav     streams.NavPoint
-	Markets map[streams.Addr]streams.MarketInfo
-	Books   map[streams.Addr]streams.BookSnapshot
-}
-
-type leg struct {
-	info streams.MarketInfo
-	book streams.BookSnapshot
-	w    decimal.Decimal
-	held decimal.Decimal
-	val  decimal.Decimal
-}
-
-func (s State) legs() ([]leg, error) {
-	bal := map[streams.Addr]streams.NavComponent{}
-	for _, c := range s.Nav.Components {
-		bal[streams.Addr(strings.ToLower(string(c.Market)))] = c
-	}
-	out := make([]leg, 0, len(s.Basket.Components))
-	for _, c := range s.Basket.Components {
-		m := streams.Addr(strings.ToLower(string(c.Market)))
-		info, ok := s.Markets[m]
-		book, ok2 := s.Books[m]
-		if !ok || !ok2 {
-			return nil, ErrUnavailable
-		}
-		out = append(out, leg{info, book, decimal.NewFromInt(int64(c.WeightBps)), bal[m].Balance, bal[m].Value})
-	}
-	return out, nil
-}
-
-// Mint mirrors SweemBasket.mint for usdcRaw (6dp integer) and returns shares (18dp integer).
-func Mint(s State, usdcRaw decimal.Decimal, slippageBps int64) (Result, error) {
-	legs, err := s.legs()
-	if err != nil {
-		return Result{}, err
-	}
-	if len(legs) == 0 || !usdcRaw.IsPositive() {
-		return Result{}, ErrBadInput
-	}
-	qd := int32(legs[0].info.QuoteDecimals)
-	usdc := usdcRaw.Shift(-qd)
-	supply := s.Nav.Supply
-
-	total := decimal.Zero
-	for _, l := range legs {
-		total = total.Add(l.val)
-	}
-	if supply.IsPositive() && !total.IsPositive() {
-		return Result{}, ErrUnavailable // contract divides by zero
-	}
-
-	// first mint allocates by weight, so the supply-0 NAV (stale by design) does not make it stale
-	res := Result{Legs: []Leg{}, Stale: s.Nav.Stale && supply.IsPositive()}
-	spent := decimal.Zero
-	var shares *decimal.Decimal
-	for _, l := range legs {
-		var alloc decimal.Decimal
-		if supply.IsZero() {
-			alloc = floorDiv(usdc.Mul(l.w), bps, qd)
-		} else {
-			alloc = floorDiv(usdc.Mul(l.val), total, qd)
-		}
-		if alloc.IsZero() {
-			continue
-		}
-		cost, base, err := buy(l.info, l.book.Asks, alloc)
-		if err != nil {
-			return Result{}, err
-		}
-		bd := int32(l.info.BaseDecimals)
-		// ponytail: taker fee modelled as a haircut on base received; confirm against a fork mint if quotes drift
-		bought := base.Sub(base.Mul(fee(l.info)).Shift(-ppsDigits).RoundCeil(bd))
-		spent = spent.Add(cost)
-		res.Legs = append(res.Legs, mkLeg(l.info.Market, cost.Shift(qd), bought.Shift(bd), cost, base, l.book.Asks))
-		if supply.IsPositive() && l.held.IsPositive() {
-			sh := floorDiv(supply.Mul(bought), l.held, shareDecimals)
-			if shares == nil || sh.LessThan(*shares) {
-				shares = &sh
-			}
-		}
-	}
-	out := decimal.Zero
-	if supply.IsZero() {
-		out = spent // shares = spent * 1e12, i.e. 1 share per USDC
-	} else if shares != nil {
-		out = *shares
-	}
-	if !out.IsPositive() {
-		return Result{}, ErrBadInput // contract reverts ZeroAmount
-	}
-	return finish(res, out.Shift(shareDecimals), slippageBps), nil
-}
-
-// Redeem mirrors SweemBasket.redeem for sharesRaw (18dp integer) and returns USDC (6dp integer).
-func Redeem(s State, sharesRaw decimal.Decimal, slippageBps int64) (Result, error) {
-	legs, err := s.legs()
-	if err != nil {
-		return Result{}, err
-	}
-	shares := sharesRaw.Shift(-shareDecimals)
-	supply := s.Nav.Supply
-	if len(legs) == 0 || !shares.IsPositive() || shares.GreaterThan(supply) {
-		return Result{}, ErrBadInput
-	}
-	qd := int32(legs[0].info.QuoteDecimals)
-	res := Result{Legs: []Leg{}, Stale: s.Nav.Stale}
-	total := decimal.Zero
-	for _, l := range legs {
-		bd := int32(l.info.BaseDecimals)
-		amt := floorDiv(l.held.Mul(shares), supply, bd)
-		amt = amt.Sub(amt.Mod(step(l.info))) // floorToLot
-		if amt.IsZero() {
-			continue
-		}
-		usdc, sold, err := sell(l.info, l.book.Bids, amt)
-		if err != nil {
-			return Result{}, err
-		}
-		got := usdc.Sub(usdc.Mul(fee(l.info)).Shift(-ppsDigits).RoundCeil(qd))
-		total = total.Add(got)
-		res.Legs = append(res.Legs, mkLeg(l.info.Market, sold.Shift(bd), got.Shift(qd), usdc, sold, l.book.Bids))
-	}
-	if !total.IsPositive() {
-		return Result{}, ErrBadInput
-	}
-	return finish(res, total.Shift(qd), slippageBps), nil
-}
-
-// buy spends up to budget USDC walking asks; returns USDC spent and base bought (display).
-func buy(m streams.MarketInfo, asks []streams.Level, budget decimal.Decimal) (cost, base decimal.Decimal, err error) {
-	if len(asks) == 0 {
-		return cost, base, ErrUnavailable
-	}
-	st := step(m)
-	rem := budget
-	for _, lv := range asks {
+// walk consumes levels until `in` (quote for buys, base for sells) runs out; sizes snap to step. exhausted = the book ran out first.
+func walk(levels []streams.Level, in, step decimal.Decimal, buy bool) (base, quote decimal.Decimal, exhausted bool) {
+	rem := in
+	for _, lv := range levels {
 		px, sz := lv[0], lv[1]
 		if !px.IsPositive() {
 			continue
 		}
-		s := decimal.Min(sz, floorDiv(rem, px.Mul(st), 0).Mul(st))
-		c := notional(m, px, s)
-		if !s.IsPositive() {
-			break
+		take := sz
+		if buy {
+			take = decimal.Min(sz, rem.Div(px).Div(step).Floor().Mul(step))
+		} else {
+			take = decimal.Min(sz, rem)
 		}
-		base, cost, rem = base.Add(s), cost.Add(c), rem.Sub(c)
-		if s.LessThan(sz) {
-			break
+		if !take.IsPositive() {
+			return base, quote, false
+		}
+		base, quote = base.Add(take), quote.Add(px.Mul(take))
+		if buy {
+			rem = rem.Sub(px.Mul(take))
+		} else {
+			rem = rem.Sub(take)
+		}
+		if take.LessThan(sz) {
+			return base, quote, false
 		}
 	}
-	return cost, base, nil
+	return base, quote, rem.IsPositive()
 }
 
-// sell walks bids with amt base; returns USDC received and base actually sold (display).
-func sell(m streams.MarketInfo, bids []streams.Level, amt decimal.Decimal) (usdc, sold decimal.Decimal, err error) {
-	if len(bids) == 0 {
-		return usdc, sold, ErrUnavailable
+// maxSafe is the largest input (quote for buys, base for sells, display) whose average price stays within capBps of the best level.
+func maxSafe(levels []streams.Level, step decimal.Decimal, capBps int64, buy bool) decimal.Decimal {
+	f := bps.Add(decimal.NewFromInt(capBps))
+	if !buy {
+		f = bps.Sub(decimal.NewFromInt(capBps))
 	}
-	for _, lv := range bids {
-		s := decimal.Min(lv[1], amt.Sub(sold))
-		if !s.IsPositive() {
-			break
+	capPx := levels[0][0].Mul(f).Div(bps)
+	var base, quote decimal.Decimal
+	for _, lv := range levels {
+		px, sz := lv[0], lv[1]
+		if !px.IsPositive() {
+			continue
 		}
-		usdc, sold = usdc.Add(notional(m, lv[0], s)), sold.Add(s)
+		nb, nq := base.Add(sz), quote.Add(px.Mul(sz))
+		within := nq.LessThanOrEqual(capPx.Mul(nb))
+		if !buy {
+			within = nq.GreaterThanOrEqual(capPx.Mul(nb))
+		}
+		if within {
+			base, quote = nb, nq
+			continue
+		}
+		// partial level x solves (quote + px·x) / (base + x) = capPx
+		x := capPx.Mul(base).Sub(quote).DivRound(px.Sub(capPx), 18).Div(step).Floor().Mul(step)
+		if x.IsPositive() {
+			base, quote = base.Add(x), quote.Add(px.Mul(x))
+		}
+		break
 	}
-	return usdc, sold, nil
-}
-
-// notional is Kuru's quoteRaw = floor(floor(price*size/sizePrecision) * 10^qd / pricePrecision), in display units.
-func notional(m streams.MarketInfo, px, sz decimal.Decimal) decimal.Decimal {
-	return px.Mul(sz).RoundFloor(digits(m.PricePrecision)).RoundFloor(int32(m.QuoteDecimals))
-}
-
-func step(m streams.MarketInfo) decimal.Decimal { return decimal.New(1, -digits(m.SizePrecision)) }
-
-// digits assumes Kuru precisions are powers of ten (true on every live market).
-func digits(p decimal.Decimal) int32 { return int32(len(p.BigInt().String()) - 1) }
-
-func fee(m streams.MarketInfo) decimal.Decimal {
-	if m.TakerFeePps.IsZero() {
-		return decimal.NewFromInt(defaultFeePps)
+	if buy {
+		return quote
 	}
-	return m.TakerFeePps
+	return base
 }
 
-// floorDiv is a/b truncated to places, exact (Div alone rounds at 16 digits).
-func floorDiv(a, b decimal.Decimal, places int32) decimal.Decimal {
-	q, _ := a.QuoRem(b, places)
-	return q
+type BasketLeg struct {
+	Market     streams.Addr `json:"market"`
+	WeightBps  int64        `json:"weightBps,omitempty"`  // buy
+	AmountUsdc string       `json:"amountUsdc,omitempty"` // buy: this leg's USDC atoms
+	Amount     string       `json:"amount,omitempty"`     // sell: base atoms held for the basket
+	Quote      *Quote       `json:"quote,omitempty"`
+	Error      string       `json:"error,omitempty"`
 }
 
-func mkLeg(m streams.Addr, in, out, quote, base decimal.Decimal, side []streams.Level) Leg {
-	l := Leg{Market: m, In: in.String(), Out: out.String()}
-	if base.IsPositive() {
-		l.AvgPx = floorDiv(quote, base, 18)
-		best := side[0][0]
-		l.ImpactBps = l.AvgPx.Sub(best).Abs().Mul(bps).Div(best).Round(0).IntPart()
+type Basket struct {
+	Side            string      `json:"side"`
+	AmountUsdc      string      `json:"amountUsdc,omitempty"`   // buy
+	FillableUsdc    string      `json:"fillableUsdc,omitempty"` // buy
+	ExpectedOutUsdc string      `json:"expectedOutUsdc,omitempty"`
+	MinOutUsdc      string      `json:"minOutUsdc,omitempty"` // sell: sum of leg minOut
+	Partial         bool        `json:"partial"`
+	Ok              bool        `json:"ok"` // every leg quoted
+	Legs            []BasketLeg `json:"legs"`
+}
+
+// BuyBasket splits amountUsdc (atoms) by weight and quotes a market buy per leg; leg i uses markets[i] and books[i].
+func BuyBasket(amount decimal.Decimal, weights []int64, markets []streams.MarketInfo, books []streams.BookSnapshot, slippageBps, maxImpactBps int64) Basket {
+	r := Basket{Side: "buy", AmountUsdc: amount.String(), Ok: true, Legs: []BasketLeg{}}
+	fill := decimal.Zero
+	for i, w := range weights {
+		alloc := amount.Mul(decimal.NewFromInt(w)).Div(bps).Floor()
+		leg := BasketLeg{Market: markets[i].Market, WeightBps: w, AmountUsdc: alloc.String()}
+		if q, ok := r.add(&leg, markets[i], books[i], "buy", alloc, slippageBps, maxImpactBps); ok {
+			fill = fill.Add(decimal.RequireFromString(q.Fillable))
+		}
+		r.Legs = append(r.Legs, leg)
 	}
-	return l
-}
-
-func finish(r Result, out decimal.Decimal, slippageBps int64) Result {
-	r.ExpectedOut = out.String()
-	r.MinOut = floorDiv(out.Mul(decimal.NewFromInt(10_000-slippageBps)), bps, 0).String()
+	r.FillableUsdc = fill.String()
 	return r
+}
+
+// SellBasket quotes a market sell of amounts[i] (base atoms) per leg and totals the USDC out.
+func SellBasket(amounts []decimal.Decimal, markets []streams.MarketInfo, books []streams.BookSnapshot, slippageBps, maxImpactBps int64) Basket {
+	r := Basket{Side: "sell", Ok: true, Legs: []BasketLeg{}}
+	out, minOut := decimal.Zero, decimal.Zero
+	for i, a := range amounts {
+		leg := BasketLeg{Market: markets[i].Market, Amount: a.String()}
+		if q, ok := r.add(&leg, markets[i], books[i], "sell", a, slippageBps, maxImpactBps); ok {
+			out, minOut = out.Add(decimal.RequireFromString(q.ExpectedOut)), minOut.Add(decimal.RequireFromString(q.MinOut))
+		}
+		r.Legs = append(r.Legs, leg)
+	}
+	r.ExpectedOutUsdc, r.MinOutUsdc = out.String(), minOut.String()
+	return r
+}
+
+func (r *Basket) add(leg *BasketLeg, m streams.MarketInfo, b streams.BookSnapshot, side string, amt decimal.Decimal, slip, impact int64) (Quote, bool) {
+	q, err := Market(m, b, side, amt, slip, impact)
+	if err != nil {
+		leg.Error, r.Ok = err.Error(), false
+		return q, false
+	}
+	leg.Quote, r.Partial = &q, r.Partial || q.Partial
+	return q, true
 }

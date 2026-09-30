@@ -10,136 +10,137 @@ import (
 
 func d(s string) decimal.Decimal { return decimal.RequireFromString(s) }
 
-const (
-	mon  = streams.Addr("0xfdbe356828c8f5a5d5ed4f69dde0816f4058ef61")
-	weth = streams.Addr("0xa9c2936656a7d2143720bcd91ba8506200b7cbe7")
-	btc  = streams.Addr("0x5bdea6f9f9aba34f4ecb9b865646a792b835ef7f")
-)
+// WETH_USDC params from exchangeInfo: pricePrecision 1e4, sizePrecision 1e10, minSize 0.002 WETH.
+var weth = streams.MarketInfo{Market: "0xa6afd386135b7d41a6c40c525abc4a1019b0d132", BaseDecimals: 18, QuoteDecimals: 6,
+	PricePrecision: d("10000"), SizePrecision: d("10000000000"), MinSize: d("20000000")}
 
-// Same basket and books as contracts/test/fork/SweemBasket.fork.t.sol: 40/30/30, makers ±0.1% around center.
-func forkState() State {
-	info := func(m streams.Addr, pp, sp string, bd int, fee string) streams.MarketInfo {
-		return streams.MarketInfo{Market: m, BaseDecimals: bd, QuoteDecimals: 6, PricePrecision: d(pp), SizePrecision: d(sp), TakerFeePps: d(fee)}
-	}
-	book := func(m streams.Addr, bid, ask, sz string) streams.BookSnapshot {
-		return streams.BookSnapshot{Market: m, Bids: []streams.Level{{d(bid), d(sz)}}, Asks: []streams.Level{{d(ask), d(sz)}}}
-	}
-	return State{
-		Basket: streams.BasketInfo{Components: []streams.Component{{Market: mon, WeightBps: 4000}, {Market: weth, WeightBps: 3000}, {Market: btc, WeightBps: 3000}}},
-		Markets: map[streams.Addr]streams.MarketInfo{
-			mon:  info(mon, "1000000", "100000000", 18, "7000"),
-			weth: info(weth, "100", "10000000000", 18, "0"), // 0 → default 7000
-			btc:  info(btc, "100", "100000000", 8, "7000"),
-		},
-		Books: map[streams.Addr]streams.BookSnapshot{
-			mon:  book(mon, "0.024975", "0.025025", "1000000"),
-			weth: book(weth, "2747.25", "2752.75", "100"),
-			btc:  book(btc, "84065.85", "84234.15", "5"),
-		},
-	}
+var book = streams.BookSnapshot{
+	Bids: []streams.Level{{d("2000"), d("1")}, {d("1990"), d("1")}, {d("0.01"), d("10")}},
+	Asks: []streams.Level{{d("2000"), d("1")}, {d("2010"), d("1")}},
 }
 
-// Expected values hand-computed with Python Decimal from the contract + Kuru notional formulas.
-func TestFirstMintSharesEqualSpent(t *testing.T) {
-	r, err := Mint(forkState(), d("1000000000"), 50)
+func TestBuyWalk(t *testing.T) {
+	// $3000: 1 WETH @2000 + 0.4975124378 @2010 (floored to 1e-10)
+	q, err := Market(weth, book, "buy", d("3000000000"), 100, 50)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.ExpectedOut != "999979999000000000000" || r.MinOut != "994980099005000000000" {
-		t.Fatalf("got %s / %s", r.ExpectedOut, r.MinOut)
+	if q.OrderSize != "30000000" || q.ExpectedOut != "1497512437800000000" || q.Partial {
+		t.Fatalf("%+v", q)
 	}
-	want := [][2]string{{"399999999", "15972827172821193000000"}, {"299990000", "108905639751030000"}, {"299990000", "355900"}}
-	for i, l := range r.Legs {
-		if l.In != want[i][0] || l.Out != want[i][1] {
-			t.Fatalf("leg %d: %+v", i, l)
-		}
+	if q.MinOut != "1482537313422000000" { // 1% slippage
+		t.Fatal(q.MinOut)
 	}
-	if r.Legs[0].ImpactBps != 0 {
-		t.Fatalf("single-level fill has no impact: %d", r.Legs[0].ImpactBps)
+	if q.Fillable != "3000000000" { // 2999.999999978 spent, ceil to atoms
+		t.Fatal(q.Fillable)
+	}
+	if q.ImpactBps != 17 || !q.AvgPx.Round(4).Equal(d("2003.3223")) {
+		t.Fatal(q.ImpactBps, q.AvgPx)
+	}
+	// avg ≤ 2010 (50 bps) holds for the whole book: 4010 USDC
+	if q.MaxSafeAmount != "4010000000" {
+		t.Fatal("maxSafe", q.MaxSafeAmount)
 	}
 }
 
-func afterFirstMint() State {
-	s := forkState()
-	s.Nav = streams.NavPoint{Supply: d("999.979999"), Components: []streams.NavComponent{
-		{Market: mon, Balance: d("15972.827172821193"), Value: d("399.320679320529825")},
-		{Market: weth, Balance: d("0.10890563975103"), Value: d("299.4905093153325")},
-		{Market: btc, Balance: d("0.003559"), Value: d("299.48985")},
-	}}
-	return s
-}
-
-func TestSecondMintMinRatio(t *testing.T) {
-	r, err := Mint(afterFirstMint(), d("500000000"), 0)
+func TestBuyPartialAndCap(t *testing.T) {
+	q, err := Market(weth, book, "buy", d("10000000000"), 0, 25) // $10k vs $4010 of asks
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.ExpectedOut != "499987189778170834504" || r.MinOut != r.ExpectedOut {
-		t.Fatalf("got %+v", r)
+	if !q.Partial || q.Fillable != "4010000000" || q.ExpectedOut != "2000000000000000000" || q.MinOut != q.ExpectedOut {
+		t.Fatalf("%+v", q)
+	}
+	// cap 25 bps → avg ≤ 2005: (2000 + 2010x)/(1+x) = 2005 → x = 1 WETH... avg exactly 2005 at x=1, so full book again
+	if q.MaxSafeAmount != "4010000000" {
+		t.Fatal(q.MaxSafeAmount)
+	}
+	q, _ = Market(weth, book, "buy", d("10000000000"), 0, 10) // avg ≤ 2002 → x = 2/8 = 0.25
+	if q.MaxSafeAmount != "2502500000" {
+		t.Fatal("cap 10", q.MaxSafeAmount)
 	}
 }
 
-func TestRedeemHalf(t *testing.T) {
-	r, err := Redeem(afterFirstMint(), d("499989999500000000000"), 100)
+func TestSellStaleBids(t *testing.T) {
+	// 3 WETH sweeps into the 0.01 bid: the thin-book case minOut/maxSafe exist for
+	q, err := Market(weth, book, "sell", d("3000000000000000000"), 50, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.ExpectedOut != "498291630" || r.MinOut != "493308713" {
-		t.Fatalf("got %+v", r)
+	if q.OrderSize != "30000000000" || q.ExpectedOut != "3990010000" || q.Partial || q.ImpactBps != 3350 {
+		t.Fatalf("%+v", q)
 	}
-	if r.Legs[0].In != "7986413586410000000000" { // floorToLot: 1e-8 MON steps
-		t.Fatalf("mon leg %+v", r.Legs[0])
+	// 100 bps → avg ≥ 1980: whole 2 top levels (avg 1995) ok, the 0.01 level allows x = 30/1979.99
+	want := d("2").Add(d("30").Div(d("1979.99")).Div(d("1e-10")).Floor().Mul(d("1e-10"))).Shift(18)
+	if q.MaxSafeAmount != want.String() {
+		t.Fatal(q.MaxSafeAmount, want)
 	}
-}
-
-func TestWalkMultipleLevels(t *testing.T) {
-	s := forkState()
-	b := s.Books[btc]
-	b.Asks = []streams.Level{{d("100"), d("1")}, {d("200"), d("10")}}
-	s.Books[btc] = b
-	cost, base, err := buy(s.Markets[btc], b.Asks, d("300"))
-	if err != nil || !cost.Equal(d("300")) || !base.Equal(d("2")) {
-		t.Fatalf("%s %s %v", cost, base, err)
-	}
-	l := mkLeg(btc, cost, base, cost, base, b.Asks)
-	if l.ImpactBps != 5000 { // avg 150 vs best 100
-		t.Fatalf("impact %d", l.ImpactBps)
+	q, _ = Market(weth, book, "sell", d("20000000000000000000"), 0, 100)
+	if !q.Partial || q.Fillable != "12000000000000000000" {
+		t.Fatalf("partial sell %+v", q)
 	}
 }
 
 func TestErrors(t *testing.T) {
-	s := forkState()
-	b := s.Books[weth]
-	b.Asks = nil
-	s.Books[weth] = b
-	if _, err := Mint(s, d("1000000000"), 0); !errors.Is(err, ErrUnavailable) {
-		t.Fatalf("empty asks: %v", err)
+	if _, err := Market(weth, book, "buy", d("1000000"), 0, 50); !errors.Is(err, ErrMinSize) { // $1 < 0.002 WETH
+		t.Fatal("min size buy", err)
 	}
-	if _, err := Mint(forkState(), d("1"), 0); !errors.Is(err, ErrBadInput) {
-		t.Fatalf("dust: %v", err) // 1 atom allocs round to 0 → contract ZeroAmount
+	if _, err := Market(weth, book, "sell", d("1000000000000000"), 0, 50); !errors.Is(err, ErrMinSize) {
+		t.Fatal("min size sell", err)
 	}
-	if _, err := Redeem(afterFirstMint(), d("999979999000000000001"), 0); !errors.Is(err, ErrBadInput) {
-		t.Fatalf("over supply: %v", err)
+	if _, err := Market(weth, book, "sell", d("2000000000000000"), 0, 50); err != nil { // exactly minSize
+		t.Fatal(err)
 	}
-	s = forkState()
-	delete(s.Books, btc)
-	if _, err := Mint(s, d("1000000000"), 0); !errors.Is(err, ErrUnavailable) {
-		t.Fatalf("missing book: %v", err)
+	if _, err := Market(weth, streams.BookSnapshot{}, "buy", d("1"), 0, 50); !errors.Is(err, ErrUnavailable) {
+		t.Fatal("empty", err)
+	}
+	for _, side := range []string{"mint", ""} {
+		if _, err := Market(weth, book, side, d("1"), 0, 50); !errors.Is(err, ErrBadInput) {
+			t.Fatal(side, err)
+		}
+	}
+	if _, err := Market(weth, book, "buy", d("0"), 0, 50); !errors.Is(err, ErrBadInput) {
+		t.Fatal("zero")
 	}
 }
 
-func TestStale(t *testing.T) {
-	s := forkState()
-	s.Nav.Stale = true // publisher marks supply-0 NAV stale
-	if r, _ := Mint(s, d("1000000000"), 0); r.Stale {
-		t.Fatal("first mint quote must not inherit supply-0 staleness")
+func TestMonUnits(t *testing.T) {
+	// MON_USDC: pricePrecision 1e8 so quoteSize = USD × 1e8; minSize 200 MON
+	mon := streams.MarketInfo{Market: "0x065c9d28e428a0db40191a54d33d5b7c71a9c394", BaseDecimals: 18, QuoteDecimals: 6,
+		PricePrecision: d("100000000"), SizePrecision: d("10000000000"), MinSize: d("2000000000000")}
+	b := streams.BookSnapshot{Asks: []streams.Level{{d("0.02705"), d("100000")}}}
+	q, err := Market(mon, b, "buy", d("10000000"), 0, 50) // $10
+	if err != nil {
+		t.Fatal(err)
 	}
-	s = afterFirstMint()
-	s.Nav.Stale = true
-	if r, _ := Mint(s, d("500000000"), 0); !r.Stale {
-		t.Fatal("mint with supply uses NAV values")
+	if q.OrderSize != "1000000000" || q.ExpectedOut != "369685767097900000000" /* 369.6857670979 MON, floored to 1e-10 */ {
+		t.Fatalf("%+v", q)
 	}
-	if r, _ := Redeem(s, d("1000000000000000000"), 0); !r.Stale {
-		t.Fatal("redeem stale")
+}
+
+func TestBasket(t *testing.T) {
+	r := BuyBasket(d("5000000"), []int64{6000, 4000}, []streams.MarketInfo{weth, weth}, []streams.BookSnapshot{book, book}, 50, 50)
+	if r.Ok || r.Legs[0].Error != "below_min_size" || r.Legs[0].AmountUsdc != "3000000" {
+		t.Fatalf("%+v", r)
+	}
+	r = BuyBasket(d("6000000000"), []int64{5000, 5000}, []streams.MarketInfo{weth, weth}, []streams.BookSnapshot{book, book}, 50, 50)
+	if !r.Ok || r.Partial || len(r.Legs) != 2 || r.FillableUsdc != "6000000000" || r.Legs[1].Quote.ExpectedOut != "1497512437800000000" {
+		t.Fatalf("%+v", r)
+	}
+}
+
+func TestSellBasket(t *testing.T) {
+	mon := streams.MarketInfo{Market: "0x065c9d28e428a0db40191a54d33d5b7c71a9c394", BaseDecimals: 18, QuoteDecimals: 6,
+		PricePrecision: d("100000000"), SizePrecision: d("10000000000"), MinSize: d("2000000000000")}
+	monBook := streams.BookSnapshot{Bids: []streams.Level{{d("0.027"), d("1000")}}}
+	// 1.5 WETH → 2000 + 0.5×1990 = 2995 USDC; 300 MON → 8.1 USDC
+	r := SellBasket([]decimal.Decimal{d("1500000000000000000"), d("300000000000000000000")}, []streams.MarketInfo{weth, mon}, []streams.BookSnapshot{book, monBook}, 100, 100)
+	if !r.Ok || r.Side != "sell" || r.ExpectedOutUsdc != "3003100000" || r.MinOutUsdc != "2973069000" || r.Partial {
+		t.Fatalf("%+v", r)
+	}
+	// 2000 MON exhausts the 1000-MON bid; 100 MON is below minSize
+	r = SellBasket([]decimal.Decimal{d("2000000000000000000000"), d("100000000000000000000")}, []streams.MarketInfo{mon, mon}, []streams.BookSnapshot{monBook, monBook}, 0, 100)
+	if r.Ok || !r.Partial || r.Legs[1].Error != "below_min_size" || r.ExpectedOutUsdc != "27000000" || r.Legs[0].Quote.Fillable != "1000000000000000000000" {
+		t.Fatalf("%+v", r)
 	}
 }

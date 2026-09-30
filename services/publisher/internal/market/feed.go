@@ -3,9 +3,13 @@ package market
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -17,48 +21,87 @@ import (
 )
 
 const (
-	topicBook   = "l2Delta@f"
-	topicTrades = "trades@f"
+	depth    = 20
+	idleMax  = 30 * time.Second // depth arrives ~3/s per market; silence this long = dead socket
+	dedupTTL = time.Hour
+	priceExp = 18 // Kuru WS/REST prices are 1e18 fixed point
 )
 
-// Feed keeps one Kuru gateway connection subscribed to every allowed market and publishes books, trades and refs.
+// Feed keeps one Kuru mainnet WS connection subscribed to every market and publishes books, trades, refs and candles.
 type Feed struct {
-	WSURL, APIURL string
+	WSURL, APIURL string // wss://exchange.kuru.io/ws, https://exchange.kuru.io
 	RDB           redis.Cmdable
-	Markets       func() []streams.MarketInfo // registry view, polled every second
+	Markets       []streams.MarketInfo // Symbol must be set (Resolve)
 	DeviationBps  int
 	Tau           time.Duration
+	Candles       *Candles // nil: no candles
 
 	connected atomic.Bool
 	state     map[string]*mstate
+	seen      map[string]int // trade key → occurrences this session
 }
 
 type mstate struct {
-	info      streams.MarketInfo
-	book      book
-	ref       ewma
-	lastTrade float64 // display px
-	booted    bool    // REST bootstrap attempted
-	seq       uint64
-}
-
-type sub struct{ market, topic string }
-
-type session struct {
-	f      *Feed
-	c      *websocket.Conn
-	ctx    context.Context
-	subs   map[uint64]sub
-	nextID uint64
-	epoch  uint64
+	info       streams.MarketInfo
+	bids, asks []streams.Level // display, top 20
+	ref        ewma
+	lastTrade  float64
+	booted     bool
+	seq        uint64
 }
 
 func (f *Feed) Connected() bool { return f.connected.Load() }
 
+var httpc = &http.Client{Timeout: 10 * time.Second}
+
+func getJSON(ctx context.Context, u string, v any) error {
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	res, err := httpc.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return fmt.Errorf("%s: %s", u, res.Status)
+	}
+	return json.NewDecoder(res.Body).Decode(v)
+}
+
+// Resolve fills Symbol from /api/v3/exchangeInfo and fails if a market is missing or its precisions disagree with deployments.
+func Resolve(ctx context.Context, apiURL string, ms []streams.MarketInfo) error {
+	var info struct {
+		Symbols []struct {
+			Symbol         string          `json:"symbol"`
+			MarketAddress  string          `json:"marketAddress"`
+			PricePrecision decimal.Decimal `json:"pricePrecision"`
+			SizePrecision  decimal.Decimal `json:"sizePrecision"`
+		} `json:"symbols"`
+	}
+	if err := getJSON(ctx, apiURL+"/api/v3/exchangeInfo", &info); err != nil {
+		return err
+	}
+	for i := range ms {
+		m := &ms[i]
+		for _, s := range info.Symbols {
+			if strings.EqualFold(s.MarketAddress, string(m.Market)) {
+				if !s.PricePrecision.Equal(m.PricePrecision) || !s.SizePrecision.Equal(m.SizePrecision) {
+					return fmt.Errorf("%s: kuru precisions %s/%s != deployments %s/%s", s.Symbol, s.PricePrecision, s.SizePrecision, m.PricePrecision, m.SizePrecision)
+				}
+				m.Symbol = s.Symbol
+			}
+		}
+		if m.Symbol == "" {
+			return fmt.Errorf("market %s not in kuru exchangeInfo", m.Market)
+		}
+	}
+	return nil
+}
+
 // Run reconnects with exponential backoff until ctx ends.
 func (f *Feed) Run(ctx context.Context) error {
-	if f.state == nil {
-		f.state = map[string]*mstate{}
+	f.state = map[string]*mstate{}
+	for _, m := range f.Markets {
+		f.state[strings.ToLower(string(m.Market))] = &mstate{info: m, seq: uint64(time.Now().UnixMilli())}
 	}
 	backoff := time.Second
 	for {
@@ -71,7 +114,7 @@ func (f *Feed) Run(ctx context.Context) error {
 		if time.Since(start) > time.Minute {
 			backoff = time.Second
 		}
-		slog.Warn("gateway disconnected", "err", err, "retry", backoff)
+		slog.Warn("kuru ws disconnected", "err", err, "retry", backoff)
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -79,11 +122,6 @@ func (f *Feed) Run(ctx context.Context) error {
 		}
 		backoff = min(backoff*2, 30*time.Second)
 	}
-}
-
-type msg struct {
-	typ websocket.MessageType
-	b   []byte
 }
 
 func (f *Feed) session(ctx context.Context) error {
@@ -95,51 +133,42 @@ func (f *Feed) session(ctx context.Context) error {
 	}
 	defer c.CloseNow()
 	c.SetReadLimit(16 << 20)
+	f.seen = map[string]int{}
 
-	msgs, errc := make(chan msg, 256), make(chan error, 1)
+	var params []string
+	for _, st := range f.state {
+		s := strings.ToLower(st.info.Symbol)
+		params = append(params, s+"@depth", s+"@trade")
+	}
+	sub, _ := json.Marshal(map[string]any{"method": "SUBSCRIBE", "params": params, "id": 1})
+	if err := c.Write(ctx, websocket.MessageText, sub); err != nil {
+		return err
+	}
+	// REST snapshot so books are fresh even if the socket is slow to send its first depthUpdate.
+	for _, st := range f.state {
+		if err := f.restBook(ctx, st); err != nil {
+			slog.Warn("rest depth", "market", st.info.Symbol, "err", err)
+		}
+	}
+
+	msgs, errc := make(chan []byte, 256), make(chan error, 1)
 	go func() {
 		for {
-			typ, b, err := c.Read(ctx)
+			_, b, err := c.Read(ctx)
 			if err != nil {
 				errc <- err
 				return
 			}
 			select {
-			case msgs <- msg{typ, b}:
+			case msgs <- b:
 			case <-ctx.Done():
 				return
 			}
 		}
 	}()
-	// Ping blocks until the pong is read, so it lives off the main loop; a dead peer closes the conn.
-	go func() {
-		t := time.NewTicker(15 * time.Second)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				pctx, pc := context.WithTimeout(ctx, 10*time.Second)
-				err := c.Ping(pctx)
-				pc()
-				if err != nil {
-					c.CloseNow()
-					return
-				}
-			}
-		}
-	}()
-
-	s := &session{f: f, c: c, ctx: ctx, subs: map[uint64]sub{}}
-	for _, st := range f.state {
-		st.book = book{}
-	}
-	if err := s.sync(); err != nil {
-		return err
-	}
 	f.connected.Store(true)
-	slog.Info("gateway connected", "markets", len(f.state))
+	slog.Info("kuru ws connected", "markets", len(f.state))
+	last := time.Now()
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
 	for {
@@ -148,224 +177,199 @@ func (f *Feed) session(ctx context.Context) error {
 			return ctx.Err()
 		case err := <-errc:
 			return err
-		case m := <-msgs:
-			if err := s.handle(m); err != nil {
-				return err
-			}
+		case b := <-msgs:
+			last = time.Now()
+			f.handle(ctx, b)
 		case <-tick.C:
-			if err := s.sync(); err != nil {
-				return err
+			if time.Since(last) > idleMax {
+				return errors.New("idle")
 			}
 			f.publishRefs(ctx)
 		}
 	}
 }
 
-func (s *session) send(v any) error {
-	b, _ := json.Marshal(v)
-	return s.c.Write(s.ctx, websocket.MessageText, b)
+type wsHead struct {
+	E  string `json:"e"`
+	Ts int64  `json:"E"`
+	S  string `json:"s"`
 }
 
-func (s *session) subscribe(market, topic string) error {
-	s.nextID++
-	s.subs[s.nextID] = sub{market, topic}
-	return s.send(map[string]any{"op": "sub", "id": s.nextID, "t": topic, "m": market})
+type wsDepth struct {
+	Bids [][2]string `json:"b"`
+	Asks [][2]string `json:"a"`
 }
 
-// resubscribe drops a sub and opens a fresh one; l2Delta without seq restarts from a snapshot.
-func (s *session) resubscribe(market, topic string) error {
-	for id, x := range s.subs {
-		if x.market == market && x.topic == topic {
-			delete(s.subs, id)
-			if err := s.send(map[string]any{"op": "unsub", "id": id}); err != nil {
-				return err
-			}
-		}
-	}
-	if st := s.f.state[market]; st != nil && topic == topicBook {
-		st.book = book{}
-	}
-	return s.subscribe(market, topic)
+type wsTrade struct {
+	B uint64 `json:"b"` // block
+	T string `json:"t"` // trade id, shared by fills of one taker order
+	P string `json:"p"`
+	Q string `json:"q"`
+	M bool   `json:"m"` // buyer is maker, so the taker sold
+	// exact-name sinks: without them encoding/json folds "T" into t and "M" into m
+	XT json.RawMessage `json:"T"`
+	XM json.RawMessage `json:"M"`
 }
 
-// diff returns markets in want but not have, and in have but not want.
-func diff(have map[string]*mstate, want []streams.MarketInfo) (added []streams.MarketInfo, removed []string) {
-	seen := map[string]bool{}
-	for _, m := range want {
-		k := strings.ToLower(string(m.Market))
-		seen[k] = true
-		if have[k] == nil {
-			added = append(added, m)
+func (f *Feed) handle(ctx context.Context, b []byte) {
+	var h wsHead
+	if err := json.Unmarshal(b, &h); err != nil {
+		slog.Warn("kuru ws message", "err", err, "msg", string(b[:min(len(b), 200)]))
+		return
+	}
+	st := f.state[strings.ToLower(h.S)]
+	if st == nil {
+		return
+	}
+	switch h.E {
+	case "depthUpdate": // carries the full book (observed live 2026-09-30), so it replaces ours
+		var d wsDepth
+		err := json.Unmarshal(b, &d)
+		if err == nil {
+			st.bids, st.asks, err = levels(st.info, d.Bids, d.Asks)
+		}
+		if err != nil {
+			slog.Warn("depth", "market", st.info.Symbol, "err", err)
+			return
+		}
+		f.publishBook(ctx, st)
+	case "trade":
+		t, key, err := decodeTrade(st.info, h, b)
+		if err != nil {
+			slog.Warn("trade", "err", err, "msg", string(b))
+			return
+		}
+		if !f.fresh(ctx, key) {
+			return
+		}
+		if err := streams.Publish(ctx, f.RDB, streams.Trades(string(st.info.Market)), "", t); err != nil {
+			slog.Error("publish trade", "market", st.info.Market, "err", err)
+		}
+		st.lastTrade = t.Px.InexactFloat64()
+		if f.Candles != nil {
+			f.Candles.Add(ctx, t)
 		}
 	}
-	for k := range have {
-		if !seen[k] {
-			removed = append(removed, k)
-		}
-	}
-	return added, removed
 }
 
-// sync subscribes newly allowed markets and drops disallowed ones.
-func (s *session) sync() error {
-	f := s.f
-	added, removed := diff(f.state, f.Markets())
-	subscribed := map[string]bool{}
-	for _, x := range s.subs {
-		subscribed[x.market] = true
+// fresh claims key for its nth occurrence this session, so identical fills in one session all count
+// while a frame replayed after a reconnect (same n in the new session) is dropped.
+// ponytail: occurrence map resets past 100k keys; an identical fill straddling a reset within dedupTTL would be dropped.
+func (f *Feed) fresh(ctx context.Context, key string) bool {
+	if f.seen == nil || len(f.seen) > 100_000 {
+		f.seen = map[string]int{}
 	}
-	for _, m := range added {
-		k := strings.ToLower(string(m.Market))
-		f.state[k] = &mstate{info: m, seq: uint64(time.Now().UnixMilli())}
-	}
-	for k := range f.state {
-		if !subscribed[k] {
-			if err := s.subscribe(k, topicBook); err != nil {
-				return err
-			}
-			if err := s.subscribe(k, topicTrades); err != nil {
-				return err
-			}
-		}
-	}
-	for _, k := range removed {
-		delete(f.state, k)
-		for id, x := range s.subs {
-			if x.market == k {
-				delete(s.subs, id)
-				if err := s.send(map[string]any{"op": "unsub", "id": id}); err != nil {
-					return err
-				}
-			}
-		}
-	}
-	return nil
-}
-
-type control struct {
-	Op  string `json:"op"`
-	ID  uint64 `json:"id"`
-	T   string `json:"t"`
-	M   string `json:"m"`
-	C   string `json:"c"`
-	Msg string `json:"msg"`
-	R   string `json:"r"`
-}
-
-func (s *session) handle(m msg) error {
-	if m.typ == websocket.MessageText {
-		var c control
-		if err := json.Unmarshal(m.b, &c); err != nil {
-			return fmt.Errorf("control %q: %w", m.b, err)
-		}
-		switch c.Op {
-		case "err":
-			slog.Warn("gateway error", "id", c.ID, "code", c.C, "msg", c.Msg, "sub", s.subs[c.ID])
-		case "resync":
-			slog.Info("gateway resync", "t", c.T, "m", c.M)
-			k := strings.ToLower(c.M)
-			if s.f.state[k] != nil {
-				return s.resubscribe(k, strings.SplitN(c.T, "@", 2)[0]+"@f")
-			}
-		case "resub":
-			if x, ok := s.subs[c.ID]; ok {
-				slog.Info("gateway resub", "sub", x, "r", c.R)
-				return s.resubscribe(x.market, x.topic)
-			}
-		}
-		return nil
-	}
-	fr, err := decode(m.b)
+	f.seen[key]++
+	ok, err := f.RDB.SetNX(ctx, "trade:seen:"+key+"#"+strconv.Itoa(f.seen[key]), 1, dedupTTL).Result()
 	if err != nil {
-		return fmt.Errorf("decode: %w", err)
+		slog.Warn("trade dedupe", "err", err)
+		return true
 	}
-	x, ok := s.subs[fr.ID]
-	st := s.f.state[x.market]
-	if !ok || st == nil {
-		return nil
+	return ok
+}
+
+// decodeTrade also returns the frame's identity: market, block, trade id, price, size, side.
+func decodeTrade(m streams.MarketInfo, h wsHead, b []byte) (streams.Trade, string, error) {
+	var w wsTrade
+	if err := json.Unmarshal(b, &w); err != nil {
+		return streams.Trade{}, "", err
 	}
-	if s.epoch == 0 {
-		s.epoch = fr.Epoch
+	px, err := decimal.NewFromString(w.P)
+	if err != nil {
+		return streams.Trade{}, "", err
 	}
-	if fr.Epoch != s.epoch {
-		return fmt.Errorf("feed epoch %d -> %d", s.epoch, fr.Epoch)
+	sz, err := decimal.NewFromString(w.Q)
+	if err != nil {
+		return streams.Trade{}, "", err
 	}
-	switch fr.Kind {
-	case kindBook:
-		st.book.snapshot(fr)
-		s.f.publishBook(s.ctx, st)
-	case kindDelta:
-		changed, gap := st.book.apply(fr)
-		if gap {
-			slog.Info("book seq gap, resync", "market", x.market, "seq", fr.Seq, "prev", fr.Prev)
-			return s.resubscribe(x.market, topicBook)
+	side := "buy"
+	if w.M {
+		side = "sell"
+	}
+	ts := h.Ts
+	if ts == 0 {
+		ts = time.Now().UnixMilli()
+	}
+	key := fmt.Sprintf("%s:%d:%s:%s:%s:%t", strings.ToLower(string(m.Market)), w.B, w.T, w.P, w.Q, w.M)
+	return streams.Trade{Market: m.Market, Ts: ts, Px: px.Shift(-priceExp), Sz: sz.Div(m.SizePrecision), Side: side}, key, nil
+}
+
+// levels converts raw [price1e18, sizeRaw] pairs to top-20 display levels: bids high→low, asks low→high.
+func levels(m streams.MarketInfo, rb, ra [][2]string) (bids, asks []streams.Level, err error) {
+	conv := func(raw [][2]string, desc bool) ([]streams.Level, error) {
+		out := make([]streams.Level, 0, len(raw))
+		for _, l := range raw {
+			px, err := decimal.NewFromString(l[0])
+			if err != nil {
+				return nil, err
+			}
+			sz, err := decimal.NewFromString(l[1])
+			if err != nil {
+				return nil, err
+			}
+			if sz.IsPositive() {
+				out = append(out, streams.Level{px.Shift(-priceExp), sz.Div(m.SizePrecision)})
+			}
 		}
-		if changed {
-			s.f.publishBook(s.ctx, st)
-		}
-	case kindTrades:
-		s.f.publishTrades(s.ctx, st, fr.Fills)
+		sort.Slice(out, func(i, j int) bool { return out[i][0].GreaterThan(out[j][0]) == desc })
+		return out[:min(len(out), depth)], nil
 	}
+	if bids, err = conv(rb, true); err != nil {
+		return
+	}
+	asks, err = conv(ra, false)
+	return
+}
+
+func (f *Feed) restBook(ctx context.Context, st *mstate) error {
+	var d struct {
+		Bids [][2]string `json:"bids"`
+		Asks [][2]string `json:"asks"`
+	}
+	if err := getJSON(ctx, f.APIURL+"/api/v3/depth?limit=100&symbol="+url.QueryEscape(st.info.Symbol), &d); err != nil {
+		return err
+	}
+	bids, asks, err := levels(st.info, d.Bids, d.Asks)
+	if err != nil {
+		return err
+	}
+	st.bids, st.asks = bids, asks
+	f.publishBook(ctx, st)
 	return nil
 }
 
 func (f *Feed) publishBook(ctx context.Context, st *mstate) {
 	st.seq++ // ponytail: seeded from unix ms so it stays monotonic across restarts at < 1000 publishes/s
-	bids, asks := st.book.levels(st.info)
-	snap := streams.BookSnapshot{Market: st.info.Market, Seq: st.seq, Ts: time.Now().UnixMilli(), Bids: bids, Asks: asks}
+	snap := streams.BookSnapshot{Market: st.info.Market, Seq: st.seq, Ts: time.Now().UnixMilli(), Bids: st.bids, Asks: st.asks}
 	if err := streams.Publish(ctx, f.RDB, streams.Book(string(st.info.Market)), streams.BookLatest(string(st.info.Market)), snap); err != nil {
 		slog.Error("publish book", "market", st.info.Market, "err", err)
 	}
 }
 
-func (f *Feed) publishTrades(ctx context.Context, st *mstate, fills []fill) {
-	for _, x := range fills {
-		px := decimal.NewFromInt(x.Px).Div(st.info.PricePrecision)
-		side := "sell"
-		if x.Buy {
-			side = "buy"
-		}
-		t := streams.Trade{Market: st.info.Market, Ts: x.Ts * 1000, Px: px, Sz: decimal.NewFromBigInt(x.Sz, 0).Div(st.info.SizePrecision), Side: side}
-		if err := streams.Publish(ctx, f.RDB, streams.Trades(string(st.info.Market)), "", t); err != nil {
-			slog.Error("publish trade", "market", st.info.Market, "err", err)
-		}
-		st.lastTrade = px.InexactFloat64()
-	}
-}
-
 // mid is the display mid, 0 when either side is empty.
 func (st *mstate) mid() float64 {
-	var bid, ask int64
-	for p := range st.book.bids {
-		bid = max(bid, p)
-	}
-	for p := range st.book.asks {
-		if ask == 0 || p < ask {
-			ask = p
-		}
-	}
-	if bid == 0 || ask == 0 {
+	if len(st.bids) == 0 || len(st.asks) == 0 {
 		return 0
 	}
-	return float64(bid+ask) / 2 / st.info.PricePrecision.InexactFloat64()
+	return st.bids[0][0].Add(st.asks[0][0]).InexactFloat64() / 2
 }
 
 func (f *Feed) publishRefs(ctx context.Context) {
 	now := time.Now()
 	for k, st := range f.state {
-		if !st.book.synced {
-			continue
-		}
 		mid := st.mid()
 		x := mid
 		if x == 0 {
 			if st.lastTrade == 0 && st.ref.ref == 0 && !st.booted {
 				st.booted = true
-				px, err := f.lastTradePx(ctx, k, st.info.PricePrecision)
-				if err != nil {
-					slog.Warn("ref bootstrap", "market", k, "err", err)
+				var tr []struct {
+					Price decimal.Decimal `json:"price"`
 				}
-				st.lastTrade = px
+				if err := getJSON(ctx, f.APIURL+"/api/v3/trades?limit=1&symbol="+url.QueryEscape(st.info.Symbol), &tr); err != nil || len(tr) == 0 {
+					slog.Warn("ref bootstrap", "market", k, "err", err)
+				} else {
+					st.lastTrade = tr[0].Price.Shift(-priceExp).InexactFloat64()
+				}
 			}
 			x = st.lastTrade
 		}
@@ -381,32 +385,4 @@ func (f *Feed) publishRefs(ctx context.Context) {
 			slog.Error("publish ref", "market", k, "err", err)
 		}
 	}
-}
-
-var httpc = &http.Client{Timeout: 5 * time.Second}
-
-// lastTradePx reads the latest Kuru trade over REST (kuru-spot-v2.md §7.2); 0 when the market never traded.
-func (f *Feed) lastTradePx(ctx context.Context, market string, pp decimal.Decimal) (float64, error) {
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, f.APIURL+"/api/v1/markets/"+market+"/trades?limit=1", nil)
-	res, err := httpc.Do(req)
-	if err != nil {
-		return 0, err
-	}
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("status %s", res.Status)
-	}
-	var body struct {
-		Data []struct {
-			Price string `json:"price"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(res.Body).Decode(&body); err != nil || len(body.Data) == 0 {
-		return 0, err
-	}
-	p, err := decimal.NewFromString(body.Data[0].Price)
-	if err != nil {
-		return 0, err
-	}
-	return p.Div(pp).InexactFloat64(), nil
 }

@@ -15,8 +15,10 @@ import (
 
 const (
 	RegistryMarkets = "registry:markets"
-	RegistryBaskets = "registry:baskets"
+	RegistryBaskets = "registry:baskets" // retired with ERC-20 baskets; no writer on mainnet
 	HeartbeatKey    = "publisher:heartbeat"
+	Rates           = "rates" // stream of RatesSnapshot
+	RatesLatest     = "rates:latest"
 	MaxLen          = 1000
 	field           = "data"
 )
@@ -25,8 +27,19 @@ func Book(market string) string       { return "book:" + strings.ToLower(market)
 func BookLatest(market string) string { return Book(market) + ":latest" }
 func Trades(market string) string     { return "trades:" + strings.ToLower(market) }
 func Ref(market string) string        { return "ref:" + strings.ToLower(market) }
-func Nav(basket string) string        { return "nav:" + strings.ToLower(basket) }
+func Nav(basket string) string        { return "nav:" + strings.ToLower(basket) } // retired, no writer
 func NavLatest(basket string) string  { return Nav(basket) + ":latest" }
+
+func Candles(market, interval string) string {
+	return "candles:" + strings.ToLower(market) + ":" + interval
+}
+func CandlesLatest(market, interval string) string { return Candles(market, interval) + ":latest" }
+
+// Rate is rate:{source}:{venue}:{asset}, all lowercase.
+func Rate(source, venue, asset string) string {
+	return strings.ToLower("rate:" + source + ":" + venue + ":" + asset)
+}
+func Funding(perpID int) string { return "funding:" + strconv.Itoa(perpID) }
 
 // Addr is an address that is always lowercase on the wire.
 type Addr string
@@ -46,16 +59,17 @@ func (a *Addr) UnmarshalJSON(b []byte) error {
 type Dec = decimal.Decimal
 
 type MarketInfo struct {
-	Market         Addr `json:"market"`
-	Base           Addr `json:"base"`
-	Quote          Addr `json:"quote"`
-	BaseDecimals   int  `json:"baseDecimals"`
-	QuoteDecimals  int  `json:"quoteDecimals"`
-	PricePrecision Dec  `json:"pricePrecision"`
-	SizePrecision  Dec  `json:"sizePrecision"`
-	TickSize       Dec  `json:"tickSize"`
-	MinSize        Dec  `json:"minSize"`
-	TakerFeePps    Dec  `json:"takerFeePps"`
+	Market         Addr   `json:"market"`
+	Symbol         string `json:"symbol"` // Kuru symbol, e.g. WETH_USDC
+	Base           Addr   `json:"base"`
+	Quote          Addr   `json:"quote"`
+	BaseDecimals   int    `json:"baseDecimals"`
+	QuoteDecimals  int    `json:"quoteDecimals"`
+	PricePrecision Dec    `json:"pricePrecision"`
+	SizePrecision  Dec    `json:"sizePrecision"`
+	TickSize       Dec    `json:"tickSize"`
+	MinSize        Dec    `json:"minSize"`
+	TakerFeePps    Dec    `json:"takerFeePps"`
 }
 
 type Component struct {
@@ -99,6 +113,50 @@ type RefPrice struct {
 	Deviated bool  `json:"deviated"`
 }
 
+// Candle is OHLCV in display units; T is the bucket start (unix ms), V base volume, Q quote volume.
+type Candle struct {
+	Market   Addr   `json:"market"`
+	Interval string `json:"interval"`
+	T        int64  `json:"t"`
+	O        Dec    `json:"o"`
+	H        Dec    `json:"h"`
+	L        Dec    `json:"l"`
+	C        Dec    `json:"c"`
+	V        Dec    `json:"v"`
+	Q        Dec    `json:"q"`
+	N        int    `json:"n"`
+}
+
+// RateInfo is one venue's current yield. Apy/Apr are fractions (0.039 = 3.9%).
+type RateInfo struct {
+	Source  string `json:"source"` // lending|staking
+	Venue   string `json:"venue"`  // aave|neverland|euler-k3usdc|morpho-hyperusdca|shmonad
+	Asset   string `json:"asset"`  // token symbol from deployments
+	Address Addr   `json:"address"`
+	Apy     Dec    `json:"apy"`
+	Kind    string `json:"kind"` // supply (Aave liquidity rate) | trailing24h (share price)
+	Ts      int64  `json:"ts"`
+}
+
+// FundingInfo is Perpl's latest funding. Rate is the fraction per interval; positive = longs pay shorts, so AprShort > 0 pays a short.
+type FundingInfo struct {
+	PerpID      int    `json:"perpId"`
+	Name        string `json:"name"`
+	Rate        Dec    `json:"rate"`
+	IntervalSec int    `json:"intervalSec"`
+	AprShort    Dec    `json:"aprShort"`
+	AprShort7d  Dec    `json:"aprShort7d"`
+	Block       uint64 `json:"block"`
+	Ts          int64  `json:"ts"`
+}
+
+type RatesSnapshot struct {
+	Ts      int64         `json:"ts"`
+	Rates   []RateInfo    `json:"rates"`
+	Funding []FundingInfo `json:"funding"`
+}
+
+// NavComponent, NavPoint, BasketInfo, Component: retired ERC-20 basket types, kept until scheduler/seeder drop them.
 type NavComponent struct {
 	Market  Addr `json:"market"`
 	Token   Addr `json:"token"`

@@ -103,7 +103,13 @@ func TestSlowClientDropped(t *testing.T) {
 func TestValidTopic(t *testing.T) {
 	for tp, ok := range map[string]bool{
 		book: true,
-		"nav.0x5bdea6f9f9aba34f4ecb9b865646a792b835ef7f":    true,
+		"nav.0x5bdea6f9f9aba34f4ecb9b865646a792b835ef7f":        false,
+		"candles.0x5bdea6f9f9aba34f4ecb9b865646a792b835ef7f.1m": true,
+		"candles.0x5bdea6f9f9aba34f4ecb9b865646a792b835ef7f.1d": true,
+		"candles.0x5bdea6f9f9aba34f4ecb9b865646a792b835ef7f.2m": false,
+		"candles.0x5bdea6f9f9aba34f4ecb9b865646a792b835ef7f":    false,
+		"rates":  true,
+		"rates.": false,
 		"trades.0x5bdea6f9f9aba34f4ecb9b865646a792b835ef7f": true,
 		"book.0x5BDEA6F9F9abA34F4EcB9B865646A792b835ef7f":   false,
 		"ref.0x5bdea6f9f9aba34f4ecb9b865646a792b835ef7f":    false,

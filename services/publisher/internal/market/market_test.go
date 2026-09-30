@@ -1,9 +1,8 @@
 package market
 
 import (
-	"encoding/binary"
+	"encoding/json"
 	"math"
-	"math/big"
 	"testing"
 	"time"
 
@@ -11,137 +10,61 @@ import (
 	"github.com/snehendu098/sweem-terminal/internal/streams"
 )
 
-type wb []byte
+func d(s string) decimal.Decimal { return decimal.RequireFromString(s) }
 
-func (w *wb) u8(v byte)    { *w = append(*w, v) }
-func (w *wb) u32(v uint32) { *w = binary.BigEndian.AppendUint32(*w, v) }
-func (w *wb) u64(v uint64) { *w = binary.BigEndian.AppendUint64(*w, v) }
-func (w *wb) u128(v int64) { w.u64(0); w.u64(uint64(v)) }
-func (w *wb) pad(n int)    { *w = append(*w, make([]byte, n)...) }
-func (w *wb) addr(b byte)  { w.pad(19); w.u8(b) }
-func hdr(id uint64, kind byte) *wb {
-	w := &wb{}
-	w.u64(id)
-	*w = append(*w, "KXMD"...)
-	w.u8(1)
-	w.u8(kind)
-	w.u8(3)
-	w.u8(1)
-	w.u64(285)
-	return w
-}
+var weth = streams.MarketInfo{Market: "0xa6afd386135b7d41a6c40c525abc4a1019b0d132", PricePrecision: d("10000"), SizePrecision: d("10000000000")}
 
-func snapBytes(seq uint64, bids, asks [][2]int64) []byte {
-	w := hdr(1, kindBook)
-	w.addr(0xab)
-	w.u64(seq)
-	w.pad(8 + 40 + 8 + 4 + 13)
-	w.u32(uint32(len(bids)))
-	w.u32(uint32(len(asks)))
-	for _, l := range append(bids, asks...) {
-		w.u128(l[0])
-		w.u128(l[1])
-	}
-	return *w
-}
-
-func deltaBytes(seq, prev uint64, ups ...[3]int64) []byte {
-	w := hdr(1, kindDelta)
-	w.addr(0xab)
-	w.u64(seq)
-	w.u64(prev)
-	w.pad(8 + 40)
-	w.u32(uint32(len(ups)))
-	for _, u := range ups {
-		w.u8(byte(u[0]))
-		w.u64(uint64(u[1]))
-		w.u128(u[2])
-		w.pad(16 + 16 + 4)
-	}
-	return *w
-}
-
-func mustDecode(t *testing.T, b []byte) *frame {
-	t.Helper()
-	f, err := decode(b)
+func TestLevels(t *testing.T) {
+	// raw pairs copied from a live WETH_USDC depthUpdate
+	bids, asks, err := levels(weth,
+		[][2]string{{"10000000000000000", "100000000000"}, {"2671090000000000000000", "7486000000"}, {"2670130000000000000000", "0"}},
+		[][2]string{{"2674150000000000000000", "748650269"}, {"2672710000000000000000", "7486000000"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return f
-}
-
-func TestDecodeTrades(t *testing.T) {
-	w := hdr(9, kindTrades)
-	w.addr(0xcd)
-	w.u64(10)
-	w.u64(7)
-	w.pad(48)
-	w.u32(1)
-	w.u64(1)
-	w.pad(2)
-	w.u8(2)
-	w.u64(8604591)
-	w.u128(2326)
-	w.u64(1790070859)
-	f := mustDecode(t, *w)
-	if f.ID != 9 || f.Seq != 10 || f.Prev != 7 || len(f.Fills) != 1 || f.Fills[0].Buy || f.Fills[0].Px != 8604591 || f.Fills[0].Sz.Int64() != 2326 || f.Fills[0].Ts != 1790070859 {
-		t.Fatalf("%+v %+v", f, f.Fills)
+	if len(bids) != 2 || !bids[0][0].Equal(d("2671.09")) || !bids[0][1].Equal(d("0.7486")) || !bids[1][0].Equal(d("0.01")) {
+		t.Fatal("bids", bids)
 	}
-	if _, err := decode((*w)[:len(*w)-3]); err == nil {
-		t.Fatal("truncated frame must fail")
+	if len(asks) != 2 || !asks[0][0].Equal(d("2672.71")) || !asks[1][1].Equal(d("0.0748650269")) {
+		t.Fatal("asks", asks)
+	}
+	var many [][2]string
+	for i := 1; i <= 30; i++ {
+		many = append(many, [2]string{decimal.NewFromInt(int64(i)).Shift(18).String(), "1"})
+	}
+	if b, _, _ := levels(weth, many, nil); len(b) != depth || !b[0][0].Equal(d("30")) {
+		t.Fatal("depth cap / order", len(b), b[0])
+	}
+	if _, _, err := levels(weth, [][2]string{{"x", "1"}}, nil); err == nil {
+		t.Fatal("bad price accepted")
 	}
 }
 
-func TestBookSnapshotDeltasGap(t *testing.T) {
-	info := streams.MarketInfo{PricePrecision: decimal.NewFromInt(100), SizePrecision: decimal.NewFromInt(100000000)}
-	var b book
-	if ch, gap := b.apply(mustDecode(t, deltaBytes(5, 4, [3]int64{1, 100, 1}))); ch || gap {
-		t.Fatal("delta before snapshot must be ignored")
+func TestCandleApply(t *testing.T) {
+	tr := func(ts int64, px, sz string) streams.Trade {
+		return streams.Trade{Market: weth.Market, Ts: ts, Px: d(px), Sz: d(sz)}
 	}
-	b.snapshot(mustDecode(t, snapBytes(10, [][2]int64{{8543040, 2326}, {8530168, 703385}}, [][2]int64{{8600000, 5}})))
-	// retained delta already in the snapshot
-	if ch, gap := b.apply(mustDecode(t, deltaBytes(9, 8, [3]int64{1, 1, 1}))); ch || gap {
-		t.Fatal("seq <= snapshot must be skipped")
+	base := int64(1_790_731_200_000) // minute-aligned
+	var c *streams.Candle
+	c = apply(c, tr(base+1_000, "10", "1"), "1m", time.Minute)
+	c = apply(c, tr(base+2_000, "12", "2"), "1m", time.Minute)
+	c = apply(c, tr(base+3_000, "9", "1"), "1m", time.Minute)
+	c = apply(c, tr(base+4_000, "11", "0.5"), "1m", time.Minute)
+	if c.T != base || !c.O.Equal(d("10")) || !c.H.Equal(d("12")) || !c.L.Equal(d("9")) || !c.C.Equal(d("11")) ||
+		!c.V.Equal(d("4.5")) || !c.Q.Equal(d("48.5")) || c.N != 4 {
+		t.Fatalf("%+v", c)
 	}
-	// bridge: prev <= snapshot seq, sparse
-	if ch, gap := b.apply(mustDecode(t, deltaBytes(13, 7, [3]int64{1, 8530168, 0}, [3]int64{2, 8590000, 9}))); !ch || gap {
-		t.Fatal("bridge frame rejected")
+	old := apply(c, tr(base-1, "1", "1"), "1m", time.Minute)
+	if old != c || c.N != 4 {
+		t.Fatal("older trade must be ignored")
 	}
-	bids, asks := b.levels(info)
-	if len(bids) != 1 || bids[0][0].String() != "85430.4" || bids[0][1].String() != "0.00002326" {
-		t.Fatal(bids)
+	next := apply(c, tr(base+60_000, "13", "1"), "1m", time.Minute)
+	if next == c || next.T != base+60_000 || !next.O.Equal(d("13")) || next.N != 1 {
+		t.Fatalf("new bucket %+v", next)
 	}
-	if len(asks) != 2 || asks[0][0].String() != "85900" || asks[1][0].String() != "86000" {
-		t.Fatal(asks)
-	}
-	// linked frame
-	if ch, gap := b.apply(mustDecode(t, deltaBytes(20, 13, [3]int64{1, 8500000, 3}))); !ch || gap {
-		t.Fatal("linked frame rejected")
-	}
-	// prev must equal last seq exactly
-	if _, gap := b.apply(mustDecode(t, deltaBytes(25, 21))); !gap || b.synced {
-		t.Fatal("gap not detected")
-	}
-}
-
-func TestBookBridgeGap(t *testing.T) {
-	var b book
-	b.snapshot(mustDecode(t, snapBytes(10, nil, nil)))
-	if _, gap := b.apply(mustDecode(t, deltaBytes(12, 11))); !gap {
-		t.Fatal("bridge with prev > snapshot seq is a gap")
-	}
-}
-
-func TestTopDepth(t *testing.T) {
-	b := book{bids: map[int64]*big.Int{}, asks: map[int64]*big.Int{}}
-	for i := int64(1); i <= 30; i++ {
-		b.bids[i] = big.NewInt(1)
-		b.asks[100+i] = big.NewInt(1)
-	}
-	one := decimal.NewFromInt(1)
-	bids, asks := b.levels(streams.MarketInfo{PricePrecision: one, SizePrecision: one})
-	if len(bids) != 20 || bids[0][0].IntPart() != 30 || bids[19][0].IntPart() != 11 || len(asks) != 20 || asks[0][0].IntPart() != 101 {
-		t.Fatal(bids, asks)
+	day := apply(nil, tr(base+5_000, "1", "1"), "1d", 24*time.Hour)
+	if time.UnixMilli(day.T).UTC().Format(time.RFC3339) != "2026-09-30T00:00:00Z" {
+		t.Fatal("1d bucket not UTC midnight", time.UnixMilli(day.T).UTC())
 	}
 }
 
@@ -166,10 +89,24 @@ func TestEWMA(t *testing.T) {
 	}
 }
 
-func TestDiff(t *testing.T) {
-	have := map[string]*mstate{"0xaa": {}, "0xbb": {}}
-	added, removed := diff(have, []streams.MarketInfo{{Market: "0xBB"}, {Market: "0xcc"}})
-	if len(added) != 1 || added[0].Market != "0xcc" || len(removed) != 1 || removed[0] != "0xaa" {
-		t.Fatal(added, removed)
+func TestDecodeLiveFrames(t *testing.T) {
+	// verbatim mainnet frames; trade "b" is a block number, depth "b" is bids
+	tr := []byte(`{"e":"trade","E":1790731958000,"T":1790731958,"s":"0xa6afd386135b7d41a6c40c525abc4a1019b0d132","t":"68392503","p":"2669390000000000000000","q":"564230269","b":109191782,"m":true,"M":true}`)
+	var h wsHead
+	if err := json.Unmarshal(tr, &h); err != nil || h.E != "trade" {
+		t.Fatal(err, h)
+	}
+	got, key, err := decodeTrade(weth, h, tr)
+	if err != nil || key != "0xa6afd386135b7d41a6c40c525abc4a1019b0d132:109191782:68392503:2669390000000000000000:564230269:true" || got.Ts != 1790731958000 || got.Side != "sell" || !got.Px.Equal(d("2669.39")) || !got.Sz.Equal(d("0.0564230269")) {
+		t.Fatal(err, got)
+	}
+	buy := []byte(`{"e":"trade","E":1790731091000,"T":1790731091,"s":"0x40c49f171202f91ff5d2fae34c22dd2bfdd22af0","t":"68386784","p":"83410070000000000000000","q":"2387500","b":109188910,"m":false,"M":true}`)
+	if got, _, err := decodeTrade(weth, h, buy); err != nil || got.Side != "buy" {
+		t.Fatal("taker buy (m=false, M=true) must stay buy", err, got.Side)
+	}
+	dep := []byte(`{"e":"depthUpdate","E":1790731050000,"T":1790731050,"s":"0xa6afd386135b7d41a6c40c525abc4a1019b0d132","U":109188776,"u":109188776,"b":[["2671090000000000000000","7486000000"]],"a":[["2672710000000000000000","7486000000"]]}`)
+	var w wsDepth
+	if err := json.Unmarshal(dep, &w); err != nil || len(w.Bids) != 1 || len(w.Asks) != 1 {
+		t.Fatal(err, w)
 	}
 }

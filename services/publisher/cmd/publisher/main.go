@@ -4,13 +4,16 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
+	"sort"
+	"strings"
 	"syscall"
 	"time"
 
-	"github.com/ethereum/go-ethereum/common"
 	"github.com/redis/go-redis/v9"
+	"github.com/shopspring/decimal"
 	"github.com/snehendu098/sweem-terminal/internal/chain"
 	"github.com/snehendu098/sweem-terminal/internal/config"
 	"github.com/snehendu098/sweem-terminal/internal/httpx"
@@ -18,8 +21,7 @@ import (
 	"github.com/snehendu098/sweem-terminal/internal/pg"
 	"github.com/snehendu098/sweem-terminal/internal/streams"
 	"github.com/snehendu098/sweem-terminal/services/publisher/internal/market"
-	"github.com/snehendu098/sweem-terminal/services/publisher/internal/nav"
-	"github.com/snehendu098/sweem-terminal/services/publisher/internal/registry"
+	"github.com/snehendu098/sweem-terminal/services/publisher/internal/rates"
 )
 
 func main() {
@@ -32,15 +34,18 @@ func main() {
 
 func run() error {
 	var e config.Env
-	rpcURL, dbURL, redisURL := e.Str("RPC_URL"), e.Str("DATABASE_URL"), e.Str("REDIS_URL")
-	wsURL, apiURL, depPath := e.Str("KURU_GATEWAY_WS_URL"), e.Str("KURU_API_URL"), e.Str("DEPLOYMENTS_PATH")
+	rpcURL, dbURL, redisURL, depPath := e.Str("RPC_URL"), e.Str("DATABASE_URL"), e.Str("REDIS_URL"), e.Str("DEPLOYMENTS_PATH")
+	wsURL := e.Opt("KURU_WS_URL", "wss://exchange.kuru.io/ws")
+	apiURL := e.Opt("KURU_API_URL", "https://exchange.kuru.io")
+	perplURL := e.Opt("PERPL_API_URL", "https://app.perpl.xyz")
 	devBps := e.Int("REF_DEVIATION_BPS", 500)
 	tau := e.Duration("REF_TAU", time.Minute)
+	rateEvery := e.Duration("RATES_EVERY", time.Minute)
 	addr := e.Opt("ADDR", ":8081")
 	if err := e.Err(); err != nil {
 		return err
 	}
-	dep, err := config.LoadDeployments(depPath)
+	dep, err := config.LoadDeployments143(depPath)
 	if err != nil {
 		return err
 	}
@@ -64,18 +69,20 @@ func run() error {
 	rdb := redis.NewClient(ropt)
 	defer rdb.Close()
 
-	reg := &registry.Registry{ETH: eth, Factory: common.HexToAddress(dep.Factory), RDB: rdb}
-	if err := reg.Refresh(ctx); err != nil {
+	markets := Markets(dep)
+	if err := market.Resolve(ctx, apiURL, markets); err != nil {
 		return err
 	}
-	feed := &market.Feed{WSURL: wsURL, APIURL: apiURL, RDB: rdb, Markets: reg.Markets, DeviationBps: devBps, Tau: tau}
-	navs := &nav.Service{ETH: eth, RDB: rdb, PG: db, Registry: reg, MaxAge: 10 * time.Second,
-		AccountCore: common.HexToAddress(dep.Kuru.AccountCore), USDC: common.HexToAddress(dep.Kuru.USDC)}
+	if err := streams.Publish(ctx, rdb, "", streams.RegistryMarkets, markets); err != nil {
+		return err
+	}
+	feed := &market.Feed{WSURL: wsURL, APIURL: apiURL, RDB: rdb, Markets: markets, DeviationBps: devBps, Tau: tau,
+		Candles: &market.Candles{PG: db, RDB: rdb}}
+	poller := &rates.Poller{ETH: eth, RDB: rdb, Dep: dep, PerplURL: perplURL, HTTP: &http.Client{Timeout: 20 * time.Second}}
 
-	errc := make(chan error, 5)
-	go func() { errc <- reg.Run(ctx, 15*time.Second) }()
+	errc := make(chan error, 4)
 	go func() { errc <- feed.Run(ctx) }()
-	go func() { errc <- navs.Run(ctx, 2*time.Second) }()
+	go func() { errc <- poller.Run(ctx, rateEvery) }()
 	go func() {
 		t := time.NewTicker(time.Second)
 		defer t.Stop()
@@ -95,7 +102,7 @@ func run() error {
 		"redis":    func(ctx context.Context) error { return rdb.Ping(ctx).Err() },
 		"postgres": func(ctx context.Context) error { return db.Ping(ctx) },
 		"rpc":      func(ctx context.Context) error { _, err := eth.BlockNumber(ctx); return err },
-		"gateway": func(context.Context) error {
+		"kuru": func(context.Context) error {
 			if !feed.Connected() {
 				return errors.New("disconnected")
 			}
@@ -103,8 +110,26 @@ func run() error {
 		},
 	})
 	go func() { errc <- httpx.Run(ctx, addr, mux) }()
-	slog.Info("publisher up", "addr", addr, "markets", len(reg.Markets()), "baskets", len(reg.Baskets()))
+	slog.Info("publisher up", "addr", addr, "markets", len(markets))
 	err = <-errc
 	stop()
 	return err
 }
+
+// Markets is the registry view of the Kuru V1 markets in deployments (raw precisions, lowercase addresses).
+func Markets(dep *config.Deployments143) []streams.MarketInfo {
+	var out []streams.MarketInfo
+	for _, m := range dep.Kuru.Markets {
+		base, quote := dep.Tokens[m.Base], dep.Tokens[m.Quote]
+		out = append(out, streams.MarketInfo{
+			Market: streams.Addr(strings.ToLower(m.Orderbook)), Base: streams.Addr(base.Address), Quote: streams.Addr(quote.Address),
+			BaseDecimals: int(base.Decimals), QuoteDecimals: int(quote.Decimals),
+			PricePrecision: dec(m.PricePrecision), SizePrecision: dec(m.SizePrecision), TickSize: dec(m.TickSize), MinSize: dec(m.MinSize),
+			TakerFeePps: decimal.Zero,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Market < out[j].Market })
+	return out
+}
+
+func dec(v uint64) decimal.Decimal { return decimal.NewFromUint64(v) }

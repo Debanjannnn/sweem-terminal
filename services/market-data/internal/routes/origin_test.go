@@ -10,7 +10,7 @@ import (
 )
 
 func TestOrigins(t *testing.T) {
-	srv := httptest.NewServer(New(t.Context(), nil, []string{"http://localhost:3000"}))
+	srv := httptest.NewServer(New(t.Context(), nil, nil, []string{"http://localhost:3000"}))
 	defer srv.Close()
 	ws := "ws" + strings.TrimPrefix(srv.URL, "http") + "/api/v1/ws"
 	dial := func(origin string) error {

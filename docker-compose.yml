@@ -11,6 +11,12 @@ x-base-env: &base-env
   DEPLOYMENTS_PATH: /deployments/10143.json
   LOG_LEVEL: ${LOG_LEVEL:-info}
 
+x-mainnet-env: &mainnet-env
+  RPC_URL: ${MAINNET_RPC_URL:-https://rpc.monad.xyz}
+  CHAIN_ID: "143"
+  DEPLOYMENTS_PATH: /deployments/143.json
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+
 x-db: &db postgres://sweem:sweem@postgres:5432/sweem?sslmode=disable
 x-redis: &redis redis://redis:6379
 
@@ -54,18 +60,17 @@ services:
     ports: ["8081:8081"]
     depends_on: *deps
     environment:
-      <<: *base-env
+      <<: *mainnet-env
       DATABASE_URL: *db
       REDIS_URL: *redis
-      KURU_GATEWAY_WS_URL: ${KURU_GATEWAY_WS_URL}
-      KURU_API_URL: ${KURU_API_URL}
 
   market-data:
     build: {context: ., dockerfile: go.Dockerfile, args: {SVC: market-data}}
     ports: ["8082:8082"]
-    depends_on: {redis: {condition: service_healthy}}
+    depends_on: *deps
     environment:
-      <<: *base-env
+      <<: *mainnet-env
+      DATABASE_URL: *db
       REDIS_URL: *redis
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
 
@@ -120,6 +125,18 @@ services:
       PRIVY_APP_ID: ${PRIVY_APP_ID}
       PRIVY_KEY_QUORUM_ID: ${PRIVY_KEY_QUORUM_ID}
       PRIVY_POLICY_ID: ${PRIVY_POLICY_ID}
+
+  history:
+    build: {context: ., dockerfile: go.Dockerfile, args: {SVC: history}}
+    ports: ["8087:8087"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+    environment:
+      DATABASE_URL: *db
+      ENVIO_API_TOKEN: ${ENVIO_API_TOKEN}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
 
   indexer:
     build: {context: ., dockerfile: services/indexer/Dockerfile}

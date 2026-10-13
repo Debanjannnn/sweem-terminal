@@ -1,15 +1,15 @@
-# prod overlay (Vultr, one box): images from GHCR, built by .github/workflows/images.yml; TAG pins a commit sha
+# prod overlay (Vultr, one box): images from GHCR, built by .github/workflows/images.yml; deploy pulls :latest
 # only Caddy is published; everything else stays on the compose network
 services:
   postgres: {ports: !reset [], restart: unless-stopped}
   redis: {ports: !reset [], restart: unless-stopped}
-  publisher: {image: "ghcr.io/snehendu098/sweem-publisher:${TAG:-latest}", ports: !reset [], restart: unless-stopped}
-  market-data: {image: "ghcr.io/snehendu098/sweem-market-data:${TAG:-latest}", ports: !reset [], restart: unless-stopped}
-  api: {image: "ghcr.io/snehendu098/sweem-api:${TAG:-latest}", ports: !reset [], restart: unless-stopped}
-  scheduler: {image: "ghcr.io/snehendu098/sweem-scheduler:${TAG:-latest}", ports: !reset [], restart: unless-stopped}
-  executor: {image: "ghcr.io/snehendu098/sweem-executor:${TAG:-latest}", restart: unless-stopped}
-  history: {image: "ghcr.io/snehendu098/sweem-history:${TAG:-latest}", ports: !reset [], restart: unless-stopped}
-  indexer: {image: "ghcr.io/snehendu098/sweem-indexer:${TAG:-latest}", ports: !reset [], restart: unless-stopped}
+  publisher: {image: "ghcr.io/snehendu098/sweem-publisher:latest", ports: !reset [], restart: unless-stopped}
+  market-data: {image: "ghcr.io/snehendu098/sweem-market-data:latest", ports: !reset [], restart: unless-stopped}
+  api: {image: "ghcr.io/snehendu098/sweem-api:latest", ports: !reset [], restart: unless-stopped}
+  scheduler: {image: "ghcr.io/snehendu098/sweem-scheduler:latest", ports: !reset [], restart: unless-stopped}
+  executor: {image: "ghcr.io/snehendu098/sweem-executor:latest", restart: unless-stopped}
+  history: {image: "ghcr.io/snehendu098/sweem-history:latest", ports: !reset [], restart: unless-stopped}
+  indexer: {image: "ghcr.io/snehendu098/sweem-indexer:latest", ports: !reset [], restart: unless-stopped}
 
   # TLS for api.$DOMAIN: / → api, /data → market-data (REST + WS), /history → history
   caddy:

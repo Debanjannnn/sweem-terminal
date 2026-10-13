@@ -184,10 +184,10 @@ export function Holdings({
                   <td className="px-3 py-3">
                     <span className={cn("rounded-md border px-2 py-0.5 text-[11px]", CHIP[r.cls])}>{r.cls}</span>
                   </td>
-                  <td className="px-3 py-3">{r.price === null ? "—" : fmtUsd(r.price)}</td>
+                  <td className="px-3 py-3">{r.price === null ? "-" : fmtUsd(r.price)}</td>
                   <td className="px-3 py-3">{r.balance}</td>
                   <td className="py-3 pr-3">
-                    {r.value === null ? "—" : fmtUsd(r.value)}
+                    {r.value === null ? "-" : fmtUsd(r.value)}
                     {r.note}
                   </td>
                 </tr>

@@ -46,8 +46,8 @@ export function OrderBook({ book, symbol, stale, error }: { book: Book | null | 
         <div className="py-2">
           {asks.map((l) => row(l, true))}
           <div className="tnum flex justify-between border-y border-border px-6 py-2 text-sm">
-            <span className="font-medium">{m !== null ? fmtUsd(m) : "—"}</span>
-            <span className="text-xs text-muted-foreground">spread {spread !== null ? fmtUsd(spread) : "—"}</span>
+            <span className="font-medium">{m !== null ? fmtUsd(m) : "-"}</span>
+            <span className="text-xs text-muted-foreground">spread {spread !== null ? fmtUsd(spread) : "-"}</span>
           </div>
           {bids.map((l) => row(l, false))}
           {!asks.length && !bids.length && <p className="py-6 text-center text-sm text-muted-foreground">Empty book.</p>}

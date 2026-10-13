@@ -153,6 +153,7 @@ function WalletMenu() {
                 </button>
               </div>
               <Wallet />
+              <Automation />
               {err && <p className="text-xs break-words text-destructive">{err}</p>}
               <div className="flex gap-2 pt-1">
                 <MenuButton
@@ -185,6 +186,28 @@ function Wallet() {
       <Row label="USDC" value={amt("USDC")} />
       <Row label="MON (gas)" value={amt("MON")} />
       {h.error && <p className="text-xs text-warning">Balances unavailable: {h.error}</p>}
+    </div>
+  );
+}
+
+// Privy delegated signer: lets schedules / strategies run while offline
+function Automation() {
+  const { delegated, delegate, revoke, delegating, delegationError, signerConfigured, wallet } = useSession();
+  return (
+    <div className="space-y-2 border-t border-border pt-3">
+      <div className="flex items-center justify-between gap-3">
+        <span className="flex items-center gap-2">
+          <span className="text-muted-foreground">Automation</span>
+          <span className={cn("rounded-md px-1.5 py-0.5 text-[11px]", delegated ? "bg-positive/15 text-positive" : "bg-secondary text-muted-foreground")}>
+            {delegated ? "On" : "Off"}
+          </span>
+        </span>
+        <MenuButton disabled={delegating || (!delegated && (!wallet || !signerConfigured))} onClick={() => void (delegated ? revoke() : delegate())}>
+          {delegating ? "…" : delegated ? "Revoke" : "Enable"}
+        </MenuButton>
+      </div>
+      {delegated && <p className="text-xs text-muted-foreground">Revoking stops every schedule.</p>}
+      {delegationError && <p className="text-xs break-words text-destructive">{delegationError}</p>}
     </div>
   );
 }

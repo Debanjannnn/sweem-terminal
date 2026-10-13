@@ -8,9 +8,10 @@ import { useAsync, useSession } from "@/lib/session";
 import { addressUrl } from "@/lib/config";
 import { Button, Card, Detail, ErrorBox, Panel, Skeleton, Stat } from "@/components/ui";
 import { TokenIcon } from "@/components/TokenIcon";
+import { IconStack } from "@/components/invest/BasketCard";
 import { AllocationDonut, BacktestView, pct } from "@/components/earn/Backtest";
 import { DeployPanel } from "@/components/earn/DeployPanel";
-import { blendedApy, KIND_LABEL, leverageOf, sourceApy, toBacktest, venueName } from "@/components/earn/sources";
+import { blendedApy, KIND_LABEL, leverageOf, parts, sourceApy, toBacktest, venueName } from "@/components/earn/sources";
 
 export default function StrategyPage() {
   const id = useParams<{ id: string }>().id;
@@ -19,7 +20,10 @@ export default function StrategyPage() {
   const s = st.data;
   const { rates } = useRates();
   // ponytail: backtest straight from history (no api write per view); api's stored summary shown when history is down
-  const body = s ? toBacktest(s.asset, s.sources, s.rules, s.asset === "USDC" ? "1000" : "1") : null;
+  const sleeves = s ? parts(s) : [];
+  const multi = sleeves.length > 1;
+  // multi amount is USD; single is asset units
+  const body = s ? toBacktest(sleeves, s.rules, multi || s.asset === "USDC" ? "1000" : "1") : null;
   const bt = useAsync(s ? `bt:${s.id}` : null, () => runBacktest(body!));
 
   if (st.error === "not_found")
@@ -34,7 +38,7 @@ export default function StrategyPage() {
       </main>
     );
 
-  const live = s ? (s.apy?.estimate != null ? Number(s.apy.estimate) : blendedApy(s.sources, s.asset, rates)) : null;
+  const live = s ? (s.apy?.estimate != null ? Number(s.apy.estimate) : blendedApy(sleeves, rates)) : null;
 
   return (
     <main className="w-full px-4 pb-24 pt-10 md:px-6">
@@ -42,10 +46,10 @@ export default function StrategyPage() {
         <div className="min-w-0 space-y-4">
           <div className="flex items-center justify-between gap-4">
             <div className="flex min-w-0 items-center gap-3">
-              {s ? <TokenIcon symbol={s.asset} size={36} /> : <Skeleton className="size-9 rounded-full" />}
+              {s ? <IconStack symbols={sleeves.map((sl) => sl.asset)} size={36} ring="ring-background" /> : <Skeleton className="size-9 rounded-full" />}
               {s ? (
                 <h1 className="truncate text-3xl font-medium tracking-tight">
-                  {s.name} <span className="text-muted-foreground">{s.asset}</span>
+                  {s.name} <span className="text-muted-foreground">{sleeves.map((sl) => sl.asset).join(" · ")}</span>
                 </h1>
               ) : (
                 <Skeleton className="h-9 w-64" />
@@ -64,24 +68,36 @@ export default function StrategyPage() {
             </dl>
           </section>
 
-          <Card title="Allocation">{s ? <AllocationDonut sources={s.sources} /> : <Skeleton className="h-40 w-full" />}</Card>
+          <Card title="Allocation">{s ? <AllocationDonut sleeves={sleeves} /> : <Skeleton className="h-40 w-full" />}</Card>
 
           <Card title="Sources">
-            <ul className="divide-y divide-border border-t border-border text-sm">
-              {s?.sources.map((src) => {
-                const apy = sourceApy(src, s.asset, rates);
-                return (
-                  <li key={`${src.kind}${src.venue}`} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-3">
-                    <span className="rounded-md bg-secondary/60 px-2 py-0.5 text-[11px] text-muted-foreground">{KIND_LABEL[src.kind]}</span>
-                    <span className="font-medium">{venueName(src.venue)}</span>
-                    {src.kind === "basis" && <span className="text-xs text-muted-foreground">{leverageOf(src)}× short</span>}
-                    {src.kind === "lp" && <span className="text-xs text-warning">estimated · 4-day lock</span>}
-                    <span className="tnum ml-auto text-muted-foreground">{src.weightBps / 100}%</span>
-                    <span className="tnum w-20 text-right text-positive">{apy === null ? "—" : pct(apy)}</span>
-                  </li>
-                );
-              })}
-            </ul>
+            {s &&
+              sleeves.map((sl) => (
+                <div key={sl.asset} className={multi ? "mt-4 first:mt-0" : ""}>
+                  {multi && (
+                    <div className="flex items-center gap-2 pb-2 text-sm font-medium">
+                      <TokenIcon symbol={sl.asset} size={18} />
+                      {sl.asset}
+                      <span className="tnum ml-auto text-muted-foreground">{sl.weightBps / 100}%</span>
+                    </div>
+                  )}
+                  <ul className="divide-y divide-border border-t border-border text-sm">
+                    {sl.sources.map((src) => {
+                      const apy = sourceApy(src, sl.asset, rates);
+                      return (
+                        <li key={`${src.kind}${src.venue}`} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-3">
+                          <span className="rounded-md bg-secondary/60 px-2 py-0.5 text-[11px] text-muted-foreground">{KIND_LABEL[src.kind]}</span>
+                          <span className="font-medium">{venueName(src.venue)}</span>
+                          {src.kind === "basis" && <span className="text-xs text-muted-foreground">{leverageOf(src)}× short</span>}
+                          {src.kind === "lp" && <span className="text-xs text-warning">estimated · 4-day lock</span>}
+                          <span className="tnum ml-auto text-muted-foreground">{src.weightBps / 100}%</span>
+                          <span className="tnum w-20 text-right text-positive">{apy === null ? "-" : pct(apy)}</span>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              ))}
           </Card>
 
           <Card title="Backtest">

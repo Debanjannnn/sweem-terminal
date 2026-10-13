@@ -4,7 +4,7 @@ import { useState } from "react";
 import { formatUnits } from "viem";
 import { deployStrategy, errText, fmtUsd } from "@/lib/api";
 import { FEE_BPS } from "@/lib/config";
-import { useHoldings } from "@/lib/hooks";
+import { useHoldings, useTickers } from "@/lib/hooks";
 import { useSession } from "@/lib/session";
 import { fmtUnits, parseAmount, USDC } from "@/lib/tokens";
 import type { Strategy } from "@/lib/types";
@@ -12,11 +12,13 @@ import { Button, Notice } from "@/components/ui";
 import { ExecutionProgress } from "@/components/Execution";
 import { DelegationCard } from "@/components/automation/Delegation";
 import { actionBtn, balanceOf, pill, Row, Slippage } from "@/components/trade/MarketPanel";
+import { minDeposit, parts } from "./sources";
 
 // Follow/deploy: USDC in, 0.4% open fee to treasury, executor routes the rest into every source from the user's wallet.
 export function DeployPanel({ strategy }: { strategy: Strategy }) {
   const { ready, authenticated, login, delegated, me } = useSession();
   const holdings = useHoldings();
+  const { tickers } = useTickers();
   const [amount, setAmount] = useState("");
   const [slippage, setSlippage] = useState(100);
   const [busy, setBusy] = useState(false);
@@ -28,7 +30,10 @@ export function DeployPanel({ strategy }: { strategy: Strategy }) {
   const n = raw !== null ? Number(formatUnits(raw, USDC.decimals)) : 0;
   const fee = (n * FEE_BPS) / 10000;
   const own = me?.id === strategy.creator;
-  const lp = strategy.sources.some((s) => s.kind === "lp");
+  const srcs = parts(strategy).flatMap((sl) => sl.sources);
+  const lp = srcs.some((s) => s.kind === "lp");
+  // ticker-mid estimate of the Kuru min-order floor; server rejects below_min_size authoritatively
+  const min = minDeposit(parts(strategy), Object.fromEntries(Object.entries(tickers).map(([k, t]) => [k, t.price]))).total;
 
   const reason = !ready
     ? "Loading…"
@@ -40,7 +45,9 @@ export function DeployPanel({ strategy }: { strategy: Strategy }) {
           ? "Invalid amount"
           : usdc !== null && raw > usdc
             ? "Insufficient USDC"
-            : null;
+            : min && n < min
+              ? `Min deposit ${fmtUsd(min)}`
+              : null;
 
   async function submit() {
     setBusy(true);
@@ -87,6 +94,7 @@ export function DeployPanel({ strategy }: { strategy: Strategy }) {
         <Row label={`Open fee (${FEE_BPS / 100}%)`}>{fmtUsd(fee)}</Row>
         <Row label="Deployed">{fmtUsd(Math.max(0, n - fee))}</Row>
         <Row label="Withdraw fee">none</Row>
+        {min !== 0 && <Row label="Min deposit">{min === null ? "-" : fmtUsd(min)}</Row>}
       </dl>
       {lp && <Notice>Includes Kuru ActiveVault liquidity: 4-day lock, withdraw may fail inside the lock. Yield is estimated.</Notice>}
       {authenticated && !delegated && <DelegationCard compact />}
@@ -103,7 +111,7 @@ export function DeployPanel({ strategy }: { strategy: Strategy }) {
       {execId && <ExecutionProgress id={execId} onSettled={holdings.reload} />}
       <p className="text-[11px] leading-4 text-muted-foreground">
         Monad mainnet, real funds. Everything stays in your own wallet&apos;s venue positions; sweem&apos;s signer runs the steps (fee → swaps → deposits
-        {strategy.sources.some((s) => s.kind === "basis") ? " → Perpl hedge" : ""}). {own ? "" : "The creator earns half the open fee."}
+        {srcs.some((s) => s.kind === "basis") ? " → Perpl hedge" : ""}). {own ? "" : "The creator earns half the open fee."}
       </p>
     </div>
   );

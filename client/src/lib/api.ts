@@ -8,6 +8,7 @@ import type {
   BasketQuote,
   Book,
   Candle,
+  Earnings,
   Execution,
   Holdings,
   Interval,
@@ -119,6 +120,15 @@ export const getMyStrategies = () => authed<Strategy[]>("/me/strategies");
 export const deployStrategy = (id: string, amountUsdc: string, slippageBps?: number) =>
   authed<Accepted>(`/me/strategies/${id}/deploy`, "POST", { amountUsdc, slippageBps });
 export const withdrawPosition = (id: string) => authed<Accepted>(`/me/positions/${id}/withdraw`, "POST", {});
+export const getEarnings = () => authed<Earnings>("/me/earnings");
+// delegated (executor signs); 409 delegation_inactive without it
+export const basketBuy = (id: string, b: { amountUsdc: string; slippageBps?: number }) => authed<Accepted>(`/me/baskets/${id}/buy`, "POST", b);
+export const basketSell = (id: string, b: { bps: number; slippageBps?: number }) => authed<Accepted>(`/me/baskets/${id}/sell`, "POST", b);
+export const MARGIN_TOKENS = ["USDC", "MON", "WETH", "cbBTC", "XAUt0"] as const;
+export type MarginToken = (typeof MARGIN_TOKENS)[number];
+// amount human decimal
+export const depositMargin = (token: MarginToken, amount: string) => authed<Accepted>("/me/margin/deposit", "POST", { token, amount });
+export const withdrawMargin = (token: MarginToken, amount: string) => authed<Accepted>("/me/margin/withdraw", "POST", { token, amount });
 export const getPositions = () => authed<Position[]>("/me/positions");
 export const getExecutions = () => authed<Execution[]>("/me/executions");
 export const getExecution = (id: string) => authed<Execution>(`/me/executions/${id}`);
@@ -131,24 +141,32 @@ export const getBook = (orderbook: string) => request<Book>(`${MARKET_DATA_URL}/
 // amount raw atoms: buy = USDC, sell = base
 export const getQuote = (orderbook: string, side: "buy" | "sell", amount: bigint, slippageBps = 50) =>
   request<Quote>(`${MARKET_DATA_URL}/quote/${orderbook}${q({ side, amount: amount.toString(), slippageBps })}`);
-export const getBasketQuote = (legs: Leg[], amountUsdcRaw: bigint, slippageBps = 50) =>
+// buy: amountUsdc atoms split by weightBps; sell: per-leg base atoms
+export type BasketQuoteInput = { side: "buy"; amountUsdc: bigint; legs: Leg[] } | { side: "sell"; legs: { market: string; amount: bigint }[] };
+export const getBasketQuote = (b: BasketQuoteInput, slippageBps = 50) =>
   request<BasketQuote>(`${MARKET_DATA_URL}/quote/basket`, json({
-      side: "buy",
-      amountUsdc: amountUsdcRaw.toString(),
+      side: b.side,
+      amountUsdc: b.side === "buy" ? b.amountUsdc.toString() : undefined,
       slippageBps,
-      legs: legs.map((l) => ({ market: marketOf(l.market)?.orderbook ?? l.market, weightBps: l.weightBps })),
+      legs: b.side === "buy"
+        ? b.legs.map((l) => ({ market: marketOf(l.market)?.orderbook ?? l.market, weightBps: l.weightBps }))
+        : b.legs.map((l) => ({ market: marketOf(l.market)?.orderbook ?? l.market, amount: l.amount.toString() })),
     }),);
 export const getCandles = (orderbook: string, interval: Interval, from?: number, to?: number) =>
   request<Candle[]>(`${MARKET_DATA_URL}/candles/${orderbook}${q({ interval, from, to })}`);
 export const getRates = () => request<Rates>(`${MARKET_DATA_URL}/rates`);
 
 // history
+export type BacktestLeg = { kind: string; venue?: string; perpId?: number; weight: string };
+export type BacktestSleeve = { asset: string; amount: string; legs: BacktestLeg[]; rules?: Record<string, unknown>; weight: string };
+// single token: asset + legs (amount in asset units); multi: sleeves (amount in USD, sleeve weights sum 1)
 export type BacktestBody = {
-  asset: string;
+  asset?: string;
   amount: string;
   from?: string;
   to?: string;
-  legs: { kind: string; venue?: string; perpId?: number; weight: string }[];
+  legs?: BacktestLeg[];
+  sleeves?: BacktestSleeve[];
   rules?: Record<string, unknown>;
 };
 export const runBacktest = (body: BacktestBody) => request<Backtest>(`${HISTORY_URL}/backtest`, json(body));
@@ -184,7 +202,7 @@ export const errMsg = (e: unknown): string =>
   (e as { shortMessage?: string })?.shortMessage ?? (e instanceof Error ? e.message : String(e));
 
 const COPY: Record<string, string> = {
-  delegation_inactive: "Enable automation first — sweem needs your delegated signer to run this.",
+  delegation_inactive: "Enable automation first. sweem needs your delegated signer to run this.",
   below_min_size: "Amount is below the market's minimum order size.",
   exceeds_safe_size: "Too large for current book depth.",
   insufficient_liquidity: "Order book can't fill this size right now.",

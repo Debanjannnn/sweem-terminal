@@ -79,7 +79,7 @@ export function LimitPanel({ market, mid }: { market: MarketDef; mid: number | n
         </label>
       </div>
       <dl className="space-y-1.5 px-1 text-xs">
-        <Row label="Notional">{notional !== null ? fmtUsd(notional) : "—"}</Row>
+        <Row label="Notional">{notional !== null ? fmtUsd(notional) : "-"}</Row>
         <Row label="Min size">{`${market.minSize} ${market.symbol}`}</Row>
       </dl>
       {crosses && postOnly && <Notice>Price crosses the mid; a post-only order may be rejected.</Notice>}

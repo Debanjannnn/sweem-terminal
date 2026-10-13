@@ -8,6 +8,7 @@ import { useAsync } from "@/lib/session";
 import { MARKETS } from "@/lib/tokens";
 import { cn } from "@/lib/utils";
 import { IconStack } from "@/components/invest/BasketCard";
+import { parts } from "@/components/earn/sources";
 import { EASE } from "@/components/motion";
 import { AnimatePresence, motion, useIsPresent } from "motion/react";
 
@@ -128,8 +129,8 @@ function SearchDialog({ onClose }: { onClose: () => void }) {
       href: `/earn/${st.id}`,
       title: st.name,
       tag: "Earn",
-      sub: `${st.asset} · ${st.sources.map((x) => x.kind).join(", ")}`,
-      icons: [st.asset],
+      sub: parts(st).map((sl) => `${sl.asset} · ${sl.sources.map((x) => x.kind).join(", ")}`).join(" | "),
+      icons: parts(st).map((sl) => sl.asset),
     })),
   ];
   const items = all.filter((it) => !s || [it.title, it.tag, it.sub].some((v) => v.toLowerCase().includes(s)));

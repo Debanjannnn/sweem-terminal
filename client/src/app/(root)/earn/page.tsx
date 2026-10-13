@@ -4,27 +4,30 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { Plus } from "lucide-react";
-import { getStrategies, shortHash } from "@/lib/api";
+import { getMyStrategies, getStrategies, shortHash } from "@/lib/api";
 import { useRates } from "@/lib/hooks";
 import { useAsync, useSession } from "@/lib/session";
 import type { Strategy } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { ErrorBox, Skeleton } from "@/components/ui";
-import { TokenIcon } from "@/components/TokenIcon";
+import { IconStack } from "@/components/invest/BasketCard";
 import { TabPill } from "@/components/motion";
 import { pct } from "@/components/earn/Backtest";
-import { ASSETS, blendedApy, KIND_LABEL, venueName } from "@/components/earn/sources";
+import { ASSETS, blendedApy, KIND_LABEL, parts, venueName } from "@/components/earn/sources";
 
 const live = (s: Strategy, rates: ReturnType<typeof useRates>["rates"]) =>
-  s.apy?.estimate != null ? Number(s.apy.estimate) : blendedApy(s.sources, s.asset, rates);
+  s.apy?.estimate != null ? Number(s.apy.estimate) : blendedApy(parts(s), rates);
 
 export default function EarnPage() {
   const router = useRouter();
-  const { me, authenticated } = useSession();
+  const { authenticated } = useSession();
   const list = useAsync("strategies", () => getStrategies());
   const { rates } = useRates();
   const [tab, setTab] = useState("all");
-  const rows = (list.data ?? []).filter((s) => (tab === "all" ? true : tab === "mine" ? s.creator === me?.id : s.asset === tab));
+  // mine includes private strategies, so it comes from /me
+  const mine = useAsync(tab === "mine" && authenticated ? "my-strategies" : null, getMyStrategies);
+  const shown = tab === "mine" ? mine : list;
+  const rows = (shown.data ?? []).filter((s) => tab === "all" || tab === "mine" || parts(s).some((sl) => sl.asset === tab));
   const best = (f: (s: Strategy) => number | null) =>
     (list.data ?? []).reduce<Strategy | null>((m, s) => ((f(s) ?? -1) > (m ? (f(m) ?? -1) : -1) ? s : m), null);
   const topLive = best((s) => live(s, rates));
@@ -32,22 +35,22 @@ export default function EarnPage() {
 
   return (
     <main className="w-full px-4 pb-24 md:px-6">
-      <section className="pb-14 pt-16 text-center md:pb-20 md:pt-24">
+      <section className="pb-16 pt-20 text-center md:pb-24 md:pt-28">
         <h1 className="text-[40px] font-medium leading-tight tracking-tight md:text-[60px]">Earn on Monad</h1>
-        <p className="mx-auto mt-4 max-w-xl text-muted-foreground">
-          Follow strategies that split one asset across lending, staking, liquidity and funding basis — run from your own wallet.
+        <p className="mx-auto mt-6 max-w-lg text-pretty leading-7 text-muted-foreground">
+          Follow strategies that split one asset across lending, staking, liquidity and funding basis, run from your own wallet.
         </p>
         <Link
           href="/earn/new"
-          className="mt-8 inline-flex items-center gap-2 rounded-full bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary/90"
+          className="mt-10 inline-flex items-center gap-2 rounded-full bg-primary px-6 py-3 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary/90"
         >
           <Plus className="size-4" /> Build a strategy
         </Link>
       </section>
 
-      {list.error && (
+      {shown.error && (
         <div className="mx-auto mb-4 max-w-7xl">
-          <ErrorBox message={`Strategies unavailable: ${list.error}`} />
+          <ErrorBox message={`Strategies unavailable: ${shown.error}`} />
         </div>
       )}
 
@@ -62,7 +65,7 @@ export default function EarnPage() {
               {s ? (
                 <Link href={`/earn/${s.id}`} className="flex items-center justify-between gap-3">
                   <span className="flex min-w-0 items-center gap-2.5">
-                    <TokenIcon symbol={s.asset} size={26} />
+                    <IconStack symbols={parts(s).map((sl) => sl.asset)} size={26} ring="ring-card" />
                     <span className="truncate text-[22px] leading-none">{s.name}</span>
                   </span>
                   <span className="tnum text-[22px] font-medium text-positive">{v(s)}</span>
@@ -105,7 +108,7 @@ export default function EarnPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
-                {list.loading && !list.data ? (
+                {shown.loading && !shown.data ? (
                   [0, 1, 2].map((i) => (
                     <tr key={i} className="h-16">
                       <td colSpan={5} className="px-6">
@@ -134,7 +137,7 @@ export default function EarnPage() {
                     >
                       <td className="pl-6">
                         <div className="flex items-center gap-3">
-                          <TokenIcon symbol={s.asset} size={26} />
+                          <IconStack symbols={parts(s).map((sl) => sl.asset)} size={26} ring="ring-card" />
                           <div className="min-w-0">
                             <div className="truncate text-[15px] font-medium">{s.name}</div>
                             <div className="text-xs text-muted-foreground">by {shortHash(s.creatorWallet ?? s.creator)}</div>
@@ -143,11 +146,14 @@ export default function EarnPage() {
                       </td>
                       <td>
                         <div className="flex flex-wrap gap-1.5">
-                          {s.sources.map((src) => (
-                            <span key={src.kind + src.venue} className="rounded-full bg-secondary px-2 py-0.5 text-[11px]">
-                              {KIND_LABEL[src.kind]} · {venueName(src.venue)} {src.weightBps / 100}%
-                            </span>
-                          ))}
+                          {parts(s).flatMap((sl, _, all) =>
+                            sl.sources.map((src) => (
+                              <span key={sl.asset + src.kind + src.venue} className="rounded-full bg-secondary px-2 py-0.5 text-[11px]">
+                                {all.length > 1 && `${sl.asset} `}
+                                {KIND_LABEL[src.kind]} · {venueName(src.venue)} {+((sl.weightBps * src.weightBps) / 1e6).toFixed(2)}%
+                              </span>
+                            )),
+                          )}
                         </div>
                       </td>
                       <td className="tnum text-right text-positive">{pct(live(s, rates))}</td>

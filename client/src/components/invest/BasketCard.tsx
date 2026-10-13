@@ -19,7 +19,7 @@ export function IconStack({ symbols, size, ring }: { symbols: string[]; size: nu
 
 // usd: absolute $ change (4dp) instead of %
 export function ChangeText({ value, usd, className }: { value: number | null | undefined; usd?: boolean; className?: string }) {
-  if (value === null || value === undefined) return <span className={cn("text-muted-foreground", className)}>—</span>;
+  if (value === null || value === undefined) return <span className={cn("text-muted-foreground", className)}>-</span>;
   const abs = Math.abs(value);
   // sub-cent moves (MON) keep 2 significant digits instead of printing $0.0000
   const txt = usd && abs > 0 && abs < 0.01 ? abs.toPrecision(2) : abs.toFixed(2);

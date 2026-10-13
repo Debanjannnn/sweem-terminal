@@ -119,8 +119,8 @@ export default function BasketPage() {
                         </Link>
                       </td>
                       <td className="tnum text-right">{l.weightBps / 100}%</td>
-                      <td className="tnum text-right">{prices.data?.[l.market] ? fmtUsd(prices.data[l.market]!) : prices.loading ? "…" : "—"}</td>
-                      <td className="tnum text-right">{h ? Number(h.amount).toLocaleString("en-US", { maximumFractionDigits: 6 }) : "—"}</td>
+                      <td className="tnum text-right">{prices.data?.[l.market] ? fmtUsd(prices.data[l.market]!) : prices.loading ? "…" : "-"}</td>
+                      <td className="tnum text-right">{h ? Number(h.amount).toLocaleString("en-US", { maximumFractionDigits: 6 }) : "-"}</td>
                     </tr>
                   );
                 })}
@@ -131,13 +131,13 @@ export default function BasketPage() {
           <Card title="Statistics">
             <dl className="grid grid-cols-2 gap-6 md:grid-cols-4">
               <Stat label="Legs" value={b ? String(legs.length) : null} />
-              <Stat label={`${range} return`} value={pts.length > 1 ? `${(pts.at(-1)!.v - 100).toFixed(2)}%` : series.loading ? null : "—"} />
-              <Stat label="Your holding" value={!authenticated ? "—" : heldUsd !== null ? fmtUsd(heldUsd) : held === undefined && holdings.data ? "$0" : null} />
+              <Stat label={`${range} return`} value={pts.length > 1 ? `${(pts.at(-1)!.v - 100).toFixed(2)}%` : series.loading ? null : "-"} />
+              <Stat label="Your holding" value={!authenticated ? "-" : heldUsd !== null ? fmtUsd(heldUsd) : held === undefined && holdings.data ? "$0" : null} />
               <Stat label="Created" value={b ? new Date(b.createdAt).toLocaleDateString() : null} />
             </dl>
             <dl className="mt-4">
-              <Detail label="Owner">{b ? shortHash(b.owner) : "—"}</Detail>
-              <Detail label="Created at">{b ? fmtTime(b.createdAt) : "—"}</Detail>
+              <Detail label="Owner">{b ? shortHash(b.owner) : "-"}</Detail>
+              <Detail label="Created at">{b ? fmtTime(b.createdAt) : "-"}</Detail>
             </dl>
           </Card>
         </div>

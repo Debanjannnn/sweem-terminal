@@ -10,9 +10,12 @@ import { fmtUnits, tokenBySymbol } from "@/lib/tokens";
 import type { Position } from "@/lib/types";
 import { Button, ErrorBox, Notice, Panel, Skeleton, StatusPill } from "@/components/ui";
 import { TokenIcon } from "@/components/TokenIcon";
+import { IconStack } from "@/components/invest/BasketCard";
 import { LOW_GAS, useNow } from "@/components/portfolio/Wallet";
 import { Holdings, type Row } from "@/components/portfolio/Holdings";
 import { ValueChart } from "@/components/portfolio/ValueChart";
+import { TradingBalance } from "@/components/portfolio/TradingBalance";
+import { EarningsCard } from "@/components/portfolio/Earnings";
 import { DelegationCard } from "@/components/automation/Delegation";
 import { ExecutionLog, ScheduleList } from "@/components/automation/ScheduleList";
 import { ScheduleForm } from "@/components/automation/ScheduleForm";
@@ -128,11 +131,18 @@ export default function PortfolioPage() {
           ) : (
             <div className="grid gap-3 md:grid-cols-2">
               {(positions.data ?? []).map((p) => (
-                <PositionCard key={p.id} p={p} price={priceOf(p.asset)} onChange={positions.reload} />
+                <PositionCard key={p.id} p={p} priceOf={priceOf} onChange={positions.reload} />
               ))}
             </div>
           )}
         </section>
+
+        <section className="space-y-3">
+          <h2 className="px-1 text-lg font-medium">Trading balance</h2>
+          <TradingBalance />
+        </section>
+
+        <EarningsCard />
 
         <section className="space-y-3">
           <h2 className="px-1 text-lg font-medium">Open limit orders</h2>
@@ -151,15 +161,19 @@ export default function PortfolioPage() {
 }
 
 // principal is what went in; per-source amounts are the atoms supplied at deploy (venue yield accrues on-venue)
-function PositionCard({ p, price, onChange }: { p: Position; price: number | null; onChange: () => void }) {
+function PositionCard({ p, priceOf, onChange }: { p: Position; priceOf: (sym: string) => number | null; onChange: () => void }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [execId, setExecId] = useState<string | null>(null);
   const [auto, setAuto] = useState(false);
-  const dec = tokenBySymbol(p.asset)?.decimals ?? 18;
-  // ponytail: basis AUSD collateral not marked (hedge PnL ~0); read venue balances via RPC if exact value matters
-  const supplied = p.legs.reduce((s, l) => s + Number(formatUnits(BigInt(l.asset || 0), dec)) + (l.collateral ? Number(formatUnits(BigInt(l.collateral), 6)) / (price || 1) : 0), 0);
-  const value = price !== null ? supplied * price : null;
+  // legs grouped by sleeve token (old rows: no token = position asset); each group marked at its own price
+  const groups = Object.entries(Object.groupBy(p.legs, (l) => l.token ?? p.asset)).map(([token, legs = []]) => ({ token, legs, dec: tokenBySymbol(token)?.decimals ?? 18 }));
+  // ponytail: basis AUSD collateral counted at $1, hedge PnL not marked (~0); read venue balances via RPC if exact value matters
+  const value = groups.reduce<number | null>((v, g) => {
+    const px = priceOf(g.token);
+    if (v === null || px === null) return null;
+    return g.legs.reduce((s, l) => s + Number(formatUnits(BigInt(l.asset || 0), g.dec)) * px + (l.collateral ? Number(formatUnits(BigInt(l.collateral), 6)) : 0), v);
+  }, 0);
   const pnl = value !== null ? value - Number(p.principalUsdc) : null;
 
   async function withdraw() {
@@ -177,7 +191,7 @@ function PositionCard({ p, price, onChange }: { p: Position; price: number | nul
   return (
     <Panel className="space-y-3 p-5">
       <div className="flex items-center gap-3">
-        <TokenIcon symbol={p.asset} size={28} />
+        <IconStack symbols={groups.map((g) => g.token)} size={28} ring="ring-card" />
         <Link href={`/earn/${p.strategyId}`} className="truncate font-medium hover:underline">
           {p.strategyName}
         </Link>
@@ -192,28 +206,31 @@ function PositionCard({ p, price, onChange }: { p: Position; price: number | nul
         </div>
         <div>
           <dt className="text-xs text-muted-foreground">Value (spot)</dt>
-          <dd>{value !== null ? fmtUsd(value) : "—"}</dd>
+          <dd>{value !== null ? fmtUsd(value) : "-"}</dd>
         </div>
         <div>
           <dt className="text-xs text-muted-foreground">PnL</dt>
-          <dd className={pnl === null ? "" : pnl >= 0 ? "text-positive" : "text-destructive"}>{pnl !== null ? `${pnl >= 0 ? "+" : ""}${fmtUsd(pnl)}` : "—"}</dd>
+          <dd className={pnl === null ? "" : pnl >= 0 ? "text-positive" : "text-destructive"}>{pnl !== null ? `${pnl >= 0 ? "+" : ""}${fmtUsd(pnl)}` : "-"}</dd>
         </div>
       </dl>
       <ul className="space-y-1 text-xs">
-        {p.legs.map((l, i) => (
-          <li key={i} className="flex items-center gap-2">
-            <span className="rounded-md bg-secondary/60 px-1.5 py-0.5 text-[10px] text-muted-foreground">{KIND_LABEL[l.kind as keyof typeof KIND_LABEL] ?? l.kind}</span>
-            {venueName(l.venue)}
-            <span className="tnum ml-auto text-muted-foreground">
-              {fmtUnits(l.asset || "0", dec)} {p.asset}
-              {l.entryPx ? ` · entry ${fmtUsd(Number(l.entryPx))}` : ""}
-            </span>
-          </li>
-        ))}
+        {groups.flatMap((g) =>
+          g.legs.map((l, i) => (
+            <li key={`${g.token}${i}`} className="flex items-center gap-2">
+              {groups.length > 1 && <TokenIcon symbol={g.token} size={14} />}
+              <span className="rounded-md bg-secondary/60 px-1.5 py-0.5 text-[10px] text-muted-foreground">{KIND_LABEL[l.kind as keyof typeof KIND_LABEL] ?? l.kind}</span>
+              {venueName(l.venue)}
+              <span className="tnum ml-auto text-muted-foreground">
+                {fmtUnits(l.asset || "0", g.dec)} {g.token}
+                {l.entryPx ? ` · entry ${fmtUsd(Number(l.entryPx))}` : ""}
+              </span>
+            </li>
+          )),
+        )}
       </ul>
       <p className="text-[11px] text-muted-foreground">
         Opened {fmtTime(p.openedAt)}
-        {p.lastRebalanceAt ? ` · rebalanced ${fmtTime(p.lastRebalanceAt)}` : ""}. Value marks supplied {p.asset} at spot; lending/staking yield accrues on-venue.
+        {p.lastRebalanceAt ? ` · rebalanced ${fmtTime(p.lastRebalanceAt)}` : ""}. Value marks supplied tokens at spot; lending/staking yield accrues on-venue.
       </p>
       {p.legs.some((l) => l.kind === "lp") && <Notice>ActiveVault leg: 4-day lock, withdraw may fail inside the lock.</Notice>}
       {err && <Notice tone="bad">{err}</Notice>}

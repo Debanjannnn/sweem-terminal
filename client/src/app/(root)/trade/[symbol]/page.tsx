@@ -82,10 +82,10 @@ export default function TradePage() {
 
           <Card title="Statistics">
             <dl className="grid grid-cols-2 gap-6 md:grid-cols-4">
-              <Stat label="24h high" value={day24.loading ? null : hs.length ? fmtUsd(Math.max(...hs)) : "—"} />
-              <Stat label="24h low" value={day24.loading ? null : ls.length ? fmtUsd(Math.min(...ls)) : "—"} />
-              <Stat label="24h volume" value={day24.loading ? null : day24.candles.length ? fmtUsdCompact(vol) : "—"} />
-              <Stat label="Your balance" value={held ? Number(held.amount).toLocaleString("en-US", { maximumFractionDigits: 6 }) : "—"} note={held && price ? fmtUsd(Number(held.amount) * price) : undefined} />
+              <Stat label="24h high" value={day24.loading ? null : hs.length ? fmtUsd(Math.max(...hs)) : "-"} />
+              <Stat label="24h low" value={day24.loading ? null : ls.length ? fmtUsd(Math.min(...ls)) : "-"} />
+              <Stat label="24h volume" value={day24.loading ? null : day24.candles.length ? fmtUsdCompact(vol) : "-"} />
+              <Stat label="Your balance" value={held ? Number(held.amount).toLocaleString("en-US", { maximumFractionDigits: 6 }) : "-"} note={held && price ? fmtUsd(Number(held.amount) * price) : undefined} />
             </dl>
           </Card>
 

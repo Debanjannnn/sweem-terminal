@@ -105,13 +105,13 @@ export function HomePage() {
       )}
       {!loading && MARKETS.every((m) => tickers[m.symbol].price === null) && (
         <div className="mx-auto mb-4 max-w-7xl">
-          <Notice>Mainnet market feed is offline — prices, charts and quotes appear once it&apos;s back.</Notice>
+          <Notice>Mainnet market feed is offline. Prices, charts and quotes appear once it&apos;s back.</Notice>
         </div>
       )}
 
       <section className="mx-auto grid max-w-7xl grid-cols-1 gap-4 pb-16 md:grid-cols-2 md:pb-24 lg:grid-cols-3">
         <Reveal>
-          <Highlight title="Monad" row={mon} loading={loading} value={(r) => (r.price ? <Flash value={r.price}>{fmtUsd(r.price)}</Flash> : "—")} />
+          <Highlight title="Monad" row={mon} loading={loading} value={(r) => (r.price ? <Flash value={r.price}>{fmtUsd(r.price)}</Flash> : "-")} />
         </Reveal>
         <Reveal delay={0.05}>
           <Highlight title="Biggest Gainer (24H)" row={gainer} loading={loading} value={(r) => <ChangeText value={r.chg} className="gap-1.5" />} />
@@ -302,11 +302,11 @@ function Table({
                         <td className={cn("px-4", cols[2].c)}>
                           <Sparkline data={r.series} area className="mx-auto h-9 w-[140px]" />
                         </td>
-                        <td className={cn("tnum px-4 text-muted-foreground", cols[3].c)}>{owners[r.key] ? shortHash(owners[r.key]) : "—"}</td>
+                        <td className={cn("tnum px-4 text-muted-foreground", cols[3].c)}>{owners[r.key] ? shortHash(owners[r.key]) : "-"}</td>
                       </>
                     ) : (
                       <>
-                        <td className={cn("tnum px-4 font-medium", cols[1].c)}>{r.price ? <Flash value={r.price}>{fmtUsd(r.price)}</Flash> : "—"}</td>
+                        <td className={cn("tnum px-4 font-medium", cols[1].c)}>{r.price ? <Flash value={r.price}>{fmtUsd(r.price)}</Flash> : "-"}</td>
                         <td className={cn("px-4", cols[2].c)}>
                           <ChangeText value={r.chgUsd} usd className="justify-end" />
                         </td>
@@ -316,7 +316,7 @@ function Table({
                         <td className={cn("px-4", cols[4].c)}>
                           <Sparkline data={r.series} area className="mx-auto h-9 w-[140px]" />
                         </td>
-                        <td className={cn("tnum px-4 font-medium", cols[5].c)}>{r.vol !== null ? fmtUsdCompact(r.vol) : "—"}</td>
+                        <td className={cn("tnum px-4 font-medium", cols[5].c)}>{r.vol !== null ? fmtUsdCompact(r.vol) : "-"}</td>
                       </>
                     )}
                   </motion.tr>

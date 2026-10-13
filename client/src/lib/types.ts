@@ -47,6 +47,8 @@ export type Basket = { id: string; owner: string; name: string; legs: Leg[]; pub
 
 export type SourceKind = "lending" | "staking" | "lp" | "basis";
 export type Source = { kind: SourceKind; venue: string; weightBps: number; params?: { leverage?: string } };
+// one token's part of a multi-token strategy; old rows have none (asset + sources = one sleeve)
+export type Sleeve = { asset: string; weightBps: number; sources: Source[] };
 export type Rules = { driftBps?: number; minRebalanceSeconds?: number; fundingGate?: { apr: string; lookbackDays: number } | null };
 
 export type Strategy = {
@@ -54,8 +56,9 @@ export type Strategy = {
   creator: string;
   creatorWallet: string | null;
   name: string;
-  asset: string;
-  sources: Source[];
+  asset: string; // "MULTI" when sleeves is set
+  sources: Source[]; // [] when sleeves is set
+  sleeves?: Sleeve[] | null;
   rules: Rules;
   public: boolean;
   createdAt: string;
@@ -70,10 +73,10 @@ export type Strategy = {
     hodlApyUsd: string;
     ranAt: string;
   } | null;
-  apy: { estimate: string; sources: { kind: string; venue: string; apy: string | null }[]; stale: boolean } | null;
+  apy: { estimate: string; sources: { kind: string; venue: string; asset?: string; apy: string | null }[]; stale: boolean } | null;
 };
 
-export type StrategyInput = { name: string; asset: string; sources: Source[]; rules?: Rules; public?: boolean };
+export type StrategyInput = { name: string; rules?: Rules; public?: boolean } & ({ asset: string; sources: Source[] } | { sleeves: Sleeve[] });
 
 export type Delegation = {
   id: string;
@@ -112,6 +115,13 @@ export type Execution = {
 // 202 body of every execution-creating route
 export type Accepted = { executionId: string; kind: string; steps: Step[]; orderId?: string; positionId?: string; feeUsdc?: string };
 
+export type Earnings = {
+  owedUsdc: string;
+  paidUsdc: string;
+  feesPaidUsdc: string;
+  rows: { executionId: string; strategyId: string; feeUsdc: string; creatorOwedUsdc: string; paid: boolean; createdAt: string }[];
+};
+
 export type Holdings = {
   wallet: string;
   tokens: { symbol: string; address: string; raw: string; amount: string }[];
@@ -130,7 +140,8 @@ export type Order = {
   createdAt: string;
 };
 
-export type LegState = { kind: string; venue: string; asset: string; collateral?: string; lot?: string; entryPx?: string };
+// token: sleeve asset; absent = position asset (single-token rows)
+export type LegState = { token?: string; kind: string; venue: string; asset: string; collateral?: string; lot?: string; entryPx?: string };
 
 export type Position = {
   id: string;

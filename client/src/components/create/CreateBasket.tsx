@@ -73,7 +73,7 @@ export function CreateBasket() {
         <div>
           <h1 className="text-xl font-medium sm:text-2xl">Create a basket</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            Pick Kuru markets and weights. Buying fills each leg on its Kuru book into your own wallet — no share token, no pooled funds.
+            Pick Kuru markets and weights. Buying fills each leg on its Kuru book into your own wallet. No share token, no pooled funds.
           </p>
         </div>
 

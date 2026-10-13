@@ -177,7 +177,7 @@ export function PriceChart({
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <div className="tnum text-5xl font-medium tracking-tight">
-            {last !== null ? <Flash value={last}>{fmtUsd(last)}</Flash> : loading ? <Skeleton className="h-12 w-48" /> : "—"}
+            {last !== null ? <Flash value={last}>{fmtUsd(last)}</Flash> : loading ? <Skeleton className="h-12 w-48" /> : "-"}
           </div>
           <div className="mt-2 text-sm">
             {change !== null && first && last ? (

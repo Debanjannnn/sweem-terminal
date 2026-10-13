@@ -10,11 +10,14 @@ import type {
   Candle,
   Earnings,
   Execution,
+  FundingDay,
   Holdings,
   Interval,
   Leg,
   Me,
   Order,
+  PerplMarkets,
+  PerplRisk,
   Position,
   PrepareInput,
   Prepared,
@@ -121,6 +124,8 @@ export const deployStrategy = (id: string, amountUsdc: string, slippageBps?: num
   authed<Accepted>(`/me/strategies/${id}/deploy`, "POST", { amountUsdc, slippageBps });
 export const withdrawPosition = (id: string) => authed<Accepted>(`/me/positions/${id}/withdraw`, "POST", {});
 export const getEarnings = () => authed<Earnings>("/me/earnings");
+export const getPositionPerpl = (id: string) => authed<PerplRisk[]>(`/me/positions/${id}/perpl`);
+export const getPerplMarkets = () => request<PerplMarkets>(`${API_URL}/perpl/markets`);
 // delegated (executor signs); 409 delegation_inactive without it
 export const basketBuy = (id: string, b: { amountUsdc: string; slippageBps?: number }) => authed<Accepted>(`/me/baskets/${id}/buy`, "POST", b);
 export const basketSell = (id: string, b: { bps: number; slippageBps?: number }) => authed<Accepted>(`/me/baskets/${id}/sell`, "POST", b);
@@ -170,6 +175,9 @@ export type BacktestBody = {
   rules?: Record<string, unknown>;
 };
 export const runBacktest = (body: BacktestBody) => request<Backtest>(`${HISTORY_URL}/backtest`, json(body));
+// daily Perpl funding (from YYYY-MM-DD to yesterday)
+export const getFunding = (perpId: number, from: string) =>
+  request<{ perpId: number; data: FundingDay[] }>(`${HISTORY_URL}/series/funding${q({ perpId, from })}`).then((r) => r.data);
 
 // display formatters (numbers already in display units)
 export const fmtUsdCompact = (n: number) =>

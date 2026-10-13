@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 	"github.com/shopspring/decimal"
+	"github.com/snehendu098/sweem-terminal/internal/perpl"
 	"github.com/snehendu098/sweem-terminal/internal/pg"
 	"github.com/snehendu098/sweem-terminal/internal/planner"
 	"github.com/snehendu098/sweem-terminal/internal/streams"
@@ -260,8 +261,8 @@ func seedPosition(t *testing.T, e *env_, gate string) string {
 	return pid
 }
 
-func healthyPerp() Perp {
-	return Perp{Account: 7, Deposit: d("80000000"), Mark: d("400000"), Lot: d("40"), PriceDec: 2, LotDec: 3, MaintHdths: d("2000"), MarkValid: true}
+func healthyPerp() perpl.Perp {
+	return perpl.Perp{Account: 7, Deposit: d("80000000"), Mark: d("400000"), Lot: d("40"), PriceDec: 2, LotDec: 3, MaintHdths: d("2000"), MarkValid: true}
 }
 
 func (e *env_) rates(t *testing.T, apr string) {
@@ -336,7 +337,7 @@ func TestFundingGateFlips(t *testing.T) {
 		}
 		if s.action == "closeShort" { // wallet now: everything in aave, no short
 			e.chain.bals = []planner.Balance{{Value: "199000000000000000", Shares: "199000000000000000"}, {Value: "0"}}
-			e.chain.perp = Perp{Account: 7}
+			e.chain.perp = perpl.Perp{Account: 7}
 		}
 	}
 }

@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/shopspring/decimal"
+	"github.com/snehendu098/sweem-terminal/internal/perpl"
 	"github.com/snehendu098/sweem-terminal/internal/planner"
 	"github.com/snehendu098/sweem-terminal/internal/streams"
 )
@@ -153,7 +154,7 @@ func (s *Scheduler) evalPart(ctx context.Context, p position, st planner.Strateg
 		}
 	}
 	on := make([]bool, len(legs))
-	var perp Perp
+	var perp perpl.Perp
 	if basis >= 0 {
 		on[basis] = decimal.RequireFromString(orZero(legs[basis].Lot)).IsPositive()
 		if perp, err = s.Chain.Perp(ctx, p.wallet, perpID); err != nil {
@@ -171,7 +172,7 @@ func (s *Scheduler) evalPart(ctx context.Context, p position, st planner.Strateg
 		if err != nil {
 			return "", planner.Plan{}, err
 		}
-		if g := Guard(perp, s.GuardBuffer, usdc); g.Fire {
+		if g := perpl.Guard(perp, s.GuardBuffer, usdc); g.Fire {
 			lot := decimal.RequireFromString(legs[basis].Lot)
 			var plan planner.Plan
 			switch {
@@ -203,7 +204,7 @@ func (s *Scheduler) evalPart(ctx context.Context, p position, st planner.Strateg
 		if !ok {
 			return "", planner.Plan{}, fmt.Errorf("funding %d missing", perpID)
 		}
-		want[basis] = Gate(on[basis], apr, decimal.RequireFromString(orZero(st.Rules.FundingGate.APR)), s.GateBand)
+		want[basis] = perpl.Gate(on[basis], apr, decimal.RequireFromString(orZero(st.Rules.FundingGate.APR)), s.GateBand)
 	}
 	var minGain *decimal.Decimal
 	if r := st.Rules.RateSwitch; r != nil {
@@ -242,14 +243,6 @@ func orZero(s string) string {
 		return "0"
 	}
 	return s
-}
-
-// Gate is the funding-gate hysteresis: an open basis leg stays while trailing APR ≥ threshold; a closed one reopens only above threshold+band.
-func Gate(open bool, apr, threshold, band decimal.Decimal) bool {
-	if open {
-		return apr.GreaterThanOrEqual(threshold)
-	}
-	return apr.GreaterThan(threshold.Add(band))
 }
 
 // Targets is the per-source target bps: gated-off basis parks its weight in the best lending source (stays on if there is none);

@@ -15,6 +15,7 @@ import (
 	"github.com/snehendu098/sweem-terminal/internal/config"
 	"github.com/snehendu098/sweem-terminal/internal/httpx"
 	"github.com/snehendu098/sweem-terminal/internal/logx"
+	"github.com/snehendu098/sweem-terminal/internal/perpl"
 	"github.com/snehendu098/sweem-terminal/internal/pg"
 	"github.com/snehendu098/sweem-terminal/internal/planner"
 	"github.com/snehendu098/sweem-terminal/services/scheduler/internal/sched"
@@ -38,8 +39,8 @@ func run() error {
 	maxAge := e.Duration("MAX_DATA_AGE", 3*time.Minute)
 	maxStep := e.Int("MAX_STEP_USD", 1000)
 	slip := e.Int("STRATEGY_SLIPPAGE_BPS", 50)
-	band := decimal.RequireFromString(e.Opt("FUNDING_GATE_BAND", "0.02"))
-	buffer := decimal.RequireFromString(e.Opt("GUARD_BUFFER", "0.03"))
+	band := decimal.RequireFromString(e.Opt("FUNDING_GATE_BAND", perpl.DefaultGateBand))
+	buffer := decimal.RequireFromString(e.Opt("GUARD_BUFFER", perpl.DefaultGuardBuffer))
 	if err := e.Err(); err != nil {
 		return err
 	}

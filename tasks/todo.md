@@ -1,40 +1,28 @@
-# AUSD-quoted Kuru markets
+# Perpl risk + analytics, visible in UI
 
-Goal: trade MON/AUSD and AUSD/USDC on Kuru next to existing USDC books. Spot trading only; baskets, strategies, fees stay USDC.
+Goal: show judges (Perpl "Best Analytics / Risk Tool") that Perpl's API + contract drive risk and analytics. Three surfaces.
 
-Key decision: keep existing keys (MON, WETH, cbBTC, XAUt0) = USDC books. Add new keys `MON_AUSD`, `AUSD_USDC` (Kuru's own symbols). Everything that looks up by asset keeps working; only quote-is-USDC assumptions change.
-
-Live params (exchangeInfo):
-- MON_AUSD `0x131a2e70a5b31a517a74b8c567149bc294470da9` pricePrec 1e8, sizePrec 1e10, tick 1, minSize 2e12
-- AUSD_USDC `0x699abc15308156e9a3ab89ec7387e9cfe1c86a3b` pricePrec 1e8, sizePrec 1e6, tick 1, minSize 1e7
-- WBTC_AUSD skipped: empty book, WBTC not a supported token
+Data sources:
+- Perpl REST (already in publisher rates stream): live funding, 7d short APR
+- Perpl REST history (already in history `series/funding`): daily funding, 30d chart
+- Perpl exchange contract views (new for API): getPerpetualInfo (mark/oracle/OI), getMarginFractions (init/maint), getAccountByAddr + getPosition (live short)
 
 ## Steps
-- [x] 1. Config: add both markets to `contracts/deployments/143.json` + `client/src/abi/deployments.json`
-- [x] 2. Executor policy: no code (rules iterate orderbooks + tokens). Run `policy_rules` test, then re-apply live Privy policy (outward action, confirm first)
-- [x] 3. Publisher: none (resolves symbol by orderbook); verify startup Resolve passes
-- [x] 4. Indexer: none (collects all orderbooks)
-- [x] 5. (moot: baskets restricted to USDC books, so no double count) API holdings: dedupe by base token so MON_AUSD + MON don't double count (`trade.go:194,517`, `api.go:320`, `store.go:130`)
-- [x] 6. Scheduler TP/SL on AUSD market: price is AUSD/unit, treat AUSD≈USD (comment), no conversion
-- [x] 7. History ingest: skip new markets (backtests use asset → USDC book)
-- [x] 8. Client
-  - `tokens.ts`: `MarketDef.quote`; `marketOf` keyed by market key
-  - trade page caption, OrderBook, LimitPanel, MarketPanel `inTok/outTok` from `market.quote` (real bug otherwise)
-  - home list / search: show pair ("MON / AUSD"), not just token name
-  - baskets + strategies: filter to USDC-quoted markets only
-  - ScheduleForm price labels from quote
-- [ ] 9. Verify (all but real-money trade done): go test ./..., cargo test (executor, indexer), tsc/eslint/build, e2e buy+sell tiny MON_AUSD on mainnet via UI
-
-## Unresolved questions
-1. Uncommitted backend work in same files (planner, api, scheduler). Build on it, or wait till committed?
-2. AUSD_USDC overlaps 3pool swap. List it on trade page anyway?
-3. OK to re-apply live Privy policy after deploy?
-4. MON_AUSD book thin (39bps spread). Show warning on its trade page?
+- [x] 1. `internal/perpl` (shared): move ABI, `Perp`, position read, `Guard`, `Gate` out of scheduler; add `Market` read + `LiqPrice`. Scheduler imports it (no behavior change).
+- [x] 2. API
+  - `GET /api/v1/perpl/markets`: per perp (ETH/BTC/MON) mark, oracle, maint/init margin, max lev, OI, live + 7d funding APR; plus guardBuffer, gateBand
+  - `GET /api/v1/me/positions/{id}/perpl`: live short (size, entry, collateral, PnL, margin frac vs maint, liq price, guard price), guard action, gate APR vs threshold + state, next bot action
+  - env `GUARD_BUFFER`, `FUNDING_GATE_BAND` (same defaults as scheduler, shared consts)
+- [x] 3. Client
+  - Earn page: "Perpl funding" strip (3 markets, live + 7d APR, 30d sparkline)
+  - Builder (basis on): "Perpl risk" card: funding now/7d vs gate, 30d chart, maint margin, liq + guard price at chosen leverage, guard steps
+  - Portfolio position: live risk panel (margin gauge, liq distance, funding PnL, gate state, next action)
+- [x] 4. Verify: go build/vet/test, curl endpoints on local stack, tsc/eslint/build, screenshots
 
 ## Review (2026-10-13)
-- Done: config (6 markets), planner cap mirror for stable-base sells, baskets USDC-only, scheduler gas reserve by base, client quote-aware trade/limit/book/automation + quote selector + thin-book notice, lists one row per token.
-- Found + fixed: quiet books never republished → market-data 30s staleness refused AUSD quotes. Publisher now republishes idle books every 10s.
-- Live Privy policy PATCHed (25 rules, Kuru rules cover 6 books). Second verify call blocked by permission; verify in Privy dashboard.
-- MON/AUSD book ~18% below MON/USDC, ~250 MON bid depth: effectively untradable today.
-- Not done: real-money MON_AUSD trade (needs user wallet signature).
-- Basket page: Market tab, spend→receive card like coin page, value on chart, backtest card (new history "hold" leg).
+- `internal/perpl`: ABI, `Perp` (+ entry, funding = premiumPnlCNS, verified pnl = delta + premium on mainnet), `Guard`, `Gate`, `LiqPrice`, `Market`. Scheduler imports it, behavior unchanged, tests moved.
+- API: `GET /perpl/markets` (live on local stack), `GET /me/positions/{id}/perpl` (live test vs real mainnet ETH short, acct 533: margin 22%, liq 2907.51, guard 2826.74; hand-checked).
+- Client: earn funding strip, builder risk card (gate state uses scheduler's exact input: avg of last N daily APRs), portfolio risk panel (previewed with live acct 533 data, healthy + guard-fire).
+- Verified: go build/vet (all tags)/test, tsc, eslint, next build, screenshots.
+- Finding: ETH 7d daily avg 4.69% < default 5% gate → a fresh ETH basis deploy gets parked by the next scheduler pass. Demo: gate ≤ 4% or off.
+- Not done: position panel never seen with a real logged-in position (needs user's deploy).

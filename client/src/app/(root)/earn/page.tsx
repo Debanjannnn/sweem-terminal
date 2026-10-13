@@ -15,6 +15,7 @@ import { TabPill } from "@/components/motion";
 import { pct } from "@/components/earn/Backtest";
 import { ASSETS, blendedApy, KIND_LABEL, parts, venueName, protocolOf } from "@/components/earn/sources";
 import { ProtocolIcon } from "@/components/ProtocolIcon";
+import { FundingStrip } from "@/components/perpl/PerplRisk";
 
 const live = (s: Strategy, rates: ReturnType<typeof useRates>["rates"]) =>
   s.apy?.estimate != null ? Number(s.apy.estimate) : blendedApy(parts(s), rates);
@@ -79,6 +80,10 @@ export default function EarnPage() {
             </div>
           </article>
         ))}
+      </section>
+
+      <section className="mx-auto max-w-7xl pb-14">
+        <FundingStrip />
       </section>
 
       <section className="mx-auto max-w-7xl space-y-4">

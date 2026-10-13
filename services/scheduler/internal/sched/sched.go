@@ -15,6 +15,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/shopspring/decimal"
 	"github.com/snehendu098/sweem-terminal/internal/config"
+	"github.com/snehendu098/sweem-terminal/internal/perpl"
 	"github.com/snehendu098/sweem-terminal/internal/planner"
 	"github.com/snehendu098/sweem-terminal/internal/streams"
 )
@@ -24,7 +25,7 @@ type Chain interface {
 	Wallet(ctx context.Context, wallet, sym string) (decimal.Decimal, error) // atoms, MON native
 	Balances(ctx context.Context, wallet string, s planner.Strategy, legs []planner.LegState, peers []planner.Peer) ([]planner.Balance, error)
 	Live(ctx context.Context, wallet string, s planner.Strategy, legs []planner.LegState, peers []planner.Peer) (planner.Live, error)
-	Perp(ctx context.Context, wallet string, perpID int) (Perp, error)
+	Perp(ctx context.Context, wallet string, perpID int) (perpl.Perp, error)
 }
 
 type Scheduler struct {

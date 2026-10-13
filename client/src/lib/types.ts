@@ -219,3 +219,47 @@ export type PrepareInput =
   | { kind: "basket_sell"; basketId: string; bps: number; slippageBps?: number };
 export type TxRequest = { to: string; data: string; value: string; chainId: number; description: string; step: number };
 export type Prepared = { prepareId: string; kind: string; steps: Step[]; txs: TxRequest[]; expiresAt: string };
+
+// Perpl risk inputs (api /perpl/markets): contract state + Perpl API funding. Fractions: 0.05 = 5%; APR positive = shorts receive.
+export type PerplMarket = {
+  asset: string;
+  perpId: number;
+  name: string;
+  mark: string;
+  oracle: string;
+  longOi: string;
+  shortOi: string;
+  initMargin: string;
+  maintMargin: string;
+  fundingApr?: string;
+  fundingApr7d?: string;
+};
+export type PerplMarkets = { guardBuffer: string; gateBand: string; markets: PerplMarket[] };
+
+// one basis sleeve of a position, evaluated as the scheduler does (api /me/positions/{id}/perpl); money in USD
+export type PerplRisk = {
+  asset: string;
+  perpId: number;
+  name: string;
+  account: number;
+  open: boolean;
+  size?: string;
+  entry?: string;
+  mark?: string;
+  markValid: boolean;
+  collateral?: string;
+  pnl?: string;
+  funding?: string;
+  equity?: string;
+  notional?: string;
+  free: string;
+  marginFrac?: string;
+  maintMargin?: string;
+  guardAt?: string;
+  liqPrice?: string;
+  guardPrice?: string;
+  guard: { fire: boolean; closeAll: boolean; topUp: string; lotCut: string };
+  gate: { apr: string; threshold: string; band: string; lookbackDays: number; want: boolean } | null;
+  next: "none" | "guard_top_up" | "guard_cut" | "guard_close" | "gate_close" | "gate_open";
+};
+export type FundingDay = { day: string; rate: string; apr: string; intervals: number };

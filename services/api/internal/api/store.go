@@ -43,6 +43,7 @@ type Store interface {
 	SetBacktest(ctx context.Context, id string, summary json.RawMessage) error
 
 	HasPerplAccount(ctx context.Context, did, wallet string) (bool, error)
+	FundingAPR(ctx context.Context, perpID, days int) (*decimal.Decimal, error) // trailing daily avg × 365 (scheduler's gate input); nil = no data
 	OpenPosition(ctx context.Context, did, wallet string, st Strategy, principal string, plan planner.Plan, fee, creatorOwed string) (posID, execID string, err error)
 	Positions(ctx context.Context, did string) ([]Position, error)
 	Position(ctx context.Context, did, id string) (Position, planner.Strategy, error)
@@ -472,6 +473,17 @@ func (p PG) Strategy(ctx context.Context, id, did string) (Strategy, error) {
 func (p PG) SetBacktest(ctx context.Context, id string, summary json.RawMessage) error {
 	_, err := p.DB.Exec(ctx, `update strategies set backtest=$2 where id=$1`, id, summary)
 	return err
+}
+
+func (p PG) FundingAPR(ctx context.Context, perpID, days int) (*decimal.Decimal, error) {
+	var apr *string
+	err := p.DB.QueryRow(ctx, `select (avg(rate) * 365)::text from series_funding_daily
+		where perp_id = $1 and day >= (now() at time zone 'utc')::date - $2::int and day < (now() at time zone 'utc')::date`, perpID, days).Scan(&apr)
+	if err != nil || apr == nil {
+		return nil, err
+	}
+	v, err := decimal.NewFromString(*apr)
+	return &v, err
 }
 
 // HasPerplAccount: the indexer saw AccountCreated, or a confirmed plan of ours created it (indexer lag).

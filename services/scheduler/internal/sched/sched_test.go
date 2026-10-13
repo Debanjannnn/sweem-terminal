@@ -17,6 +17,7 @@ import (
 	"github.com/shopspring/decimal"
 	"github.com/snehendu098/sweem-terminal/internal/config"
 	"github.com/snehendu098/sweem-terminal/internal/httpx"
+	"github.com/snehendu098/sweem-terminal/internal/perpl"
 	"github.com/snehendu098/sweem-terminal/internal/planner"
 	"github.com/snehendu098/sweem-terminal/internal/streams"
 )
@@ -72,7 +73,7 @@ type fakeChain struct {
 	mu     sync.Mutex
 	wallet map[string]decimal.Decimal
 	bals   []planner.Balance
-	perp   Perp
+	perp   perpl.Perp
 }
 
 func (f *fakeChain) Wallet(_ context.Context, _, sym string) (decimal.Decimal, error) {
@@ -93,7 +94,7 @@ func (f *fakeChain) Live(context.Context, string, planner.Strategy, []planner.Le
 	return planner.Live{Bals: f.bals, Wallet: f.wallet, PerpLot: map[string]decimal.Decimal{"ETH": f.perp.Lot, "BTC": f.perp.Lot, "MON": f.perp.Lot}, PerpFree: f.perp.Free}, nil
 }
 
-func (f *fakeChain) Perp(context.Context, string, int) (Perp, error) {
+func (f *fakeChain) Perp(context.Context, string, int) (perpl.Perp, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.perp, nil
@@ -210,23 +211,6 @@ func TestDrift(t *testing.T) {
 	}
 }
 
-func TestGateHysteresis(t *testing.T) {
-	th, band := d("0.05"), d("0.02")
-	cases := []struct {
-		open bool
-		apr  string
-		want bool
-	}{
-		{true, "0.05", true}, {true, "0.0499", false}, // open: stays until below threshold
-		{false, "0.06", false}, {false, "0.07", false}, {false, "0.0701", true}, // closed: reopens only above threshold+band
-	}
-	for _, c := range cases {
-		if Gate(c.open, d(c.apr), th, band) != c.want {
-			t.Errorf("%+v", c)
-		}
-	}
-}
-
 func TestFundingAPRNoLookback(t *testing.T) { // days == 0 never touches the DB
 	snap := streams.RatesSnapshot{Funding: []streams.FundingInfo{{PerpID: 20, AprShort7d: d("0.2")}}}
 	s := &Scheduler{}
@@ -260,63 +244,5 @@ func TestTargets(t *testing.T) {
 	noLend := []planner.Source{{Kind: "staking", Venue: "shmonad", WeightBps: 5000}, {Kind: "basis", Venue: "perpl", WeightBps: 5000}}
 	if got := Targets(noLend, []bool{false, false}, []decimal.Decimal{decimal.Zero, decimal.Zero}, nil); !reflect.DeepEqual(got, []int{5000, 5000}) {
 		t.Errorf("no lending: %v", got)
-	}
-}
-
-func TestGuard(t *testing.T) {
-	// 1 ETH short (lot 1000, 3 lot dec) at 2600.00 (2 price dec), 1300 AUSD collateral, maintenance 20x = 5%
-	p := func(mark int64) Perp {
-		pnl := decimal.NewFromInt(260000 - mark).Mul(d("10000")) // (entry − mark) × 1 ETH in 6dp
-		return Perp{Account: 7, Deposit: d("1300000000"), PnL: pnl, Mark: decimal.NewFromInt(mark), Lot: d("1000"),
-			PriceDec: 2, LotDec: 3, MaintHdths: d("2000"), MarkValid: true}
-	}
-	buf, rich := d("0.03"), d("500000000")
-	for _, mark := range []int64{260000, 350000} { // 50%, 11.4% margin
-		if g := Guard(p(mark), buf, rich); g.Fire {
-			t.Fatal(mark, g)
-		}
-	}
-	// mark 3700: equity 200 / 3700 = 5.4% < 8%; target 11% × 3700 = 407
-	cases := []struct {
-		free, wallet, topUp, cut, released string
-	}{
-		{"0", "500000000", "209090910", "0", "0"},          // wallet covers 207 / 0.99 swap haircut
-		{"50000000", "500000000", "158585859", "0", "0"},   // free balance first: 157 / 0.99
-		{"300000000", "0", "0", "0", "0"},                  // free balance alone covers it
-		{"0", "100000000", "100000000", "266", "52215800"}, // keep 1000 × (200 + 99) / 407 = 734; re-add (200 − 3.7) × 0.266
-		{"0", "500000", "0", "509", "99916700"},            // dust wallet: keep 1000 × 200 / 407 = 491
-	}
-	for _, c := range cases {
-		pp := p(370000)
-		pp.Free = d(c.free)
-		g := Guard(pp, buf, d(c.wallet))
-		if !g.Fire || g.CloseAll || !g.TopUp.Equal(d(c.topUp)) || !g.LotCut.Equal(d(c.cut)) || !g.Released.Equal(d(c.released)) {
-			t.Errorf("%+v: %+v", c, g)
-		}
-	}
-	if g := Guard(p(390000), buf, decimal.Zero); !g.Fire || !g.CloseAll { // equity 0: last resort
-		t.Errorf("wiped: %+v", g)
-	}
-	stale := p(370000)
-	stale.MarkValid = false
-	if Guard(stale, buf, rich).Fire {
-		t.Fatal("invalid mark fired")
-	}
-	closed := p(370000)
-	closed.Lot = decimal.Zero
-	if Guard(closed, buf, rich).Fire {
-		t.Fatal("no position fired")
-	}
-}
-
-func TestPerplABI(t *testing.T) {
-	for _, m := range []string{"getAccountByAddr", "getPosition", "getPerpetualInfo", "getMarginFractions"} {
-		if _, ok := perplABI.Methods[m]; !ok {
-			t.Fatal(m)
-		}
-	}
-	out := perplABI.Methods["getPosition"].Outputs
-	if len(out) != 3 || out[0].Type.TupleRawNames == nil {
-		t.Fatalf("%+v", out)
 	}
 }

@@ -15,6 +15,7 @@ import { evenSplit, setWeight, weightsError } from "@/components/create/weights"
 import { cn } from "@/lib/utils";
 import { BacktestView, pct } from "./Backtest";
 import { fmtAmt, StrategyFlow } from "./StrategyFlow";
+import { BasisRiskCard } from "@/components/perpl/PerplRisk";
 import { ASSETS, blendedApy, leverageOf, defaultVenue, KIND_LABEL, kindsFor, lendingVenues, MAX_TOKENS, minDeposit, PERP, sourceApy, toBacktest, protocolOf, venueName } from "./sources";
 
 type Pick = { kind: SourceKind; venue: string; bps: number; leverage: string };
@@ -388,6 +389,19 @@ export function StrategyBuilder() {
               </div>
               <StrategyFlow asset={asset} amount={flowAmt} legs={flowLegs} />
             </Panel>
+
+            {sleeves.flatMap((sl) =>
+              sl.sources
+                .filter((s) => s.kind === "basis")
+                .map((s) => (
+                  <BasisRiskCard
+                    key={sl.asset}
+                    asset={sl.asset}
+                    leverage={leverageOf(s)}
+                    gate={rules.fundingGate ? { apr: Number(rules.fundingGate.apr), days: rules.fundingGate.lookbackDays } : null}
+                  />
+                )),
+            )}
 
             <Panel className="space-y-4 p-5 sm:p-6">
               {invalid && <p className="text-xs text-warning">{invalid}</p>}

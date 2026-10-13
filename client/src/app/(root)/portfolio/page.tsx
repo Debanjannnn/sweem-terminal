@@ -23,6 +23,7 @@ import { OrderList } from "@/components/trade/LimitPanel";
 import { ExecutionProgress } from "@/components/Execution";
 import { KIND_LABEL, venueName, protocolOf } from "@/components/earn/sources";
 import { ProtocolIcon } from "@/components/ProtocolIcon";
+import { PositionRisk } from "@/components/perpl/PerplRisk";
 
 const STABLES = new Set(["USDC", "AUSD", "USDT0"]);
 const PRICE_OF: Record<string, string> = { WMON: "MON" };
@@ -234,6 +235,7 @@ function PositionCard({ p, priceOf, onChange }: { p: Position; priceOf: (sym: st
         Opened {fmtTime(p.openedAt)}
         {p.lastRebalanceAt ? ` · rebalanced ${fmtTime(p.lastRebalanceAt)}` : ""}. Value marks supplied tokens at spot; lending/staking yield accrues on-venue.
       </p>
+      {p.status !== "closed" && p.legs.some((l) => l.kind === "basis") && <PositionRisk positionId={p.id} />}
       {p.legs.some((l) => l.kind === "lp") && <Notice>ActiveVault leg: 4-day lock, withdraw may fail inside the lock.</Notice>}
       {err && <Notice tone="bad">{err}</Notice>}
       {p.status === "open" && (

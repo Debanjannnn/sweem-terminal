@@ -11,10 +11,12 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/shopspring/decimal"
 
 	"github.com/snehendu098/sweem-terminal/internal/config"
 	"github.com/snehendu098/sweem-terminal/internal/httpx"
 	"github.com/snehendu098/sweem-terminal/internal/logx"
+	"github.com/snehendu098/sweem-terminal/internal/perpl"
 	"github.com/snehendu098/sweem-terminal/internal/pg"
 	"github.com/snehendu098/sweem-terminal/internal/planner"
 	"github.com/snehendu098/sweem-terminal/services/api/internal/api"
@@ -37,6 +39,7 @@ func run() error {
 	dbURL, appID, secret, quorum := e.Str("DATABASE_URL"), e.Str("PRIVY_APP_ID"), e.Str("PRIVY_APP_SECRET"), e.Str("PRIVY_KEY_QUORUM_ID")
 	depPath, mdURL, histURL, execURL, rpcURL := e.Str("DEPLOYMENTS_PATH"), e.Str("MARKET_DATA_URL"), e.Str("HISTORY_URL"), e.Str("EXECUTOR_URL"), e.Str("RPC_URL")
 	secret2, maxStep := e.Str("INTERNAL_SECRET"), e.Int("MAX_STEP_USD", 1000)
+	guard, band := e.Opt("GUARD_BUFFER", perpl.DefaultGuardBuffer), e.Opt("FUNDING_GATE_BAND", perpl.DefaultGateBand)
 	addr := ":" + e.Opt("PORT", "8080")
 	origins := strings.Split(e.Opt("CORS_ORIGINS", "http://localhost:3000"), ",")
 	if err := e.Err(); err != nil {
@@ -65,12 +68,13 @@ func run() error {
 	mux := httpx.NewMux(map[string]httpx.Check{"postgres": db.Ping})
 	(&api.Server{
 		Store: api.PG{DB: db}, Auth: verifier, Privy: privy.New(appID, secret, quorum), QuorumID: quorum,
-		Plan:    &planner.Planner{Dep: dep, Q: md, MaxStepUSD: int64(maxStep)},
-		Exec:    planner.Executor{URL: execURL, Secret: secret2, Caller: "api", HTTP: &http.Client{Timeout: 15 * time.Minute}},
-		Chain:   eth,
-		Txs:     eth,
-		Rates:   md,
-		History: api.History{URL: histURL, HTTP: &http.Client{Timeout: 60 * time.Second}},
+		Plan:        &planner.Planner{Dep: dep, Q: md, MaxStepUSD: int64(maxStep)},
+		Exec:        planner.Executor{URL: execURL, Secret: secret2, Caller: "api", HTTP: &http.Client{Timeout: 15 * time.Minute}},
+		Chain:       eth,
+		Txs:         eth,
+		Rates:       md,
+		History:     api.History{URL: histURL, HTTP: &http.Client{Timeout: 60 * time.Second}},
+		GuardBuffer: decimal.RequireFromString(guard), GateBand: decimal.RequireFromString(band),
 	}).Routes(mux)
 	slog.Info("listening", "addr", addr)
 	return httpx.Run(ctx, addr, httpx.CORS(origins, mux))

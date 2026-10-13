@@ -50,17 +50,18 @@ type Backtester interface {
 }
 
 type Server struct {
-	Store    Store
-	Auth     Verifier
-	Privy    Privy
-	QuorumID string
-	Plan     *planner.Planner
-	Exec     Runner
-	Chain    planner.Chain
-	Txs      TxReader
-	Rates    Rater
-	History  Backtester
-	bg       sync.WaitGroup // background executor runs; tests Wait on it
+	Store                 Store
+	Auth                  Verifier
+	Privy                 Privy
+	QuorumID              string
+	Plan                  *planner.Planner
+	Exec                  Runner
+	Chain                 planner.Chain
+	Txs                   TxReader
+	Rates                 Rater
+	History               Backtester
+	GuardBuffer, GateBand decimal.Decimal // scheduler's risk params, shown to users
+	bg                    sync.WaitGroup  // background executor runs; tests Wait on it
 }
 
 // Routes registers every /api/v1 route on mux.
@@ -72,6 +73,7 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/strategies/{id}", s.optionalMe(s.strategy))
 	mux.HandleFunc("POST /api/v1/strategies/{id}/backtest", s.backtest)
 	mux.Handle("POST /api/v1/strategies", s.me(s.createStrategy))
+	mux.HandleFunc("GET /api/v1/perpl/markets", s.perplMarkets)
 
 	mux.Handle("GET /api/v1/me", s.me(s.user))
 	mux.Handle("POST /api/v1/me/delegation", s.me(s.putDelegation))
@@ -95,6 +97,7 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.Handle("POST /api/v1/me/strategies/{id}/deploy", s.me(s.deploy))
 	mux.Handle("GET /api/v1/me/positions", s.me(s.positions))
 	mux.Handle("POST /api/v1/me/positions/{id}/withdraw", s.me(s.withdraw))
+	mux.Handle("GET /api/v1/me/positions/{id}/perpl", s.me(s.positionPerpl))
 	mux.Handle("GET /api/v1/me/executions", s.me(s.executions))
 	mux.Handle("GET /api/v1/me/earnings", s.me(s.earnings))
 	mux.Handle("GET /api/v1/me/executions/{id}", s.me(s.execution))

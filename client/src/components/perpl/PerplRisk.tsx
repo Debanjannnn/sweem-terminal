@@ -147,7 +147,7 @@ export function BasisRiskCard({ asset, leverage, gate }: { asset: string; levera
       </dl>
 
       <div className="space-y-2">
-        {f.data ? <FundingBars data={f.data} threshold={gate?.apr ?? null} /> : <Skeleton className="h-28 w-full" />}
+        {f.data ? <FundingBars data={f.data} /> : <Skeleton className="h-28 w-full" />}
         <p className="flex items-center justify-between gap-3 text-[11px] text-muted-foreground">
           <span>30d daily funding</span>
           {gate && on !== null && (
@@ -175,22 +175,21 @@ export function BasisRiskCard({ asset, leverage, gate }: { asset: string; levera
   );
 }
 
-function FundingBars({ data, threshold }: { data: FundingDay[]; threshold: number | null }) {
+function FundingBars({ data }: { data: FundingDay[] }) {
   const rows = data.map((d) => ({ day: d.day.slice(5), apr: Number(d.apr) }));
   return (
     <div className="h-28 w-full">
       <ResponsiveContainer width="100%" height="100%" initialDimension={{ width: 1, height: 1 }}>
         <BarChart data={rows} margin={{ top: 4, right: 0, bottom: 0, left: 0 }}>
           <XAxis dataKey="day" tick={{ fill: "var(--muted-foreground)", fontSize: 10 }} axisLine={false} tickLine={false} minTickGap={40} />
-          {/* tight to the data, zero and the gate line: "auto" pads to round ticks and floats the date axis off the bars */}
-          <YAxis hide domain={[(lo: number) => Math.min(lo, 0, threshold ?? 0), (hi: number) => Math.max(hi, 0, threshold ?? 0)]} />
+          {/* tight to the data and zero: "auto" pads to round ticks and floats the date axis off the bars */}
+          <YAxis hide domain={[(lo: number) => Math.min(lo, 0), (hi: number) => Math.max(hi, 0)]} />
           <Tooltip
             cursor={{ fill: "var(--secondary)" }}
             contentStyle={{ background: "var(--popover)", border: "1px solid var(--border)", borderRadius: 12, fontSize: 12 }}
             formatter={(v) => [pct(Number(v)), "APR"]}
           />
           <ReferenceLine y={0} stroke="var(--border)" />
-          {threshold !== null && <ReferenceLine y={threshold} stroke="var(--warning)" strokeDasharray="4 4" />}
           <Bar dataKey="apr" radius={[2, 2, 0, 0]} isAnimationActive={false}>
             {rows.map((r, i) => (
               <Cell key={i} fill={r.apr >= 0 ? "var(--positive)" : "var(--destructive)"} />

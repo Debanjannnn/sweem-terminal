@@ -1,33 +1,21 @@
 "use client";
 
 import Link from "next/link";
-import { formatUnits, parseUnits } from "viem";
+import { parseUnits } from "viem";
 import { useEffect, useState } from "react";
-import { errText, fmtNum, fmtTime, fmtUsd, getMyStrategies, getOrders, getPositions, getStrategies, withdrawPosition } from "@/lib/api";
+import { errText, fmtNum, getMyStrategies, getOrders, getPositions, getStrategies } from "@/lib/api";
 import { useHoldings, useTickers } from "@/lib/hooks";
 import { useAsync, useSession } from "@/lib/session";
-import { fmtUnits, tokenBySymbol } from "@/lib/tokens";
-import type { Position } from "@/lib/types";
-import { Button, ErrorBox, Notice, Panel, Skeleton, StatusPill } from "@/components/ui";
-import { TokenIcon } from "@/components/TokenIcon";
-import { IconStack } from "@/components/IconStack";
+import { tokenBySymbol } from "@/lib/tokens";
+import { Button, ErrorBox, Panel, Skeleton } from "@/components/ui";
 import { Holdings, type Row } from "@/components/portfolio/Holdings";
 import { ValueChart } from "@/components/portfolio/ValueChart";
 import { TradingBalance } from "@/components/portfolio/TradingBalance";
 import { EarningsCard } from "@/components/portfolio/Earnings";
 import { DelegationCard } from "@/components/automation/Delegation";
 import { ExecutionLog, ScheduleList } from "@/components/automation/ScheduleList";
-import { ScheduleForm } from "@/components/automation/ScheduleForm";
 import { OrderList } from "@/components/trade/LimitPanel";
-import { ExecutionProgress } from "@/components/Execution";
-import { KIND_LABEL, venueName, protocolOf } from "@/components/earn/sources";
-import { ProtocolIcon } from "@/components/ProtocolIcon";
-import { PositionRisk } from "@/components/perpl/PerplRisk";
-import { Segmented } from "@/components/motion";
-
-const SELL_PCTS = ["25", "50", "75", "100"] as const;
-const STABLES = new Set(["USDC", "AUSD", "USDT0"]);
-const PRICE_OF: Record<string, string> = { WMON: "MON" };
+import { PositionCard, PRICE_OF, STABLES } from "@/components/portfolio/PositionCard";
 
 export default function PortfolioPage() {
   const { ready, authenticated, login, address } = useSession();
@@ -89,7 +77,6 @@ export default function PortfolioPage() {
       <div className="mx-auto w-full space-y-6">
         <header className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-3">
-            <Avatar address={address ?? ""} />
             <h1 className="truncate text-xl font-medium sm:text-2xl">
               <span className="text-muted-foreground">Welcome, </span>
               {address ? `${address.slice(0, 6)}…${address.slice(-4)}` : <Skeleton className="inline-block h-6 w-32 align-middle" />}
@@ -148,112 +135,6 @@ export default function PortfolioPage() {
   );
 }
 
-// principal is what went in; per-source amounts are the atoms supplied at deploy (venue yield accrues on-venue)
-function PositionCard({ p, priceOf, onChange }: { p: Position; priceOf: (sym: string) => number | null; onChange: () => void }) {
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-  const [execId, setExecId] = useState<string | null>(null);
-  const [auto, setAuto] = useState(false);
-  const [sellPct, setSellPct] = useState<(typeof SELL_PCTS)[number]>("100");
-  // withdrawing = a full close that stalled; only a 100% retry resumes it
-  const closing = p.status === "withdrawing";
-  // legs grouped by sleeve token (old rows: no token = position asset); each group marked at its own price
-  const groups = Object.entries(Object.groupBy(p.legs, (l) => l.token ?? p.asset)).map(([token, legs = []]) => ({ token, legs, dec: tokenBySymbol(token)?.decimals ?? 18 }));
-  // ponytail: basis AUSD collateral counted at $1, hedge PnL not marked (~0); read venue balances via RPC if exact value matters
-  const value = groups.reduce<number | null>((v, g) => {
-    const px = priceOf(g.token);
-    if (v === null || px === null) return null;
-    return g.legs.reduce((s, l) => s + Number(formatUnits(BigInt(l.asset || 0), g.dec)) * px + (l.collateral ? Number(formatUnits(BigInt(l.collateral), 6)) : 0), v);
-  }, 0);
-  const pnl = value !== null ? value - Number(p.principalUsdc) : null;
-
-  async function withdraw() {
-    setBusy(true);
-    setErr(null);
-    try {
-      setExecId((await withdrawPosition(p.id, closing ? 10000 : Number(sellPct) * 100)).executionId);
-    } catch (e) {
-      setErr(errText(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <Panel className="space-y-3 p-5">
-      <div className="flex items-center gap-3">
-        <IconStack symbols={groups.map((g) => g.token)} size={28} ring="ring-card" />
-        <Link href={`/baskets/${p.strategyId}`} className="truncate font-medium hover:underline">
-          {p.strategyName}
-        </Link>
-        <span className="ml-auto">
-          <StatusPill status={p.status} />
-        </span>
-      </div>
-      <dl className="tnum grid grid-cols-3 gap-3 text-sm">
-        <div>
-          <dt className="text-xs text-muted-foreground">Principal</dt>
-          <dd>{fmtUsd(Number(p.principalUsdc))}</dd>
-        </div>
-        <div>
-          <dt className="text-xs text-muted-foreground">Value (spot)</dt>
-          <dd>{value !== null ? fmtUsd(value) : "-"}</dd>
-        </div>
-        <div>
-          <dt className="text-xs text-muted-foreground">PnL</dt>
-          <dd className={pnl === null ? "" : pnl >= 0 ? "text-positive" : "text-destructive"}>{pnl !== null ? `${pnl >= 0 ? "+" : ""}${fmtUsd(pnl)}` : "-"}</dd>
-        </div>
-      </dl>
-      <ul className="space-y-1 text-xs">
-        {groups.flatMap((g) =>
-          g.legs.map((l, i) => (
-            <li key={`${g.token}${i}`} className="flex items-center gap-2">
-              {groups.length > 1 && <TokenIcon symbol={g.token} size={14} />}
-              <span className="rounded-md bg-secondary/60 px-1.5 py-0.5 text-[10px] text-muted-foreground">{KIND_LABEL[l.kind as keyof typeof KIND_LABEL] ?? l.kind}</span>
-              <ProtocolIcon protocol={protocolOf(l.venue)} size={14} />
-              {venueName(l.venue)}
-              <span className="tnum ml-auto text-muted-foreground">
-                {fmtUnits(l.asset || "0", g.dec)} {g.token}
-                {l.entryPx ? ` · entry ${fmtUsd(Number(l.entryPx))}` : ""}
-              </span>
-            </li>
-          )),
-        )}
-      </ul>
-      <p className="text-[11px] text-muted-foreground">
-        Opened {fmtTime(p.openedAt)}
-        {p.lastRebalanceAt ? ` · rebalanced ${fmtTime(p.lastRebalanceAt)}` : ""}. Value marks supplied tokens at spot; lending/staking yield accrues on-venue.
-      </p>
-      {p.status !== "closed" && p.legs.some((l) => l.kind === "basis") && <PositionRisk positionId={p.id} />}
-      {p.legs.some((l) => l.kind === "lp") && <Notice>ActiveVault leg: 4-day lock, withdraw may fail inside the lock.</Notice>}
-      {err && <Notice tone="bad">{err}</Notice>}
-      {(p.status === "open" || closing) && (
-        <div className="flex flex-wrap items-center gap-2">
-          {!closing && (
-            <Segmented
-              id={`sell-${p.id}`}
-              value={sellPct}
-              onChange={setSellPct}
-              options={SELL_PCTS.map((v) => ({ value: v, label: `${v}%` }))}
-              className="w-auto flex-1"
-            />
-          )}
-          <Button variant="ghost" pending={busy} onClick={() => void withdraw()}>
-            {closing ? "Resume sell" : "Sell"} to USDC
-          </Button>
-          {!closing && (
-            <Button variant="ghost" onClick={() => setAuto((a) => !a)}>
-              {auto ? "Hide automation" : "TP / SL / Rebalance"}
-            </Button>
-          )}
-        </div>
-      )}
-      {auto && <ScheduleForm target={{ type: "position", id: p.id }} current={value} onCreated={() => setAuto(false)} />}
-      {execId && <ExecutionProgress id={execId} onSettled={onChange} />}
-    </Panel>
-  );
-}
-
 const LOW_GAS = parseUnits("0.1", 18);
 
 function useNow() {
@@ -271,17 +152,5 @@ function Clock() {
     <time className="tnum text-sm text-muted-foreground sm:text-base" dateTime={new Date(now).toISOString()}>
       {new Date(now).toLocaleString("en-GB", { day: "numeric", month: "long", year: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" })}
     </time>
-  );
-}
-
-// deterministic gradient blob from the address
-function Avatar({ address }: { address: string }) {
-  const h = parseInt(address.slice(2, 8) || "0", 16) % 360;
-  return (
-    <span
-      aria-hidden
-      className="size-10 shrink-0 rounded-full ring-1 ring-border"
-      style={{ background: `radial-gradient(circle at 30% 30%, hsl(${h} 90% 70%), hsl(${(h + 60) % 360} 80% 45%) 60%, hsl(${(h + 120) % 360} 70% 25%))` }}
-    />
   );
 }

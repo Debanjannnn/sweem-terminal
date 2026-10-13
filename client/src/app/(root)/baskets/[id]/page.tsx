@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useParams, useSearchParams } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
-import { fmtTime, getCandles, getStrategy, runBacktest, shortHash } from "@/lib/api";
+import { fmtTime, getCandles, getPositions, getStrategy, runBacktest, shortHash } from "@/lib/api";
 import { useRates, useTickers } from "@/lib/hooks";
 import { useAsync, useSession } from "@/lib/session";
 import { addressUrl } from "@/lib/config";
@@ -20,6 +20,7 @@ import { cn } from "@/lib/utils";
 import { leverageOf, liveApy, parts, sourceApy, toBacktest } from "@/components/earn/sources";
 import { ScheduleForm } from "@/components/automation/ScheduleForm";
 import { ScheduleList } from "@/components/automation/ScheduleList";
+import { PositionCard, usePriceOf } from "@/components/portfolio/PositionCard";
 
 export default function BasketPage() {
   const id = useParams<{ id: string }>().id;
@@ -29,6 +30,10 @@ export default function BasketPage() {
   const { ready, authenticated } = useSession();
   const st = useAsync(ready ? `strategy:${id}:${authenticated}` : null, () => getStrategy(id));
   const s = st.data;
+  // the viewer's live positions in this basket (closed/failed stay on the portfolio page)
+  const positions = useAsync(ready && authenticated ? `positions:${id}` : null, getPositions);
+  const mine = (positions.data ?? []).filter((p) => p.strategyId === id && p.status !== "closed" && p.status !== "failed");
+  const priceOf = usePriceOf();
   const { rates } = useRates();
   // ponytail: backtest straight from history (no api write per view); api's stored summary shown when history is down
   const sleeves = s ? parts(s) : [];
@@ -122,6 +127,17 @@ export default function BasketPage() {
             </dl>
           </section>
 
+          {mine.length > 0 && (
+            <section className="space-y-3">
+              <h2 className="px-1 text-lg font-medium">Your positions</h2>
+              <div className="grid gap-3 xl:grid-cols-2">
+                {mine.map((p) => (
+                  <PositionCard key={p.id} p={p} priceOf={priceOf} onChange={positions.reload} />
+                ))}
+              </div>
+            </section>
+          )}
+
           <div className="grid gap-4 xl:grid-cols-2">
             <Card title="Allocation" className="min-w-0">
               {s ? <AllocationDonut sleeves={sleeves} stacked /> : <Skeleton className="h-40 w-full" />}
@@ -160,7 +176,7 @@ export default function BasketPage() {
         </div>
 
         <aside className="space-y-3 lg:sticky lg:top-24 lg:self-start">
-          <div className="rounded-[28px] border border-border bg-secondary/60">{s ? <DeployPanel strategy={s} initialAmount={search.get("amount") ?? ""} /> : <Skeleton className="m-5 h-60" />}</div>
+          <div className="rounded-[28px] border border-border bg-secondary/60">{s ? <DeployPanel strategy={s} initialAmount={search.get("amount") ?? ""} initialExec={search.get("exec")} onSettled={positions.reload} /> : <Skeleton className="m-5 h-60" />}</div>
           {s && (
             <div className="space-y-4 rounded-[28px] border border-border bg-secondary/60 p-5">
               <span className="text-sm font-medium">Recurring buy</span>

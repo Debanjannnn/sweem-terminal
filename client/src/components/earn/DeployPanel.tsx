@@ -16,7 +16,17 @@ import { minDeposit, parts } from "./sources";
 import { AnyChainButton } from "@/components/deposit/AnyChainDeposit";
 
 // Buy: USDC in, 0.4% open fee to treasury, executor routes the rest into every source from the user's wallet.
-export function DeployPanel({ strategy, initialAmount = "" }: { strategy: Strategy; initialAmount?: string }) {
+export function DeployPanel({
+  strategy,
+  initialAmount = "",
+  initialExec = null,
+  onSettled,
+}: {
+  strategy: Strategy;
+  initialAmount?: string;
+  initialExec?: string | null;
+  onSettled?: () => void;
+}) {
   const { ready, authenticated, login, delegated, me } = useSession();
   const holdings = useHoldings();
   const { tickers } = useTickers();
@@ -24,7 +34,7 @@ export function DeployPanel({ strategy, initialAmount = "" }: { strategy: Strate
   const [slippage, setSlippage] = useState(100);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const [execId, setExecId] = useState<string | null>(null);
+  const [execId, setExecId] = useState<string | null>(initialExec); // set when the builder bought on publish
 
   const raw = parseAmount(amount, USDC.decimals);
   const usdc = balanceOf(holdings.data, "USDC");
@@ -110,7 +120,15 @@ export function DeployPanel({ strategy, initialAmount = "" }: { strategy: Strate
         </Button>
       )}
       {raw !== null && usdc !== null && raw > usdc && <AnyChainButton need={Number(raw - usdc) / 1e6} onArrived={holdings.reload} className="mx-auto flex w-fit" />}
-      {execId && <ExecutionProgress id={execId} onSettled={holdings.reload} />}
+      {execId && (
+        <ExecutionProgress
+          id={execId}
+          onSettled={() => {
+            holdings.reload();
+            onSettled?.();
+          }}
+        />
+      )}
       <p className="text-[11px] leading-4 text-muted-foreground">
         Monad mainnet, real funds. Everything stays in your own wallet&apos;s venue positions; sweem&apos;s signer runs the steps (fee → swaps → deposits
         {srcs.some((s) => s.kind === "basis") ? " → Perpl hedge" : ""}). {own ? "" : "The creator earns half the open fee."}

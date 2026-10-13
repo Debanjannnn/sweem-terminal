@@ -2,9 +2,9 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
-import { createStrategy, errText, fmtUsd, runBacktest } from "@/lib/api";
+import { createStrategy, deployStrategy, errText, fmtUsd, runBacktest } from "@/lib/api";
 import type { Backtest, Rules, Sleeve, SourceKind } from "@/lib/types";
-import { useRates, useTickers } from "@/lib/hooks";
+import { useHoldings, useRates, useTickers } from "@/lib/hooks";
 import { useSession } from "@/lib/session";
 import { Button, Divider, ErrorBox, Label, Notice, Panel } from "@/components/ui";
 import { TokenIcon } from "@/components/TokenIcon";
@@ -16,6 +16,10 @@ import { cn } from "@/lib/utils";
 import { BacktestView, pct } from "./Backtest";
 import { fmtAmt, StrategyFlow } from "./StrategyFlow";
 import { BasisRiskCard } from "@/components/perpl/PerplRisk";
+import { toastError } from "@/components/TxToast";
+import { DelegationCard } from "@/components/automation/Delegation";
+import { AnyChainButton } from "@/components/deposit/AnyChainDeposit";
+import { balanceOf } from "@/components/trade/MarketPanel";
 import { ASSETS, blendedApy, leverageOf, defaultVenue, KIND_LABEL, kindsFor, lendingVenues, LP_ASSUMED_APR, MAX_TOKENS, minDeposit, PERP, sourceApy, toBacktest, protocolOf, venueName } from "./sources";
 
 type Pick = { kind: SourceKind; venue: string; bps: number; leverage: string };
@@ -38,7 +42,8 @@ const HINT: Record<SourceKind, string> = {
 
 export function StrategyBuilder() {
   const router = useRouter();
-  const { ready, authenticated, login } = useSession();
+  const { ready, authenticated, login, delegated } = useSession();
+  const holdings = useHoldings();
   const { rates } = useRates();
   const { tickers } = useTickers();
   const [name, setName] = useState("");
@@ -47,7 +52,7 @@ export function StrategyBuilder() {
   const [tokenBps, setTokenBps] = useState<number[]>([10000]);
   const [picksBy, setPicksBy] = useState<Record<string, Pick[]>>({ USDC: [{ kind: "lending", venue: "aave", bps: 10000, leverage: "2" }] });
   const [tab, setTab] = useState("USDC");
-  const [amount, setAmount] = useState("1000");
+  const [amount, setAmount] = useState(""); // empty = publish only; a value also buys right after
   const [drift, setDrift] = useState("5");
   const [minHours, setMinHours] = useState("24");
   const [gateOn, setGateOn] = useState(true);
@@ -90,7 +95,7 @@ export function StrategyBuilder() {
     tokens.map(sleeveErr).find(Boolean) ??
     (sleeves.reduce((n, sl) => n + sl.sources.length, 0) > MAX_SOURCES ? `At most ${MAX_SOURCES} sources across tokens` : null) ??
     ruleErr ??
-    (Number(amount) > 0 ? null : "Enter an amount");
+    (amount.trim() !== "" && !(Number(amount) > 0) ? "Invalid amount" : null);
 
   const resplit = (next: Omit<Pick, "bps">[]) => {
     const w = evenSplit(next.length);
@@ -110,7 +115,7 @@ export function StrategyBuilder() {
     setTokenBps(evenSplit(next.length));
     if (!on && !picksBy[a]) setPicksBy({ ...picksBy, [a]: defaultPicks(a) });
     setTab(on ? (tab === a ? next[0] : tab) : a);
-    if (nextUnit !== unit) setAmount(nextUnit === "USDC" ? "1000" : "1");
+    if (nextUnit !== unit) setAmount("");
     setBt({ data: null, error: null, loading: false });
   };
 
@@ -130,9 +135,15 @@ export function StrategyBuilder() {
     try {
       const body = multi ? { sleeves } : { asset: tokens[0], sources: sleeves[0].sources };
       const s = await createStrategy({ name: name.trim(), ...body, rules, public: pub });
-      // carry the preview amount to the deploy panel, in USDC (single token: asset units at spot)
-      const usd = unit === "USDC" ? amt : prices[unit] ? amt * prices[unit] : 0;
-      router.push(`/baskets/${s.id}${usd > 0 ? `?amount=${usd.toFixed(2)}` : ""}`);
+      if (!(buyUsd > 0)) return router.push(`/baskets/${s.id}`);
+      // basket saved; a failed buy lands on its page with the amount prefilled to retry
+      try {
+        const r = await deployStrategy(s.id, buyUsd.toFixed(2), 100);
+        router.push(`/baskets/${s.id}?exec=${r.executionId}`);
+      } catch (e) {
+        toastError(new Error(`Basket saved, buy failed: ${errText(e)}`));
+        router.push(`/baskets/${s.id}?amount=${buyUsd.toFixed(2)}`);
+      }
     } catch (e) {
       setError(errText(e));
       setBusy(null);
@@ -140,7 +151,24 @@ export function StrategyBuilder() {
   }
 
   const est = blendedApy(sleeves, rates);
-  const amt = Number(amount) > 0 ? Number(amount) : 0;
+  // empty amount previews (flow, backtest) at the placeholder
+  const placeholder = unit === "USDC" ? "1000" : "1";
+  const amt = Number(amount) > 0 ? Number(amount) : Number(placeholder);
+  // the buy, in USDC (single token: asset units at spot); 0 = publish only
+  const buyUsd = Number(amount) > 0 ? (unit === "USDC" ? Number(amount) : (prices[unit] ?? 0) * Number(amount)) : 0;
+  const usdc = balanceOf(holdings.data, "USDC");
+  const short = usdc !== null && buyUsd > Number(usdc) / 1e6 ? buyUsd - Number(usdc) / 1e6 : 0;
+  const buyErr = !authenticated || !(Number(amount) > 0)
+    ? null
+    : !(buyUsd > 0)
+      ? `No ${unit} price yet`
+      : !delegated
+        ? "Enable automation to buy"
+        : short > 0
+          ? "Insufficient USDC"
+          : min.total && buyUsd < min.total
+            ? `Min deposit ${fmtUsd(min.total)}`
+            : null;
   // flow shows the active token's part in its own units
   const px = tab === "USDC" ? 1 : prices[tab];
   const flowAmt = !multi ? amt : px ? (amt * tokenBps[tokens.indexOf(tab)]) / 10000 / px : 0;
@@ -376,7 +404,7 @@ export function StrategyBuilder() {
                   value={amount}
                   onChange={(e) => setAmount(e.target.value)}
                   inputMode="decimal"
-                  placeholder="0"
+                  placeholder={placeholder}
                   aria-label={`Amount in ${unit}`}
                   className="tnum w-full min-w-0 bg-transparent text-4xl font-medium tracking-tight outline-none placeholder:text-muted-foreground/40"
                 />
@@ -406,14 +434,16 @@ export function StrategyBuilder() {
             )}
 
             <Panel className="space-y-4 p-5 sm:p-6">
-              {invalid && <p className="text-xs text-warning">{invalid}</p>}
+              {(invalid ?? buyErr) && <p className="text-xs text-warning">{invalid ?? buyErr}</p>}
               {error && <ErrorBox message={error} />}
-              <Button className="w-full py-3" pending={busy === "public"} disabled={!ready || !!invalid || busy !== null} onClick={() => void publish(true)}>
-                {authenticated ? "Publish basket" : "Log in to publish"}
+              {buyUsd > 0 && authenticated && !delegated && <DelegationCard compact />}
+              {short > 0 && <AnyChainButton need={short} onArrived={holdings.reload} className="mx-auto flex w-fit" />}
+              <Button className="w-full py-3" pending={busy === "public"} disabled={!ready || !!invalid || !!buyErr || busy !== null} onClick={() => void publish(true)}>
+                {!authenticated ? "Log in to publish" : buyUsd > 0 ? `Publish & buy ${fmtUsd(buyUsd)}` : "Publish basket"}
               </Button>
               {authenticated && (
-                <Button variant="ghost" className="w-full" pending={busy === "private"} disabled={!!invalid || busy !== null} onClick={() => void publish(false)}>
-                  Save private
+                <Button variant="ghost" className="w-full" pending={busy === "private"} disabled={!!invalid || !!buyErr || busy !== null} onClick={() => void publish(false)}>
+                  {buyUsd > 0 ? "Save private & buy" : "Save private"}
                 </Button>
               )}
               <p className="text-xs leading-relaxed text-muted-foreground">

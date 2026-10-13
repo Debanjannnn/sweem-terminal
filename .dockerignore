@@ -4,9 +4,5 @@ client
 reference
 **/node_modules
 **/target
-contracts/lib
-contracts/out
-contracts/cache
-contracts/broadcast
 *.log
 .run

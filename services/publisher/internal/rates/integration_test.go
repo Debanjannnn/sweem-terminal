@@ -21,7 +21,7 @@ func TestLivePoll(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	t.Setenv("CHAIN_ID", "143")
-	dep, err := config.LoadDeployments143("../../../../contracts/deployments/143.json")
+	dep, err := config.LoadDeployments143("../../../../deployments/143.json")
 	if err != nil {
 		t.Fatal(err)
 	}

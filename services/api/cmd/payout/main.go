@@ -42,7 +42,7 @@ var erc20, _ = abi.JSON(strings.NewReader(`[{"name":"transfer","type":"function"
 
 func run(ctx context.Context, send bool) error {
 	var e config.Env
-	dbURL, depPath := e.Str("DATABASE_URL"), e.Opt("DEPLOYMENTS_PATH", "contracts/deployments/143.json")
+	dbURL, depPath := e.Str("DATABASE_URL"), e.Opt("DEPLOYMENTS_PATH", "deployments/143.json")
 	var rpcURL, keyHex string
 	if send {
 		rpcURL, keyHex = e.Str("RPC_URL"), e.Str("TREASURY_PRIVATE_KEY")

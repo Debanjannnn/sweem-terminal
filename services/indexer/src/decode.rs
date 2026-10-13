@@ -368,7 +368,7 @@ mod tests {
             "DEPLOYMENTS_PATH",
             concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/../../contracts/deployments/143.json"
+                "/../../deployments/143.json"
             ),
         );
         let mut c = Config::from_env().unwrap();

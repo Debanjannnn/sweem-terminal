@@ -69,7 +69,7 @@ async fn fork() -> (Anvil, Fork) {
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
-    let mut d = Deployments::load(concat!(env!("CARGO_MANIFEST_DIR"), "/../../contracts/deployments/143.json")).unwrap();
+    let mut d = Deployments::load(concat!(env!("CARGO_MANIFEST_DIR"), "/../../deployments/143.json")).unwrap();
     d.treasury = "0x7777777777777777777777777777777777777777".into();
     let key = PrivateKeySigner::from_bytes(&B256::repeat_byte(0x42)).unwrap();
     let w = key.address();

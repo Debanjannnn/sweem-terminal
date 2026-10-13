@@ -29,7 +29,7 @@ pub async fn app(cfg: config::Config, privy: Arc<privy::Privy>, rpc: Arc<rpc::Rp
 pub async fn app_from_env() -> Result<http::App, String> {
     let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
     if config::opt("DEPLOYMENTS_PATH").is_none_or(|p| !std::path::Path::new(&p).exists()) {
-        unsafe { std::env::set_var("DEPLOYMENTS_PATH", format!("{root}/contracts/deployments/143.json")) };
+        unsafe { std::env::set_var("DEPLOYMENTS_PATH", format!("{root}/deployments/143.json")) };
     }
     config::load_dotenv(&format!("{root}/.env.executor"));
     config::load_dotenv(&format!("{root}/.env"));

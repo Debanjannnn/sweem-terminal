@@ -10,7 +10,6 @@ generated/
 !.env.example
 *.log
 .run/
-contracts/lib/
 .terraform/
 *.tfstate*
 *.tfvars

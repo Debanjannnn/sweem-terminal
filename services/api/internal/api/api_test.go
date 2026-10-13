@@ -252,7 +252,7 @@ func (f *fakeHistory) Backtest(_ context.Context, body []byte) (int, []byte, err
 }
 
 func testDep(t *testing.T) *config.Deployments143 {
-	dep, err := config.LoadDeployments143("../../../../contracts/deployments/143.json")
+	dep, err := config.LoadDeployments143("../../../../deployments/143.json")
 	if err != nil {
 		t.Fatal(err)
 	}

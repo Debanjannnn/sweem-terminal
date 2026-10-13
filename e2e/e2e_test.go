@@ -175,7 +175,7 @@ func TestE2E(t *testing.T) {
 	start := time.Now().Add(-time.Minute) // clock skew slack for the executions check
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Minute)
 	defer cancel()
-	dep, err := config.LoadDeployments143(envOr("E2E_DEPLOYMENTS_PATH", "../contracts/deployments/143.json"))
+	dep, err := config.LoadDeployments143(envOr("E2E_DEPLOYMENTS_PATH", "../deployments/143.json"))
 	if err != nil {
 		t.Fatal(err)
 	}

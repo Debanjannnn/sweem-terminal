@@ -69,7 +69,7 @@ pub struct Swap {
     pub ausd3pool: StablePool,
 }
 
-/// contracts/deployments/143.json: the only source of addresses.
+/// deployments/143.json: the only source of addresses.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Deployments {

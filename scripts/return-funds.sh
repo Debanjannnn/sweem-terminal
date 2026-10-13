@@ -8,7 +8,7 @@ TO=${1:?usage: return-funds.sh <to-address>}
 cast to-checksum "$TO" >/dev/null
 
 RPC=${MAINNET_RPC_URL:-https://rpc.monad.xyz}
-dep() { python3 -c "import json;d=json.load(open('contracts/deployments/143.json'));print($1)"; }
+dep() { python3 -c "import json;d=json.load(open('deployments/143.json'));print($1)"; }
 USDC=$(dep "d['tokens']['USDC']['address']")
 MA=$(dep "d['kuru']['marginAccount']")
 WALLET=$(sed -n 's/^E2E_PRIVY_WALLET_ADDRESS=//p' .env.e2e)

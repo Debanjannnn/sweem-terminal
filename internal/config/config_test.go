@@ -29,7 +29,7 @@ func TestEnv(t *testing.T) {
 }
 
 func TestLoadDeployments143(t *testing.T) {
-	d, err := LoadDeployments143("../../contracts/deployments/143.json")
+	d, err := LoadDeployments143("../../deployments/143.json")
 	if err != nil {
 		t.Fatal(err)
 	}

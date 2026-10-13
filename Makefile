@@ -2,7 +2,7 @@
 
 client-abi:
 	mkdir -p client/src/abi
-	cp contracts/deployments/143.json client/src/abi/deployments.json
+	cp deployments/143.json client/src/abi/deployments.json
 
 test:
 	go test ./...
@@ -34,7 +34,7 @@ infra:
 e2e:
 	@[ "$$E2E_REAL_MONEY" = 1 ] || [ "$$E2E_DRY" = 1 ] || { echo "refusing: spends real funds, run E2E_REAL_MONEY=1 make e2e (or E2E_DRY=1 for no-spend checks)"; exit 1; }
 	set -a && . ./.env && . ./.env.e2e && set +a && \
-	CHAIN_ID=143 E2E_DEPLOYMENTS_PATH=$(CURDIR)/contracts/deployments/143.json \
+	CHAIN_ID=143 E2E_DEPLOYMENTS_PATH=$(CURDIR)/deployments/143.json \
 	go test -tags e2e -count=1 -v -timeout 45m ./e2e/
 
 # Vultr: VULTR_API_KEY in .env.vultr (not shipped to the server) + infra/terraform/terraform.tfvars

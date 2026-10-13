@@ -4,7 +4,7 @@
 - hosts: all
   vars:
     app: /opt/sweem
-    repo: "{{ playbook_dir }}/../.."
+    repo: "{{ (playbook_dir + '/../..') | realpath }}"
     compose: docker compose -f docker-compose.yml -f docker-compose.prod.yml
   tasks:
     - name: Swap
@@ -17,8 +17,8 @@
       lineinfile: {path: /etc/ssh/sshd_config, regexp: '^#?PasswordAuthentication', line: PasswordAuthentication no}
       notify: restart ssh
 
-    - name: Docker, rsync, security upgrades
-      apt: {name: [docker.io, docker-compose-v2, rsync, unattended-upgrades], update_cache: true}
+    - name: Docker, security upgrades
+      apt: {name: [docker.io, docker-compose-v2, unattended-upgrades], update_cache: true}
 
     - name: GHCR login
       shell: docker login ghcr.io -u snehendu098 --password-stdin
@@ -26,13 +26,14 @@
       no_log: true
       changed_when: false
 
-    - name: Compose files, migrations, Caddyfile, deployments
-      synchronize:
-        src: "{{ repo }}/{{ item }}"
-        dest: "{{ app }}/"
-        delete: true
-        rsync_opts: [--relative]
-      loop: [./docker-compose.yml, ./docker-compose.prod.yml, ./migrations, ./infra/Caddyfile, ./contracts/deployments]
+    - name: Dirs
+      file: {path: "{{ app }}/infra", state: directory}
+
+    # dirs without a trailing slash copy as themselves; migrations are append-only, so no delete needed
+    # images carry the binaries + deployments; compose, migrations (mounted into migrate) and the Caddyfile live here
+    - name: Compose files, migrations, Caddyfile
+      copy: {src: "{{ repo }}/{{ item }}", dest: "{{ app }}/{{ item | dirname }}/"}
+      loop: [docker-compose.yml, docker-compose.prod.yml, migrations, infra/Caddyfile]
 
     - name: Env files
       copy: {src: "{{ repo }}/{{ item }}", dest: "{{ app }}/{{ item }}", mode: "0600"}

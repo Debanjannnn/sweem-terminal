@@ -44,7 +44,7 @@ func (f *fakeQ) Quote(_ context.Context, ob, side string, amount decimal.Decimal
 }
 
 func testDep() *config.Deployments143 {
-	dep, err := config.LoadDeployments143("../../contracts/deployments/143.json")
+	dep, err := config.LoadDeployments143("../../deployments/143.json")
 	if err != nil {
 		panic(err)
 	}

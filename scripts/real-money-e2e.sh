@@ -5,7 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 RPC=${MAINNET_RPC_URL:-https://rpc.monad.xyz}
-USDC=$(python3 -c "import json;print(json.load(open('contracts/deployments/143.json'))['tokens']['USDC']['address'])")
+USDC=$(python3 -c "import json;print(json.load(open('deployments/143.json'))['tokens']['USDC']['address'])")
 WALLET=$(sed -n 's/^E2E_PRIVY_WALLET_ADDRESS=//p' .env.e2e)
 KEY=$(sed -n 's/^PRIVATE_KEY=//p' .env.wallet)
 WANT_USDC=10000000           # 10 USDC (atoms)

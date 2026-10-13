@@ -21,7 +21,7 @@ fn cfg() -> Config {
     }
     std::env::set_var(
         "DEPLOYMENTS_PATH",
-        format!("{ROOT}/contracts/deployments/143.json"),
+        format!("{ROOT}/deployments/143.json"),
     );
     if std::env::var("DATABASE_URL").is_err() {
         std::env::set_var(

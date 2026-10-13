@@ -319,7 +319,7 @@ mod tests {
     use alloy::primitives::hex;
 
     pub fn dep() -> Deployments {
-        let mut d = Deployments::load(concat!(env!("CARGO_MANIFEST_DIR"), "/../../contracts/deployments/143.json")).unwrap();
+        let mut d = Deployments::load(concat!(env!("CARGO_MANIFEST_DIR"), "/../../deployments/143.json")).unwrap();
         d.treasury = "0x7777777777777777777777777777777777777777".into();
         d
     }

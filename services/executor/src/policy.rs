@@ -126,7 +126,7 @@ mod tests {
     use super::*;
 
     fn dep() -> Deployments {
-        Deployments::load(concat!(env!("CARGO_MANIFEST_DIR"), "/../../contracts/deployments/143.json")).unwrap()
+        Deployments::load(concat!(env!("CARGO_MANIFEST_DIR"), "/../../deployments/143.json")).unwrap()
     }
 
     #[test]

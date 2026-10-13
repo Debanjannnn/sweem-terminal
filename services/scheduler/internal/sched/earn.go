@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/shopspring/decimal"
 	"github.com/snehendu098/sweem-terminal/internal/perpl"
+	"github.com/snehendu098/sweem-terminal/internal/pg"
 	"github.com/snehendu098/sweem-terminal/internal/planner"
 	"github.com/snehendu098/sweem-terminal/internal/streams"
 )
@@ -24,9 +25,6 @@ type position struct {
 	last             *time.Time
 	driftOverride    *int
 }
-
-// perpOf maps a basis asset to its Perpl market name (planner's hedge table).
-var perpOf = map[string]string{"WETH": "ETH", "cbBTC": "BTC", "MON": "MON"}
 
 const positionQ = `select p.id, p.user_id, lower(p.wallet), st.asset, st.sources, st.sleeves, st.rules, p.legs, p.last_rebalance_at,
 	(select s.drift_bps from schedules s where s.active and s.kind = 'rebalance' and s.target_type = 'position' and s.target_id = p.id::text limit 1),
@@ -150,7 +148,7 @@ func (s *Scheduler) evalPart(ctx context.Context, p position, st planner.Strateg
 	basis, perpID := -1, 0
 	for i, src := range st.Sources {
 		if src.Kind == "basis" {
-			basis, perpID = i, s.Dep.Perpl.PerpIds[perpOf[st.Asset]]
+			basis, perpID = i, s.P.PerpID(st.Asset)
 		}
 	}
 	on := make([]bool, len(legs))
@@ -197,7 +195,7 @@ func (s *Scheduler) evalPart(ctx context.Context, p position, st planner.Strateg
 	// (a) funding gate
 	want := append([]bool(nil), on...)
 	if basis >= 0 && st.Rules.FundingGate != nil {
-		apr, ok, err := s.fundingAPR(ctx, rates, perpID, st.Rules.FundingGate.LookbackDays)
+		apr, ok, err := pg.GateAPR(ctx, s.DB, rates, perpID, st.Rules.FundingGate.LookbackDays)
 		if err != nil {
 			return "", planner.Plan{}, err
 		}
@@ -278,27 +276,4 @@ func rateOf(r streams.RatesSnapshot, src planner.Source, asset string) decimal.D
 		}
 	}
 	return decimal.Zero
-}
-
-// fundingAPR is the mean daily funding over the last `days` full UTC days × 365 (backtest's gate formula; rates are fractions
-// like the publisher's AprShort7d). No history (or days == 0) falls back to the publisher's 7d trailing APR.
-func (s *Scheduler) fundingAPR(ctx context.Context, r streams.RatesSnapshot, perpID, days int) (decimal.Decimal, bool, error) {
-	if days > 0 {
-		var apr *string
-		err := s.DB.QueryRow(ctx, `select (avg(rate) * 365)::text from series_funding_daily
-			where perp_id = $1 and day >= (now() at time zone 'utc')::date - $2::int and day < (now() at time zone 'utc')::date`, perpID, days).Scan(&apr)
-		if err != nil {
-			return decimal.Zero, false, err
-		}
-		if apr != nil {
-			v, err := decimal.NewFromString(*apr)
-			return v, err == nil, err
-		}
-	}
-	for _, f := range r.Funding {
-		if f.PerpID == perpID {
-			return f.AprShort7d, true, nil
-		}
-	}
-	return decimal.Zero, false, nil
 }

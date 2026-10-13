@@ -1,0 +1,42 @@
+# ansible-playbook -i "$(terraform -chdir=../terraform output -raw ip)," site.yml
+# ships the repo (no client) + local .env/.env.api/.env.executor, then builds and runs the prod compose stack
+- hosts: all
+  vars:
+    app: /opt/sweem
+    repo: "{{ playbook_dir }}/../.."
+  tasks:
+    - name: Swap (Rust build needs more than 4 GB)
+      shell: |
+        fallocate -l 4G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+        echo '/swapfile none swap sw 0 0' >> /etc/fstab
+      args: {creates: /swapfile}
+
+    - name: SSH keys only
+      lineinfile: {path: /etc/ssh/sshd_config, regexp: '^#?PasswordAuthentication', line: PasswordAuthentication no}
+      notify: restart ssh
+
+    - name: Docker
+      apt: {name: [docker.io, docker-compose-v2, docker-buildx, rsync], update_cache: true}
+
+    - name: Unattended security upgrades
+      apt: {name: unattended-upgrades}
+
+    - name: Repo
+      synchronize:
+        src: "{{ repo }}/"
+        dest: "{{ app }}/"
+        delete: true
+        rsync_opts: [--exclude=.git, --exclude=client, --exclude=target, --exclude=node_modules, --exclude=infra/terraform, --exclude=.env*, --exclude=.run]
+
+    - name: Env files
+      copy: {src: "{{ repo }}/{{ item }}", dest: "{{ app }}/{{ item }}", mode: "0600"}
+      loop: [.env, .env.api, .env.executor]
+
+    - name: Build and start
+      command: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build --remove-orphans
+      args: {chdir: "{{ app }}"}
+      changed_when: true
+
+  handlers:
+    - name: restart ssh
+      service: {name: ssh, state: restarted}

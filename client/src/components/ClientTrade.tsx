@@ -10,7 +10,7 @@ import type { Execution, Prepared, PrepareInput, TxRequest } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { showToast } from "./TxToast";
 
-export type TxPhase = "queued" | "signing" | "mining" | "done" | "reverted" | "cancelled";
+type TxPhase = "queued" | "signing" | "mining" | "done" | "reverted" | "cancelled";
 export type Run = {
   status: "preparing" | "sending" | "recording" | "done" | "failed";
   txs: TxRequest[];

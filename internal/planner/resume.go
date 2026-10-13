@@ -2,7 +2,6 @@ package planner
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"math/big"
 	"strings"
@@ -229,54 +228,4 @@ func (p *Planner) ResumeWithdraw(ctx context.Context, s Strategy, steps []Step, 
 		return nil, nil
 	}
 	return p.check(p.Dep, out)
-}
-
-// ExecFills is one confirmed basket execution: its plan, one tx hash per step, and the indexer's taker fills per tx
-// (Kuru Trade size, market sizePrecision units).
-type ExecFills struct {
-	Steps    json.RawMessage
-	TxHashes []string
-	Fills    map[string]string
-}
-
-// Held is a basket leg holding; Provisional = some step has no indexed fill yet, so its planned amount stands in.
-type Held struct {
-	Amount      decimal.Decimal
-	Provisional bool
-}
-
-// AttributeFills nets a basket's holdings per market (base atoms) from actual Kuru fills, falling back to plan amounts
-// (buy minOut, sell size) for steps the indexer has not seen yet.
-func (p *Planner) AttributeFills(execs []ExecFills) map[string]Held {
-	out := map[string]Held{}
-	for _, e := range execs {
-		var steps []Step
-		if json.Unmarshal(e.Steps, &steps) != nil {
-			continue
-		}
-		for i, s := range steps {
-			if s.Action != "kuru.marketBuy" && s.Action != "kuru.marketSell" {
-				continue
-			}
-			h := out[s.Market]
-			amt, sign := d(s.MinOut), decimal.NewFromInt(1)
-			if s.Action == "kuru.marketSell" {
-				amt, sign = d(s.Size), decimal.NewFromInt(-1)
-			}
-			if i < len(e.TxHashes) && e.Fills[strings.ToLower(e.TxHashes[i])] != "" {
-				m := p.Dep.Kuru.Markets[s.Market]
-				amt = d(e.Fills[strings.ToLower(e.TxHashes[i])]).Shift(int32(p.decimals(m.Base))).Div(decimal.NewFromInt(int64(m.SizePrecision))).Floor()
-			} else {
-				h.Provisional = true
-			}
-			h.Amount = h.Amount.Add(amt.Mul(sign))
-			out[s.Market] = h
-		}
-	}
-	for m, h := range out {
-		if !h.Amount.IsPositive() {
-			delete(out, m)
-		}
-	}
-	return out
 }

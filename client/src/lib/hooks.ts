@@ -23,7 +23,7 @@ export function useBook(orderbook: string | undefined) {
   return { book: live ?? snap.data, stale: !live && !!snap.data?.stale, error: snap.error, loading: snap.loading };
 }
 
-export type Ticker = { price: number | null; series: number[]; candles: Candle[]; chg: number | null; chgUsd: number | null; vol: number };
+type Ticker = { price: number | null; series: number[]; candles: Candle[]; chg: number | null; chgUsd: number | null; vol: number };
 
 // every Kuru market: 24h hourly candles + live WS mid; price falls back to the last close
 export function useTickers() {
@@ -69,7 +69,6 @@ async function chainHoldings(wallet: `0x${string}`): Promise<Holdings> {
   return {
     wallet,
     tokens: [row("MON", zeroAddress, mon, 18), ...toks.map(([sym, t], i) => row(sym, t.address, erc20[i], t.decimals))],
-    baskets: [],
   };
 }
 
@@ -132,4 +131,36 @@ export function useCandles(orderbook: string | undefined, iv: Interval, ms: numb
     ? [...rows.filter((c) => c.t !== live.t), live]
     : rows;
   return { candles: merged, loading: hist.loading, error: hist.error };
+}
+
+export function useDebounced<T>(v: T, ms = 400) {
+  const [d, setD] = useState(v);
+  useEffect(() => {
+    const t = setTimeout(() => setD(v), ms);
+    return () => clearTimeout(t);
+  }, [v, ms]);
+  return d;
+}
+
+// clipboard write + which value was just copied (cleared after ms)
+function fallback(v: string): boolean {
+  const ta = Object.assign(document.createElement("textarea"), { value: v, readOnly: true });
+  ta.style.cssText = "position:fixed;opacity:0";
+  (document.querySelector("dialog[open]") ?? document.body).appendChild(ta);
+  ta.select();
+  const ok = document.execCommand("copy");
+  ta.remove();
+  return ok;
+}
+
+export function useCopy(ms = 1200) {
+  const [copied, setCopied] = useState<string | null>(null);
+  const done = (v: string) => (setCopied(v), setTimeout(() => setCopied(null), ms));
+  const copy = (v: string) => {
+    // clipboard API needs a secure context (https/localhost); else the old select + execCommand path.
+    // The textarea goes inside an open modal <dialog>: everything outside the top layer is inert.
+    if (navigator.clipboard?.writeText) return void navigator.clipboard.writeText(v).then(() => done(v), () => fallback(v) && done(v));
+    if (fallback(v)) done(v);
+  };
+  return { copied, copy };
 }

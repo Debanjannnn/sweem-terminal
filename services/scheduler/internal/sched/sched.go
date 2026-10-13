@@ -16,6 +16,7 @@ import (
 	"github.com/shopspring/decimal"
 	"github.com/snehendu098/sweem-terminal/internal/config"
 	"github.com/snehendu098/sweem-terminal/internal/perpl"
+	"github.com/snehendu098/sweem-terminal/internal/pg"
 	"github.com/snehendu098/sweem-terminal/internal/planner"
 	"github.com/snehendu098/sweem-terminal/internal/streams"
 )
@@ -98,17 +99,12 @@ func Drift(values []decimal.Decimal, target []int) int {
 	if !total.IsPositive() {
 		return 0
 	}
-	max := 0
+	m := 0
 	for i, v := range values {
 		w := int(v.Mul(decimal.NewFromInt(10_000)).Div(total).Round(0).IntPart()) - target[i]
-		if w < 0 {
-			w = -w
-		}
-		if w > max {
-			max = w
-		}
+		m = max(m, w, -w)
 	}
-	return max
+	return m
 }
 
 type schedule struct {
@@ -121,12 +117,20 @@ type schedule struct {
 
 // exec is one execution row to insert after claim succeeds.
 type exec struct {
-	scheduleID, positionID, basketID *string
-	slot                             int64
-	kind, user                       string
-	steps                            []planner.Step
-	legs                             []planner.LegState // position legs after the run; applied on confirm (reconcile)
-	settle                           bool               // full withdraw: position → closed when the run confirms
+	scheduleID, positionID *string
+	slot                   int64
+	kind, user             string
+	steps                  []planner.Step
+	legs                   []planner.LegState // position legs after the run; applied on confirm (reconcile)
+	settle                 bool               // full withdraw: position → closed when the run confirms
+	open                   *opening           // recurring buy: the position this deploy opens
+}
+
+// opening is a new strategy position, written with its deploy execution and fee row (pg.InsertPosition + pg.LinkDeploy, like api).
+type opening struct {
+	strategyID, wallet, principal, fee, owed string
+	creator                                  *string // nil = own strategy, nothing owed
+	legs                                     []planner.LegState
 }
 
 func (s *Scheduler) schedules(ctx context.Context, now time.Time) {
@@ -134,7 +138,7 @@ func (s *Scheduler) schedules(ctx context.Context, now time.Time) {
 		coalesce(s.amount_usdc, 0)::text, coalesce(s.trigger_price, 0)::text, coalesce(s.interval_seconds, 0),
 		coalesce(s.next_run_at, 'epoch'), coalesce(s.sell_bps, 0), coalesce(s.drift_bps, 0), s.max_slippage_bps
 		from schedules s join delegations d on d.user_id = s.user_id and d.active
-		where s.active and s.target_type in ('market', 'basket', 'position') and s.kind in ('dca', 'take_profit', 'stop_loss', 'rebalance')`)
+		where s.active and s.target_type in ('market', 'position', 'strategy') and s.kind in ('dca', 'take_profit', 'stop_loss', 'rebalance')`)
 	if err != nil {
 		slog.Error("schedules", "err", err)
 		return
@@ -164,42 +168,25 @@ func (s *Scheduler) fire(ctx context.Context, c schedule, now time.Time) error {
 		return errors.New("interval_seconds missing")
 	}
 	e := exec{scheduleID: &c.id, kind: c.kind, user: c.user}
-	if c.targetType == "basket" {
-		e.basketID = &c.targetID
-	}
 	switch c.kind {
 	case "dca":
 		if c.next.After(now) {
 			return nil
 		}
 		usdc := c.amount.Shift(6).Floor()
-		var err error
-		if c.targetType == "basket" {
-			var legs []planner.Leg
-			if legs, err = s.basketLegs(ctx, c.targetID); err == nil {
-				e.steps, err = s.P.BasketBuy(ctx, legs, usdc, c.slip)
-			}
-		} else {
-			e.steps, err = s.P.MarketBuy(ctx, c.targetID, usdc, c.slip)
+		e.slot = Slot(c.next, c.interval)
+		if c.targetType == "strategy" {
+			return s.recurringBuy(ctx, c, e, usdc, advance())
 		}
-		if err != nil {
+		var err error
+		if e.steps, err = s.P.MarketBuy(ctx, c.targetID, usdc, c.slip); err != nil {
 			return err
 		}
-		e.slot = Slot(c.next, c.interval)
 		return s.submit(ctx, advance(), e)
 	case "take_profit", "stop_loss":
 		return s.trigger(ctx, c, e)
 	case "rebalance":
-		if c.targetType != "basket" || c.next.After(now) {
-			return nil // position rebalance schedules only override driftBps, see positions
-		}
-		e.slot = Slot(c.next, c.interval)
-		steps, err := s.basketRebalance(ctx, c)
-		if len(steps) == 0 || err != nil {
-			return errors.Join(err, s.claimOnly(ctx, advance())) // checked this slot either way
-		}
-		e.steps = steps
-		return s.submit(ctx, advance(), e)
+		return nil // position rebalance schedules only override driftBps, see positions
 	}
 	return nil
 }
@@ -225,26 +212,6 @@ func (s *Scheduler) trigger(ctx context.Context, c schedule, e exec) error {
 			return errors.New("nothing to sell")
 		}
 		if e.steps, err = s.P.MarketSell(ctx, c.targetID, amt, c.slip); err != nil {
-			return err
-		}
-	case "basket":
-		legs, err := s.basketLegs(ctx, c.targetID)
-		if err != nil {
-			return err
-		}
-		held, px, err := s.basketHoldings(ctx, c.user, c.wallet, c.targetID, legs)
-		if err != nil {
-			return err
-		}
-		value := decimal.Sum(decimal.Zero, s.values(legs, held, px)...)
-		if !Hit(c.kind, value, c.trigger) {
-			return nil
-		}
-		var sell []planner.SellLeg
-		for i, l := range legs {
-			sell = append(sell, planner.SellLeg{Market: l.Market, Amount: bpsOf(held[i], c.sellBps)})
-		}
-		if e.steps, err = s.P.BasketSell(ctx, sell, c.slip); err != nil {
 			return err
 		}
 	case "position":
@@ -316,104 +283,42 @@ func bpsOf(x decimal.Decimal, bps int) decimal.Decimal {
 
 func (s *Scheduler) decimals(sym string) int32 { return int32(s.Dep.Tokens[sym].Decimals) }
 
-// values converts per-leg base atoms to USDC (human).
-func (s *Scheduler) values(legs []planner.Leg, held, px []decimal.Decimal) []decimal.Decimal {
-	out := make([]decimal.Decimal, len(legs))
-	for i, l := range legs {
-		out[i] = held[i].Shift(-s.decimals(s.Dep.Kuru.Markets[l.Market].Base)).Mul(px[i])
+// recurringBuy deploys usdc into the strategy as a new position, like api's deploy: fee → swaps → venues.
+func (s *Scheduler) recurringBuy(ctx context.Context, c schedule, e exec, usdc decimal.Decimal, claim []any) error {
+	var st planner.Strategy
+	var creator string
+	var sources, rules []byte
+	if err := s.DB.QueryRow(ctx, `select asset, sources, sleeves, rules, creator from strategies where id::text = $1`, c.targetID).
+		Scan(&st.Asset, &sources, &st.Sleeves, &rules, &creator); err != nil {
+		return err
 	}
-	return out
-}
-
-// basketRebalance sells over-weight legs and spends their guaranteed proceeds on under-weight legs; nil when inside the band.
-func (s *Scheduler) basketRebalance(ctx context.Context, c schedule) ([]planner.Step, error) {
-	legs, err := s.basketLegs(ctx, c.targetID)
-	if err != nil {
-		return nil, err
+	if err := errors.Join(json.Unmarshal(sources, &st.Sources), json.Unmarshal(rules, &st.Rules)); err != nil {
+		return err
 	}
-	held, px, err := s.basketHoldings(ctx, c.user, c.wallet, c.targetID, legs)
-	if err != nil {
-		return nil, err
-	}
-	values := s.values(legs, held, px)
-	weights := make([]int, len(legs))
-	for i, l := range legs {
-		weights[i] = l.WeightBps
-	}
-	if Drift(values, weights) <= c.driftBps {
-		return nil, nil
-	}
-	total := decimal.Sum(decimal.Zero, values...)
-	var sells []planner.SellLeg
-	deficit := make([]decimal.Decimal, len(legs))
-	for i, l := range legs {
-		d := values[i].Sub(total.Mul(decimal.NewFromInt(int64(l.WeightBps))).Div(decimal.NewFromInt(10_000))) // USDC over (+) / under (−) target
-		if d.IsPositive() {
-			sells = append(sells, planner.SellLeg{Market: l.Market, Amount: held[i].Mul(d).Div(values[i]).Floor()})
-		} else {
-			deficit[i] = d.Neg()
-		}
-	}
-	steps, err := s.P.BasketSell(ctx, sells, c.slip)
-	if err != nil {
-		return nil, err
-	}
-	proceeds := decimal.Zero
-	for _, st := range steps {
-		proceeds = proceeds.Add(decimal.RequireFromString(st.MinOut))
-	}
-	want := decimal.Sum(decimal.Zero, deficit...)
-	for i, l := range legs {
-		if !deficit[i].IsPositive() {
-			continue
-		}
-		buy, err := s.P.MarketBuy(ctx, l.Market, proceeds.Mul(deficit[i]).Div(want).Floor(), c.slip)
-		if err != nil {
-			return nil, err
-		}
-		steps = append(steps, buy...)
-	}
-	return steps, nil
-}
-
-func (s *Scheduler) basketLegs(ctx context.Context, id string) ([]planner.Leg, error) {
-	var legs []planner.Leg
-	err := s.DB.QueryRow(ctx, `select legs from basket_defs where id::text = $1`, id).Scan(&legs)
-	return legs, err
-}
-
-// basketHoldings: per leg, attributed base atoms (confirmed executions of this basket) capped at the wallet balance, and ref price.
-func (s *Scheduler) basketHoldings(ctx context.Context, user, wallet, basketID string, legs []planner.Leg) (held, px []decimal.Decimal, err error) {
-	rows, err := s.DB.Query(ctx, `select e.steps, e.tx_hashes, coalesce((select jsonb_object_agg(lower(t.tx_hash), t.sz) from (
-			select tx_hash, sum(size)::text sz from user_trades where tx_hash = any(e.tx_hashes) and role = 'taker' and lower(wallet) = $3
-			group by tx_hash) t), '{}')
-		from executions e where e.user_id = $1 and e.basket_id::text = $2 and e.status = 'confirmed' and e.steps is not null`, user, basketID, wallet)
-	if err != nil {
-		return nil, nil, err
-	}
-	execs, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (x planner.ExecFills, err error) {
-		return x, r.Scan(&x.Steps, &x.TxHashes, &x.Fills)
-	})
-	if err != nil {
-		return nil, nil, err
-	}
-	attr := s.P.AttributeFills(execs)
-	for _, l := range legs {
-		p, err := s.price(ctx, l.Market)
-		if err != nil {
-			return nil, nil, err
-		}
-		h := attr[l.Market].Amount
-		if h.IsPositive() {
-			bal, err := s.Chain.Wallet(ctx, wallet, s.Dep.Kuru.Markets[l.Market].Base)
-			if err != nil {
-				return nil, nil, err
+	perpl := false // a basis leg needs to know whether the wallet already has a Perpl account
+	for _, pt := range st.Parts() {
+		for _, src := range pt.Sources {
+			if src.Kind == "basis" && !perpl {
+				p, err := s.Chain.Perp(ctx, c.wallet, s.P.PerpID(pt.Asset))
+				if err != nil {
+					return err
+				}
+				perpl = p.Account > 0
 			}
-			h = decimal.Min(h, bal)
 		}
-		held, px = append(held, h), append(px, p)
 	}
-	return held, px, nil
+	plan, err := s.P.Deploy(ctx, st, usdc, perpl, c.slip)
+	if err != nil {
+		return err
+	}
+	fee := decimal.RequireFromString(plan.FeeUSDC).Shift(-6)
+	o := &opening{strategyID: c.targetID, wallet: c.wallet, principal: c.amount.String(), fee: fee.String(), owed: "0", legs: plan.Legs}
+	if creator != c.user {
+		o.creator = &creator
+		o.owed = fee.Mul(decimal.NewFromInt(planner.CreatorBps)).Div(decimal.NewFromInt(planner.FeeBps)).String()
+	}
+	e.kind, e.steps, e.open = "deploy", plan.Steps, o
+	return s.submit(ctx, claim, e)
 }
 
 // price is the Kuru reference price (USDC per unit) of market sym; missing or old ⇒ error, never act.
@@ -458,14 +363,26 @@ func (s *Scheduler) submit(ctx context.Context, claim []any, e exec) error {
 	if e.legs != nil {
 		legs, _ = json.Marshal(e.legs)
 	}
-	err = tx.QueryRow(ctx, `insert into executions (schedule_id, slot, kind, status, user_id, steps, basket_id, position_id, legs)
-		values ($1, $2, $3, 'pending', $4, $5, $6, $7, $8) on conflict (schedule_id, slot) do nothing returning id`,
-		e.scheduleID, e.slot, e.kind, e.user, steps, e.basketID, e.positionID, legs).Scan(&id)
+	if o := e.open; o != nil {
+		id, err := pg.InsertPosition(ctx, tx, o.strategyID, e.user, o.wallet, o.principal, o.legs)
+		if err != nil {
+			return err
+		}
+		e.positionID = &id
+	}
+	err = tx.QueryRow(ctx, `insert into executions (schedule_id, slot, kind, status, user_id, steps, position_id, legs)
+		values ($1, $2, $3, 'pending', $4, $5, $6, $7) on conflict (schedule_id, slot) do nothing returning id`,
+		e.scheduleID, e.slot, e.kind, e.user, steps, e.positionID, legs).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil
+		return nil // rolled back, incl. a recurring buy's position
 	}
 	if err != nil {
 		return err
+	}
+	if o := e.open; o != nil {
+		if err := pg.LinkDeploy(ctx, tx, *e.positionID, id, e.user, o.strategyID, o.creator, o.fee, o.owed); err != nil {
+			return err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return err
@@ -477,6 +394,15 @@ func (s *Scheduler) submit(ctx context.Context, claim []any, e exec) error {
 // run hands the execution to the executor; it owns status after that. Unreachable executor ⇒ failed, like api.
 func (s *Scheduler) run(ctx context.Context, id string, e exec) {
 	out, err := s.Exec.Run(ctx, id)
+	if e.open != nil { // recurring buy: opening → open, or failed (like api's settle)
+		st := "failed"
+		if err == nil && out.Status == "confirmed" {
+			st = "open"
+		}
+		if _, err := s.DB.Exec(ctx, `update strategy_positions set status = $2 where id = $1 and status = 'opening'`, *e.positionID, st); err != nil {
+			slog.Error("settle position", "position", *e.positionID, "err", err)
+		}
+	}
 	if err != nil {
 		slog.Error("executor", "execution", id, "kind", e.kind, "err", err)
 		var pe *planner.Error

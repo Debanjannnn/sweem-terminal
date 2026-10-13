@@ -149,15 +149,7 @@ func TestFlow(t *testing.T) {
 	}
 	const wallet = "0x00000000000000000000000000000000000000bb"
 
-	var b Basket
-	call("POST", "/api/v1/me/baskets", `{"name":"Blue","legs":[{"market":"WETH","weightBps":6000},{"market":"cbBTC","weightBps":4000}],"public":true}`, 201, &b)
-	call("POST", "/api/v1/me/baskets/"+b.ID, `{"name":"Blue2","legs":[{"market":"WETH","weightBps":10000}],"public":true}`, 200, &b)
-	var bs []Basket
-	call("GET", "/api/v1/baskets", "", 200, &bs)
-	if len(bs) != 1 || bs[0].Name != "Blue2" || len(bs[0].Legs) != 1 {
-		t.Fatalf("public baskets: %+v", bs)
-	}
-	call("POST", "/api/v1/me/baskets/"+b.ID+"/buy", `{"amountUsdc":"40"}`, 409, nil) // no delegation yet
+	call("POST", "/api/v1/me/trade", `{"market":"WETH","side":"buy","amount":"40"}`, 409, nil) // no delegation yet
 	call("POST", "/api/v1/me/delegation", `{"walletId":"w1","walletAddress":"`+wallet+`"}`, 200, nil)
 
 	var acc struct {
@@ -166,32 +158,18 @@ func TestFlow(t *testing.T) {
 		PositionID  string         `json:"positionId"`
 		OrderID     string         `json:"orderId"`
 	}
-	call("POST", "/api/v1/me/baskets/"+b.ID+"/buy", `{"amountUsdc":"40","slippageBps":0}`, 202, &acc)
+	call("POST", "/api/v1/me/trade", `{"market":"WETH","side":"buy","amount":"40","slippageBps":0}`, 202, &acc)
 	var e Execution
 	call("GET", "/api/v1/me/executions/"+acc.ExecutionID, "", 200, &e)
-	if e.Status != "confirmed" || e.StepsTotal != 1 || e.StepDone != 1 || e.BasketID == nil || *e.BasketID != b.ID || e.Kind != "basket_buy" {
-		t.Fatalf("basket buy execution: %+v", e)
+	if e.Status != "confirmed" || e.StepsTotal != 1 || e.StepDone != 1 || e.Kind != "trade" {
+		t.Fatalf("trade execution: %+v", e)
 	}
 	var h struct {
-		Tokens  []TokenBalance  `json:"tokens"`
-		Baskets []BasketHolding `json:"baskets"`
+		Tokens []TokenBalance `json:"tokens"`
 	}
 	call("GET", "/api/v1/me/holdings", "", 200, &h)
-	if len(h.Tokens) != 9 || len(h.Baskets) != 1 || h.Baskets[0].Legs[0].Raw != "10000000000000000" || !h.Baskets[0].Legs[0].Provisional {
-		t.Fatalf("holdings before fill indexed: %+v", h)
-	}
-	// indexer sees the taker fill: 0.0102 WETH in two maker fills (size in 1e10 sizePrecision) replaces the planned minOut
-	if _, err := db.Exec(ctx, `insert into user_trades values ($1,1,'taker','0xa6af','`+wallet+`','buy',1,1,60000000,0,1,now()),
-  ($1,2,'taker','0xa6af','`+wallet+`','buy',2,1,42000000,0,1,now()), ($1,3,'maker','0xa6af','`+wallet+`','sell',3,1,99,0,1,now())`, txHash(acc.ExecutionID)); err != nil {
-		t.Fatal(err)
-	}
-	call("GET", "/api/v1/me/holdings", "", 200, &h)
-	if l := h.Baskets[0].Legs[0]; l.Raw != "10200000000000000" || l.Amount != "0.0102" || l.Provisional {
-		t.Fatalf("holdings from fills: %+v", l)
-	}
-	call("POST", "/api/v1/me/baskets/"+b.ID+"/sell", `{"bps":5000,"slippageBps":0}`, 202, &acc)
-	if len(acc.Steps) != 1 || acc.Steps[0].Size != "5100000000000000" {
-		t.Fatalf("basket sell: %+v", acc.Steps)
+	if len(h.Tokens) != 9 {
+		t.Fatalf("holdings: %+v", h)
 	}
 
 	// strategy: create (backtest stored), explore with apy, deploy, withdraw
@@ -262,22 +240,22 @@ func TestFlow(t *testing.T) {
 	}
 
 	var sc Schedule
-	call("POST", "/api/v1/me/schedules", `{"kind":"rebalance","target":{"type":"basket","id":"`+b.ID+`"},"intervalSeconds":3600,"driftBps":500,"maxSlippageBps":50,"maxPerRunUsdc":"100"}`, 201, &sc)
+	call("POST", "/api/v1/me/schedules", `{"kind":"dca","target":{"type":"strategy","id":"`+st.ID+`"},"amountUsdc":"10","intervalSeconds":3600,"maxSlippageBps":50,"maxPerRunUsdc":"100"}`, 201, &sc)
 	call("POST", "/api/v1/me/schedules", `{"kind":"stop_loss","target":{"type":"market","id":"WETH"},"triggerPrice":"3000","sellBps":10000,"maxSlippageBps":50,"maxPerRunUsdc":"100"}`, 201, nil)
 	call("POST", "/api/v1/me/schedules", `{"kind":"rebalance","target":{"type":"position","id":"`+uuid.NewString()+`"},"intervalSeconds":3600,"maxSlippageBps":50,"maxPerRunUsdc":"100"}`, 404, nil)
 	var scs []Schedule
 	call("GET", "/api/v1/me/schedules", "", 200, &scs)
-	if len(scs) != 2 || sc.NextRunAt == nil || *sc.DriftBps != 500 || sc.Target.ID != b.ID {
+	if len(scs) != 2 || sc.NextRunAt == nil || sc.Target.Type != "strategy" || sc.Target.ID != st.ID {
 		t.Fatalf("schedules: %+v %+v", sc, scs)
 	}
 	var exs []Execution
 	call("GET", "/api/v1/me/executions", "", 200, &exs)
-	if len(exs) != 6 {
+	if len(exs) != 5 {
 		t.Fatalf("executions: %d", len(exs))
 	}
 	var older []Execution
 	call("GET", "/api/v1/me/executions?before="+url.QueryEscape(exs[1].CreatedAt.Format(time.RFC3339Nano)), "", 200, &older)
-	if len(older) != 4 || older[0].ID != exs[2].ID {
+	if len(older) != 3 || older[0].ID != exs[2].ID {
 		t.Fatalf("executions before: %+v", older)
 	}
 	var earn Earnings
@@ -365,17 +343,15 @@ func TestClientSigned(t *testing.T) {
 		ftx.txs[st.Hash()] = st
 		return st.Hash().Hex()
 	}
-	var b Basket
-	call("POST", "/api/v1/me/baskets", `{"name":"Blue","legs":[{"market":"WETH","weightBps":6000},{"market":"cbBTC","weightBps":4000}]}`, 201, &b)
 	var prep struct {
 		PrepareID string              `json:"prepareId"`
 		Steps     []planner.Step      `json:"steps"`
 		Txs       []planner.TxRequest `json:"txs"`
 		ExpiresAt time.Time           `json:"expiresAt"`
 	}
-	call("POST", "/api/v1/me/trade/prepare", `{"kind":"basket_buy","basketId":"`+b.ID+`","amountUsdc":"50","slippageBps":0}`, 400, nil) // no wallet
-	call("POST", "/api/v1/me/trade/prepare", `{"kind":"basket_buy","basketId":"`+b.ID+`","amountUsdc":"50","slippageBps":0,"wallet":"`+wallet.Hex()+`"}`, 200, &prep)
-	if len(prep.Steps) != 2 || len(prep.Txs) != 4 || prep.Txs[0].Description != "approve USDC 30000000" || prep.Txs[1].Step != 0 || prep.Txs[3].Step != 1 ||
+	call("POST", "/api/v1/me/trade/prepare", `{"kind":"trade","market":"WETH","side":"buy","amount":"50","slippageBps":0}`, 400, nil) // no wallet
+	call("POST", "/api/v1/me/trade/prepare", `{"kind":"trade","market":"WETH","side":"buy","amount":"50","slippageBps":0,"wallet":"`+wallet.Hex()+`"}`, 200, &prep)
+	if len(prep.Steps) != 1 || len(prep.Txs) != 2 || prep.Txs[0].Description != "approve USDC 50000000" || prep.Txs[1].Step != 0 ||
 		prep.Txs[1].ChainID != 143 || time.Until(prep.ExpiresAt) <= 0 {
 		t.Fatalf("prepare: %+v", prep)
 	}
@@ -395,8 +371,8 @@ func TestClientSigned(t *testing.T) {
 
 	var e Execution
 	call("POST", "/api/v1/me/trade/record", rec(hashes), 200, &e)
-	if e.Status != "confirmed" || e.Signer != "client" || e.Kind != "basket_buy" || e.StepDone != 2 || *e.BasketID != b.ID ||
-		len(e.TxHashes) != 2 || e.TxHashes[0] != strings.ToLower(hashes[1]) || e.TxHashes[1] != strings.ToLower(hashes[3]) {
+	if e.Status != "confirmed" || e.Signer != "client" || e.Kind != "trade" || e.StepDone != 1 ||
+		len(e.TxHashes) != 1 || e.TxHashes[0] != strings.ToLower(hashes[1]) {
 		t.Fatalf("record: %+v", e)
 	}
 	var again Execution
@@ -404,15 +380,12 @@ func TestClientSigned(t *testing.T) {
 	if again.ID != e.ID {
 		t.Fatalf("record not idempotent: %s vs %s", again.ID, e.ID)
 	}
-	// no delegation: holdings use the wallet the client signed with; WETH fill indexed, cbBTC still provisional
-	db.Exec(context.Background(), `insert into user_trades values ($1,1,'taker','0xa6af',$2,'buy',1,1,76000000,0,1,now())`, strings.ToLower(hashes[1]), strings.ToLower(wallet.Hex()))
+	// no delegation: holdings use the wallet the client signed with
 	var h struct {
-		Wallet  string          `json:"wallet"`
-		Baskets []BasketHolding `json:"baskets"`
+		Wallet string `json:"wallet"`
 	}
 	call("GET", "/api/v1/me/holdings", "", 200, &h)
-	if h.Wallet != strings.ToLower(wallet.Hex()) || len(h.Baskets) != 1 || h.Baskets[0].Legs[0].Market != "WETH" || h.Baskets[0].Legs[0].Raw != "7600000000000000" ||
-		h.Baskets[0].Legs[0].Provisional || !h.Baskets[0].Legs[1].Provisional {
+	if h.Wallet != strings.ToLower(wallet.Hex()) {
 		t.Fatalf("holdings: %+v", h)
 	}
 

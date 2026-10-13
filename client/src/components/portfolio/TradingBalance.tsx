@@ -11,7 +11,8 @@ import { Button, Notice, Panel } from "@/components/ui";
 import { TokenIcon } from "@/components/TokenIcon";
 import { ExecutionProgress } from "@/components/Execution";
 import { DelegationCard } from "@/components/automation/Delegation";
-import { balanceOf, SidePicker } from "@/components/trade/MarketPanel";
+import { balanceOf } from "@/components/trade/MarketPanel";
+import { Segmented } from "@/components/motion";
 import { cn } from "@/lib/utils";
 
 const ABI = parseAbi(["function getBalance(address user, address token) view returns (uint256)"]);
@@ -95,7 +96,16 @@ export function TradingBalance() {
       </ul>
       {bal.error && <Notice tone="bad">Trading balance unavailable: {errText(new Error(bal.error))}</Notice>}
       <div className="flex items-center gap-3">
-        <SidePicker id="margin-side" value={side} onChange={setSide} options={[["deposit", "Deposit"], ["withdraw", "Withdraw"]]} />
+        <Segmented
+          id="margin-side"
+          size="sm"
+          value={side}
+          onChange={setSide}
+          options={[
+            { value: "deposit", label: "Deposit" },
+            { value: "withdraw", label: "Withdraw" },
+          ]}
+        />
         {max !== null && (
           <button type="button" onClick={() => setAmount(formatUnits(max, dec(token)))} className="tnum ml-auto text-xs text-muted-foreground hover:text-foreground">
             {side === "deposit" ? "Wallet" : "Available"} {fmtUnits(max, dec(token))} {token}

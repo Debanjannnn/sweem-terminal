@@ -1,17 +1,16 @@
 "use client";
 
 import Link from "next/link";
-import { formatUnits } from "viem";
-import { useState } from "react";
-import { errText, fmtTime, fmtUsd, getBaskets, getMyBaskets, getOrders, getPositions, withdrawPosition } from "@/lib/api";
+import { formatUnits, parseUnits } from "viem";
+import { useEffect, useState } from "react";
+import { errText, fmtNum, fmtTime, fmtUsd, getMyStrategies, getOrders, getPositions, getStrategies, withdrawPosition } from "@/lib/api";
 import { useHoldings, useTickers } from "@/lib/hooks";
 import { useAsync, useSession } from "@/lib/session";
 import { fmtUnits, tokenBySymbol } from "@/lib/tokens";
 import type { Position } from "@/lib/types";
 import { Button, ErrorBox, Notice, Panel, Skeleton, StatusPill } from "@/components/ui";
 import { TokenIcon } from "@/components/TokenIcon";
-import { IconStack } from "@/components/invest/BasketCard";
-import { LOW_GAS, useNow } from "@/components/portfolio/Wallet";
+import { IconStack } from "@/components/IconStack";
 import { Holdings, type Row } from "@/components/portfolio/Holdings";
 import { ValueChart } from "@/components/portfolio/ValueChart";
 import { TradingBalance } from "@/components/portfolio/TradingBalance";
@@ -24,7 +23,9 @@ import { ExecutionProgress } from "@/components/Execution";
 import { KIND_LABEL, venueName, protocolOf } from "@/components/earn/sources";
 import { ProtocolIcon } from "@/components/ProtocolIcon";
 import { PositionRisk } from "@/components/perpl/PerplRisk";
+import { Segmented } from "@/components/motion";
 
+const SELL_PCTS = ["25", "50", "75", "100"] as const;
 const STABLES = new Set(["USDC", "AUSD", "USDT0"]);
 const PRICE_OF: Record<string, string> = { WMON: "MON" };
 
@@ -35,15 +36,15 @@ export default function PortfolioPage() {
   const { tickers, loading: pxLoading } = useTickers();
   const positions = useAsync(on ? "positions" : null, getPositions);
   const orders = useAsync(on ? "orders" : null, getOrders);
-  const baskets = useAsync("baskets", () => getBaskets());
-  const mine = useAsync(on ? "my-baskets" : null, getMyBaskets);
+  const baskets = useAsync("strategies", () => getStrategies());
+  const mine = useAsync(on ? "my-strategies" : null, getMyStrategies);
 
   if (ready && !authenticated) {
     return (
       <main className="w-full px-4 pb-24 pt-16 md:px-6">
         <Panel className="mx-auto w-full max-w-md p-8 text-center">
           <h1 className="text-lg font-medium">Your portfolio</h1>
-          <p className="mt-2 text-sm text-muted-foreground">Log in to see your wallet, strategies, orders and automations.</p>
+          <p className="mt-2 text-sm text-muted-foreground">Log in to see your wallet, baskets, orders and automations.</p>
           <Button className="mt-6 w-full" onClick={login}>
             Log in
           </Button>
@@ -67,25 +68,10 @@ export default function PortfolioPage() {
       icons: [t.symbol],
       href: tickers[t.symbol] ? `/trade/${t.symbol}` : undefined,
       price,
-      balance: Number(t.amount).toLocaleString("en-US", { maximumFractionDigits: 6 }),
+      balance: fmtNum(Number(t.amount), 6),
       value: price === null ? null : Number(t.amount) * price,
     });
   }
-  for (const b of h?.baskets ?? []) {
-    const value = b.legs.reduce<number | null>((s, l) => (s === null || priceOf(l.market) === null ? null : s + Number(l.amount) * priceOf(l.market)!), 0);
-    rows.push({
-      key: b.basketId,
-      symbol: b.name,
-      name: "Basket · tokens in your wallet",
-      cls: "Basket",
-      icons: b.legs.map((l) => l.market),
-      href: `/baskets/${b.basketId}`,
-      price: null,
-      balance: b.legs.map((l) => `${Number(l.amount).toLocaleString("en-US", { maximumFractionDigits: 4 })} ${l.market}`).join(" + "),
-      value,
-    });
-  }
-  // basket legs are also wallet tokens; count tokens once, baskets are an attribution view
   const tokensUsd = (h?.tokens ?? []).reduce((s, t) => s + Number(t.amount) * (priceOf(t.symbol) ?? 0), 0);
   const open = (positions.data ?? []).filter((p) => p.status !== "closed");
   const posUsd = open.reduce((s, p) => s + Number(p.principalUsdc), 0);
@@ -120,16 +106,16 @@ export default function PortfolioPage() {
 
         <section className="space-y-3">
           <div className="flex items-center justify-between px-1">
-            <h2 className="text-lg font-medium">Earn positions</h2>
-            <Link href="/earn" className="text-sm text-muted-foreground hover:text-foreground">
-              Explore strategies →
+            <h2 className="text-lg font-medium">My baskets</h2>
+            <Link href="/baskets" className="text-sm text-muted-foreground hover:text-foreground">
+              Explore baskets →
             </Link>
           </div>
           {positions.error && <ErrorBox message={errText(new Error(positions.error))} />}
           {positions.loading && !positions.data ? (
             <Skeleton className="h-28 w-full rounded-3xl" />
           ) : (positions.data ?? []).length === 0 ? (
-            <Panel className="p-5 text-sm text-muted-foreground">No strategy positions yet.</Panel>
+            <Panel className="p-5 text-sm text-muted-foreground">No baskets yet.</Panel>
           ) : (
             <div className="grid gap-3 md:grid-cols-2">
               {(positions.data ?? []).map((p) => (
@@ -168,6 +154,9 @@ function PositionCard({ p, priceOf, onChange }: { p: Position; priceOf: (sym: st
   const [err, setErr] = useState<string | null>(null);
   const [execId, setExecId] = useState<string | null>(null);
   const [auto, setAuto] = useState(false);
+  const [sellPct, setSellPct] = useState<(typeof SELL_PCTS)[number]>("100");
+  // withdrawing = a full close that stalled; only a 100% retry resumes it
+  const closing = p.status === "withdrawing";
   // legs grouped by sleeve token (old rows: no token = position asset); each group marked at its own price
   const groups = Object.entries(Object.groupBy(p.legs, (l) => l.token ?? p.asset)).map(([token, legs = []]) => ({ token, legs, dec: tokenBySymbol(token)?.decimals ?? 18 }));
   // ponytail: basis AUSD collateral counted at $1, hedge PnL not marked (~0); read venue balances via RPC if exact value matters
@@ -182,7 +171,7 @@ function PositionCard({ p, priceOf, onChange }: { p: Position; priceOf: (sym: st
     setBusy(true);
     setErr(null);
     try {
-      setExecId((await withdrawPosition(p.id)).executionId);
+      setExecId((await withdrawPosition(p.id, closing ? 10000 : Number(sellPct) * 100)).executionId);
     } catch (e) {
       setErr(errText(e));
     } finally {
@@ -194,7 +183,7 @@ function PositionCard({ p, priceOf, onChange }: { p: Position; priceOf: (sym: st
     <Panel className="space-y-3 p-5">
       <div className="flex items-center gap-3">
         <IconStack symbols={groups.map((g) => g.token)} size={28} ring="ring-card" />
-        <Link href={`/earn/${p.strategyId}`} className="truncate font-medium hover:underline">
+        <Link href={`/baskets/${p.strategyId}`} className="truncate font-medium hover:underline">
           {p.strategyName}
         </Link>
         <span className="ml-auto">
@@ -238,20 +227,42 @@ function PositionCard({ p, priceOf, onChange }: { p: Position; priceOf: (sym: st
       {p.status !== "closed" && p.legs.some((l) => l.kind === "basis") && <PositionRisk positionId={p.id} />}
       {p.legs.some((l) => l.kind === "lp") && <Notice>ActiveVault leg: 4-day lock, withdraw may fail inside the lock.</Notice>}
       {err && <Notice tone="bad">{err}</Notice>}
-      {p.status === "open" && (
-        <div className="flex gap-2">
+      {(p.status === "open" || closing) && (
+        <div className="flex flex-wrap items-center gap-2">
+          {!closing && (
+            <Segmented
+              id={`sell-${p.id}`}
+              value={sellPct}
+              onChange={setSellPct}
+              options={SELL_PCTS.map((v) => ({ value: v, label: `${v}%` }))}
+              className="w-auto flex-1"
+            />
+          )}
           <Button variant="ghost" pending={busy} onClick={() => void withdraw()}>
-            Withdraw to USDC
+            {closing ? "Resume sell" : "Sell"} to USDC
           </Button>
-          <Button variant="ghost" onClick={() => setAuto((a) => !a)}>
-            {auto ? "Hide automation" : "TP / SL / Rebalance"}
-          </Button>
+          {!closing && (
+            <Button variant="ghost" onClick={() => setAuto((a) => !a)}>
+              {auto ? "Hide automation" : "TP / SL / Rebalance"}
+            </Button>
+          )}
         </div>
       )}
       {auto && <ScheduleForm target={{ type: "position", id: p.id }} current={value} onCreated={() => setAuto(false)} />}
       {execId && <ExecutionProgress id={execId} onSettled={onChange} />}
     </Panel>
   );
+}
+
+const LOW_GAS = parseUnits("0.1", 18);
+
+function useNow() {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+  return now;
 }
 
 function Clock() {

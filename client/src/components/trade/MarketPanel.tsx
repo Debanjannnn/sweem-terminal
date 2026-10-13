@@ -1,77 +1,42 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
+import { useDebounced } from "@/lib/hooks";
 import { ArrowDown } from "lucide-react";
-import { errText, fmtUsd, getQuote } from "@/lib/api";
+import { errText, fmtBps, fmtUsd, getQuote } from "@/lib/api";
 import { useAsync, useSession } from "@/lib/session";
 import { fmtUnits, parseAmount, type MarketDef } from "@/lib/tokens";
 import type { Holdings } from "@/lib/types";
-import { Button, Notice, Spinner } from "@/components/ui";
+import { Button, Notice, Row, Spinner } from "@/components/ui";
 import { TokenIcon } from "@/components/TokenIcon";
 import { ClientRunProgress, useClientTrade } from "@/components/ClientTrade";
-import { cn } from "@/lib/utils";
-import { Flash, TabPill } from "@/components/motion";
+import { Flash, Segmented } from "@/components/motion";
 import { formatUnits } from "viem";
+import { AnyChainButton } from "@/components/deposit/AnyChainDeposit";
 
-export const SLIPPAGES = [50, 100, 200] as const;
-
-export function useDebounced<T>(v: T, ms = 400) {
-  const [d, setD] = useState(v);
-  useEffect(() => {
-    const t = setTimeout(() => setD(v), ms);
-    return () => clearTimeout(t);
-  }, [v, ms]);
-  return d;
-}
+const SLIPPAGES = [50, 100, 200] as const;
+export const SIDES = [
+  { value: "buy", label: "Buy" },
+  { value: "sell", label: "Sell" },
+] as const;
 
 export const balanceOf = (h: Holdings | null, symbol: string) => {
   const t = h?.tokens.find((x) => x.symbol === symbol);
   return t ? BigInt(t.raw) : h ? BigInt(0) : null;
 };
 
-export function SidePicker<T extends string>({ id, value, onChange, options }: { id: string; value: T; onChange: (v: T) => void; options: [T, string][] }) {
-  return (
-    <div role="tablist" className="flex rounded-lg bg-foreground/[0.05] p-0.5">
-      {options.map(([v, label]) => (
-        <button
-          key={v}
-          role="tab"
-          aria-selected={value === v}
-          onClick={() => onChange(v)}
-          className={cn("relative rounded-md px-3 py-1 text-sm font-medium transition-colors", value === v ? "text-foreground" : "text-muted-foreground hover:text-foreground")}
-        >
-          {value === v && <TabPill id={id} className="rounded-md bg-card shadow-sm" />}
-          <span className="relative">{label}</span>
-        </button>
-      ))}
-    </div>
-  );
-}
-
+// "Slippage" label + bps chips
 export function Slippage({ value, onChange }: { value: number; onChange: (v: number) => void }) {
   return (
     <div className="flex items-center gap-1 text-xs text-muted-foreground">
       Slippage
-      {SLIPPAGES.map((s) => (
-        <button
-          key={s}
-          type="button"
-          onClick={() => onChange(s)}
-          className={cn("relative rounded-md px-2 py-1 font-medium transition-colors", s === value ? "text-foreground" : "hover:text-foreground")}
-        >
-          {s === value && <TabPill id="slippage" className="rounded-md bg-card shadow-sm" />}
-          <span className="relative">{s / 100}%</span>
-        </button>
-      ))}
-    </div>
-  );
-}
-
-export function Row({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="flex items-center justify-between gap-4">
-      <dt className="text-muted-foreground">{label}</dt>
-      <dd className="tnum truncate">{children}</dd>
+      <Segmented
+        id="slippage"
+        size="xs"
+        value={String(value)}
+        onChange={(v) => onChange(Number(v))}
+        options={SLIPPAGES.map((s) => ({ value: String(s), label: `${s / 100}%` }))}
+      />
     </div>
   );
 }
@@ -134,7 +99,7 @@ export function MarketPanel({ market, holdings, onDone }: { market: MarketDef; h
   return (
     <div className="space-y-4 p-5">
       <div className="flex items-center justify-between gap-3">
-        <SidePicker id="mkt-side" value={side} onChange={(s) => (setSide(s), setAmount(""))} options={[["buy", "Buy"], ["sell", "Sell"]]} />
+        <Segmented id="mkt-side" size="sm" value={side} onChange={(s) => (setSide(s), setAmount(""))} options={SIDES} />
         <Slippage value={slippage} onChange={setSlippage} />
       </div>
 
@@ -187,7 +152,7 @@ export function MarketPanel({ market, holdings, onDone }: { market: MarketDef; h
           <Row label="Minimum received">{`${fmtUnits(q.minOut, outTok.decimals)} ${outTok.symbol}`}</Row>
           <Row label="Avg price">{fmtUsd(Number(q.avgPx))}</Row>
           <Row label="Price impact">
-            <span className={q.impactBps > 100 ? "text-warning" : undefined}>{(q.impactBps / 100).toFixed(2)}%</span>
+            <span className={q.impactBps > 100 ? "text-warning" : undefined}>{fmtBps(q.impactBps)}</span>
           </Row>
           <Row label="Max safe size">{`${fmtUnits(q.maxSafeAmount, inTok.decimals, 2)} ${inTok.symbol}`}</Row>
         </dl>
@@ -199,7 +164,7 @@ export function MarketPanel({ market, holdings, onDone }: { market: MarketDef; h
       )}
       {overSafe && maxSafe !== null && (
         <Notice>
-          Above {(q.maxImpactBps / 100).toFixed(2)}% impact.{" "}
+          Above {fmtBps(q.maxImpactBps)} impact.{" "}
           <button className="underline underline-offset-2" onClick={() => setAmount(formatUnits(maxSafe, inTok.decimals))}>
             Use max safe size
           </button>
@@ -214,6 +179,9 @@ export function MarketPanel({ market, holdings, onDone }: { market: MarketDef; h
         <Button className={actionBtn} pending={busy} disabled={busy || reason !== null} onClick={() => void submit()}>
           {busy ? "Sign in your wallet…" : (reason ?? `${side === "buy" ? "Buy" : "Sell"} ${sym}`)}
         </Button>
+      )}
+      {inTok.symbol === "USDC" && raw !== null && balance !== null && raw > balance && (
+        <AnyChainButton need={Number(raw - balance) / 1e6} onArrived={onDone} className="mx-auto flex w-fit" />
       )}
       {run && <ClientRunProgress run={run} />}
       <p className="text-[11px] leading-4 text-muted-foreground">

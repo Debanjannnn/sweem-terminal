@@ -316,9 +316,8 @@ func TestE2E(t *testing.T) {
 			get(t, api+"/strategies", nil)
 			get(t, md+"/rates", nil)
 			var q map[string]any
-			must(t, http.MethodPost, md+"/quote/basket", "", map[string]any{"side": "buy", "amountUsdc": "5000000",
-				"legs": []map[string]any{{"market": strings.ToLower(m.Orderbook), "weightBps": 10000}}}, http.StatusOK, &q)
-			t.Logf("basket quote 5 USDC -> %v", q)
+			must(t, http.MethodGet, md+"/quote/"+strings.ToLower(m.Orderbook)+"?side=buy&amount=5000000", "", nil, http.StatusOK, &q)
+			t.Logf("quote 5 USDC -> %v", q)
 
 			// multi-token strategy: create, read back, and a below-min deploy is refused at planning (no tx)
 			var st struct {
@@ -387,15 +386,6 @@ func TestE2E(t *testing.T) {
 		run(t, http.MethodPost, "/me/margin/deposit", map[string]any{"token": "USDC", "amount": "1"})
 		out := decimal.RequireFromString("1").Add(decimal.RequireFromString(limitFund)).String()
 		run(t, http.MethodPost, "/me/margin/withdraw", map[string]any{"token": "USDC", "amount": out})
-	})
-
-	step("basket buy and sell", func(t *testing.T) {
-		var b struct{ ID string }
-		must(t, http.MethodPost, api+"/me/baskets", token, map[string]any{"name": "e2e " + time.Now().Format(time.DateTime),
-			"legs": []map[string]any{{"market": mkt, "weightBps": 10_000}}, "public": false}, http.StatusCreated, &b)
-		defer do(t, http.MethodDelete, api+"/me/baskets/"+b.ID, token, nil, nil)
-		run(t, http.MethodPost, "/me/baskets/"+b.ID+"/buy", map[string]any{"amountUsdc": buyUSDC, "slippageBps": 100})
-		run(t, http.MethodPost, "/me/baskets/"+b.ID+"/sell", map[string]any{"bps": 10_000, "slippageBps": 100})
 	})
 
 	step("strategy deploy and withdraw", func(t *testing.T) {

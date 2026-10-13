@@ -5,17 +5,18 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { Check, Copy, Menu, Wallet as WalletIcon } from "lucide-react";
-import { errMsg, shortHash } from "@/lib/api";
+import { errMsg, fmtNum, shortHash } from "@/lib/api";
 import { addressUrl } from "@/lib/config";
-import { useHoldings } from "@/lib/hooks";
+import { useCopy, useHoldings } from "@/lib/hooks";
 import { useSession } from "@/lib/session";
 import { cn } from "@/lib/utils";
 import { BasketSearch } from "./BasketSearch";
-import { Spinner, useDismissable } from "./ui";
+import { Row, Spinner, useDismissable } from "./ui";
+import { AnyChainButton } from "@/components/deposit/AnyChainDeposit";
 
 const NAV = [
   { label: "Trade", href: "/" },
-  { label: "Earn", href: "/earn" },
+  { label: "Baskets", href: "/baskets" },
   { label: "Portfolio", href: "/portfolio" },
 ] as const;
 
@@ -31,7 +32,7 @@ export function Navbar() {
     return () => window.removeEventListener("scroll", on);
   }, []);
   const isActive = (href: string) =>
-    href === "/" ? pathname === "/" || pathname.startsWith("/baskets") || pathname.startsWith("/trade") : pathname.startsWith(href);
+    href === "/" ? pathname === "/" || pathname.startsWith("/trade") : pathname.startsWith(href);
   const links = (cls: string) =>
     NAV.map((item) => (
       <Link
@@ -59,7 +60,10 @@ export function Navbar() {
       <div className="grid h-16 w-full grid-cols-[1fr_auto_1fr] items-center gap-4 px-4 md:px-6">
         <Link href="/" className="flex items-center gap-2 justify-self-start text-2xl font-semibold tracking-tight">
           <Image src="/sweem-mark.png" alt="" width={26} height={26} priority unoptimized className="size-[26px]" />
-          sweem
+          <span className="relative">
+            sweem
+            <span className="absolute top-0 left-full -ml-px text-[10px] leading-none font-medium tracking-normal text-primary">beta</span>
+          </span>
         </Link>
 
         <BasketSearch />
@@ -105,17 +109,8 @@ export function Navbar() {
 function WalletMenu() {
   const { address, logout, exportWallet } = useSession();
   const { open, setOpen, ref } = useDismissable();
-  const [copied, setCopied] = useState(false);
+  const { copied, copy } = useCopy();
   const [err, setErr] = useState<string | null>(null);
-
-  async function copy() {
-    if (!address) return;
-    try {
-      await navigator.clipboard.writeText(address);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1200);
-    } catch {}
-  }
 
   return (
     <div className="relative" ref={ref}>
@@ -145,14 +140,15 @@ function WalletMenu() {
                   {shortHash(address)}
                 </a>
                 <button
-                  onClick={() => void copy()}
+                  onClick={() => copy(address)}
                   aria-label="Copy wallet address"
                   className="rounded-md p-1.5 text-muted-foreground transition-colors hover:text-foreground"
                 >
-                  {copied ? <Check className="size-4 text-positive" /> : <Copy className="size-4" />}
+                  {copied === address ? <Check className="size-4 text-positive" /> : <Copy className="size-4" />}
                 </button>
               </div>
               <Wallet />
+              <AnyChainButton className="w-full justify-center rounded-lg border border-border bg-secondary/50 px-3 py-2 text-foreground hover:bg-secondary hover:no-underline" />
               <Automation />
               {err && <p className="text-xs break-words text-destructive">{err}</p>}
               <div className="flex gap-2 pt-1">
@@ -178,13 +174,15 @@ function Wallet() {
   const h = useHoldings();
   const amt = (sym: string) => {
     const t = h.data?.tokens.find((x) => x.symbol === sym);
-    return t ? Number(t.amount).toLocaleString("en-US", { maximumFractionDigits: 4 }) : h.data ? "0" : "…";
+    return t ? fmtNum(Number(t.amount)) : h.data ? "0" : "…";
   };
   return (
     <div className="space-y-2">
-      <Row label="Network" value="Monad mainnet" />
-      <Row label="USDC" value={amt("USDC")} />
-      <Row label="MON (gas)" value={amt("MON")} />
+      <dl className="space-y-2">
+        <Row label="Network">Monad mainnet</Row>
+        <Row label="USDC">{amt("USDC")}</Row>
+        <Row label="MON (gas)">{amt("MON")}</Row>
+      </dl>
       {h.error && <p className="text-xs text-warning">Balances unavailable: {h.error}</p>}
     </div>
   );
@@ -208,15 +206,6 @@ function Automation() {
       </div>
       {delegated && <p className="text-xs text-muted-foreground">Revoking stops every schedule.</p>}
       {delegationError && <p className="text-xs break-words text-destructive">{delegationError}</p>}
-    </div>
-  );
-}
-
-function Row({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex items-center justify-between gap-3">
-      <span className="text-muted-foreground">{label}</span>
-      <span className="tnum">{value}</span>
     </div>
   );
 }

@@ -55,11 +55,11 @@ func TestMigrations(t *testing.T) {
 
 	must("insert into users(id) values ('did:privy:x')")
 	var sid string
-	if err := conn.QueryRow(ctx, `insert into schedules(user_id,basket,kind,amount_usdc,interval_seconds,next_run_at,max_slippage_bps,max_per_run_usdc)
-		values ('did:privy:x','0xb','recurring',10,86400,now(),50,10) returning id`).Scan(&sid); err != nil {
+	if err := conn.QueryRow(ctx, `insert into schedules(user_id,kind,target_type,target_id,amount_usdc,interval_seconds,next_run_at,max_slippage_bps,max_per_run_usdc)
+		values ('did:privy:x','dca','market','WETH',10,86400,now(),50,10) returning id`).Scan(&sid); err != nil {
 		t.Fatal(err)
 	}
-	ins := `insert into executions(schedule_id,slot,kind) values ($1,1,'recurring') on conflict (schedule_id,slot) do nothing`
+	ins := `insert into executions(schedule_id,slot,kind) values ($1,1,'dca') on conflict (schedule_id,slot) do nothing`
 	for i, want := range []int64{1, 0} {
 		tag, err := conn.Exec(ctx, ins, sid)
 		if err != nil || tag.RowsAffected() != want {
@@ -69,7 +69,7 @@ func TestMigrations(t *testing.T) {
 	if _, err := conn.Exec(ctx, "update executions set status='bogus'"); err == nil {
 		t.Fatal("status check missing")
 	}
-	if _, err := conn.Exec(ctx, `insert into schedules(user_id,basket,kind,max_slippage_bps,max_per_run_usdc) values ('did:privy:x','0xb','recurring',50,10)`); err == nil {
-		t.Fatal("recurring without amount/interval accepted")
+	if _, err := conn.Exec(ctx, `insert into schedules(user_id,kind,target_type,target_id,max_slippage_bps,max_per_run_usdc) values ('did:privy:x','dca','basket','x',50,10)`); err == nil {
+		t.Fatal("basket target accepted") // baskets are strategies now (0014)
 	}
 }

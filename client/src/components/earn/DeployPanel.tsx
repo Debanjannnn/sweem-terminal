@@ -8,18 +8,19 @@ import { useHoldings, useTickers } from "@/lib/hooks";
 import { useSession } from "@/lib/session";
 import { fmtUnits, parseAmount, USDC } from "@/lib/tokens";
 import type { Strategy } from "@/lib/types";
-import { Button, Notice } from "@/components/ui";
+import { Button, Notice, Row } from "@/components/ui";
 import { ExecutionProgress } from "@/components/Execution";
 import { DelegationCard } from "@/components/automation/Delegation";
-import { actionBtn, balanceOf, pill, Row, Slippage } from "@/components/trade/MarketPanel";
+import { actionBtn, balanceOf, pill, Slippage } from "@/components/trade/MarketPanel";
 import { minDeposit, parts } from "./sources";
+import { AnyChainButton } from "@/components/deposit/AnyChainDeposit";
 
-// Follow/deploy: USDC in, 0.4% open fee to treasury, executor routes the rest into every source from the user's wallet.
-export function DeployPanel({ strategy }: { strategy: Strategy }) {
+// Buy: USDC in, 0.4% open fee to treasury, executor routes the rest into every source from the user's wallet.
+export function DeployPanel({ strategy, initialAmount = "" }: { strategy: Strategy; initialAmount?: string }) {
   const { ready, authenticated, login, delegated, me } = useSession();
   const holdings = useHoldings();
   const { tickers } = useTickers();
-  const [amount, setAmount] = useState("");
+  const [amount, setAmount] = useState(initialAmount);
   const [slippage, setSlippage] = useState(100);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -38,7 +39,7 @@ export function DeployPanel({ strategy }: { strategy: Strategy }) {
   const reason = !ready
     ? "Loading…"
     : !delegated
-      ? "Enable delegation to deploy"
+      ? "Enable delegation to buy"
       : amount.trim() === ""
         ? "Enter an amount"
         : raw === null || raw === BigInt(0)
@@ -66,7 +67,7 @@ export function DeployPanel({ strategy }: { strategy: Strategy }) {
   return (
     <div className="space-y-4 p-5">
       <div className="flex items-center justify-between gap-3">
-        <span className="text-sm font-medium">{own ? "Deploy" : "Follow"} with USDC</span>
+        <span className="text-sm font-medium">Buy with USDC</span>
         <Slippage value={slippage} onChange={setSlippage} />
       </div>
       <div className="rounded-2xl bg-card p-4">
@@ -101,13 +102,14 @@ export function DeployPanel({ strategy }: { strategy: Strategy }) {
       {err && <Notice tone="bad">{err}</Notice>}
       {!authenticated && ready ? (
         <Button className={actionBtn} onClick={login}>
-          Log in to {own ? "deploy" : "follow"}
+          Log in to buy
         </Button>
       ) : (
         <Button className={actionBtn} pending={busy} disabled={reason !== null} onClick={() => void submit()}>
-          {busy ? "Submitting…" : (reason ?? `${own ? "Deploy" : "Follow"} strategy`)}
+          {busy ? "Submitting…" : (reason ?? "Buy basket")}
         </Button>
       )}
+      {raw !== null && usdc !== null && raw > usdc && <AnyChainButton need={Number(raw - usdc) / 1e6} onArrived={holdings.reload} className="mx-auto flex w-fit" />}
       {execId && <ExecutionProgress id={execId} onSettled={holdings.reload} />}
       <p className="text-[11px] leading-4 text-muted-foreground">
         Monad mainnet, real funds. Everything stays in your own wallet&apos;s venue positions; sweem&apos;s signer runs the steps (fee → swaps → deposits

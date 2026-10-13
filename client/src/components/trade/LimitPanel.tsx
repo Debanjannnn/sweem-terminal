@@ -6,12 +6,13 @@ import { cancelOrder, errText, fmtUsd, getOrders, placeOrder } from "@/lib/api";
 import { useAsync, useSession } from "@/lib/session";
 import type { MarketDef } from "@/lib/tokens";
 import type { Order } from "@/lib/types";
-import { Button, Notice, StatusPill } from "@/components/ui";
+import { Button, Notice, Row, StatusPill } from "@/components/ui";
 import { ExecutionProgress } from "@/components/Execution";
 import { DelegationCard } from "@/components/automation/Delegation";
 import { Field, inputCls } from "@/components/automation/ScheduleForm";
 import { toastError } from "@/components/TxToast";
-import { actionBtn, Row, SidePicker } from "./MarketPanel";
+import { Segmented } from "@/components/motion";
+import { actionBtn, SIDES } from "./MarketPanel";
 
 const DEC = /^\d+(\.\d+)?$/;
 
@@ -59,7 +60,7 @@ export function LimitPanel({ market, mid }: { market: MarketDef; mid: number | n
 
   return (
     <div className="space-y-4 p-5">
-      <SidePicker id="lim-side" value={side} onChange={setSide} options={[["buy", "Buy"], ["sell", "Sell"]]} />
+      <Segmented id="lim-side" size="sm" value={side} onChange={setSide} options={SIDES} />
       <div className="grid grid-cols-2 gap-3">
         <Field label={`Price (${market.quote.symbol})`} hint={mid !== null ? <button onClick={() => setPrice(mid.toFixed(4))}>mid {fmtUsd(mid)}</button> : undefined}>
           <input className={inputCls} inputMode="decimal" placeholder="0.00" value={price} onChange={(e) => setPrice(e.target.value)} />

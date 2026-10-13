@@ -1,10 +1,4 @@
-.PHONY: deps abi client-abi test test-integration up down logs infra e2e payout
-
-deps:
-	cd contracts && forge install --no-git foundry-rs/forge-std OpenZeppelin/openzeppelin-contracts@v5.7.0
-
-abi:
-	contracts/script/export-abi.sh
+.PHONY: client-abi test test-integration up down logs infra e2e payout provision deploy
 
 client-abi:
 	mkdir -p client/src/abi
@@ -13,7 +7,6 @@ client-abi:
 test:
 	go test ./...
 	for s in executor indexer; do [ ! -f services/$$s/Cargo.toml ] || cargo test --manifest-path services/$$s/Cargo.toml || exit 1; done
-	cd contracts && forge test
 
 # needs `make infra`
 test-integration:
@@ -43,3 +36,11 @@ e2e:
 	set -a && . ./.env && . ./.env.e2e && set +a && \
 	CHAIN_ID=143 E2E_DEPLOYMENTS_PATH=$(CURDIR)/contracts/deployments/143.json \
 	go test -tags e2e -count=1 -v -timeout 45m ./e2e/
+
+# Vultr: VULTR_API_KEY + infra/terraform/terraform.tfvars
+provision:
+	terraform -chdir=infra/terraform init && terraform -chdir=infra/terraform apply
+
+# ships repo + .env/.env.api/.env.executor, builds and restarts the prod stack
+deploy:
+	cd infra/ansible && ansible-playbook -i "$$(terraform -chdir=../terraform output -raw ip)," site.yml

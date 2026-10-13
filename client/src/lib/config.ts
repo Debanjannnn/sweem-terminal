@@ -3,7 +3,7 @@ import { monad } from "viem/chains";
 import deployments from "@/abi/deployments.json";
 
 // NEXT_PUBLIC_* is baked in at build time — a dev-server restart is not enough.
-export const RPC_URL = process.env.NEXT_PUBLIC_RPC_URL ?? "https://rpc.monad.xyz";
+const RPC_URL = process.env.NEXT_PUBLIC_RPC_URL ?? "https://rpc.monad.xyz";
 export const API_URL = `${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080"}/api/v1`;
 export const MARKET_DATA_URL = `${process.env.NEXT_PUBLIC_MARKET_DATA_URL ?? "http://localhost:8082"}/api/v1`;
 export const WS_URL = process.env.NEXT_PUBLIC_MARKET_DATA_WS_URL ?? "ws://localhost:8082/api/v1/ws";
@@ -14,7 +14,7 @@ export const POLICY_ID = process.env.NEXT_PUBLIC_PRIVY_POLICY_ID ?? "";
 
 export const chain = { ...monad, rpcUrls: { default: { http: [RPC_URL] } } } as const;
 
-export const EXPLORER = monad.blockExplorers.default.url;
+const EXPLORER = monad.blockExplorers.default.url;
 export const txUrl = (hash: string) => `${EXPLORER}/tx/${hash}`;
 export const addressUrl = (addr: string) => `${EXPLORER}/address/${addr}`;
 

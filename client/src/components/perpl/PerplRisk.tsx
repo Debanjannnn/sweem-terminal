@@ -18,7 +18,7 @@ const daysAgo = (n: number) => new Date(Date.now() - n * 864e5).toISOString().sl
 const signed = (s: string | undefined) => (s === undefined || s === "" ? "text-muted-foreground" : Number(s) >= 0 ? "text-positive" : "text-destructive");
 const away = (px: number, mark: number) => `${px >= mark ? "+" : ""}${(((px - mark) / mark) * 100).toFixed(1)}% from mark`;
 
-export const usePerplMarkets = () => useAsync("perpl-markets", getPerplMarkets);
+const usePerplMarkets = () => useAsync("perpl-markets", getPerplMarkets);
 const useFunding30 = (perpId: number | undefined) => useAsync(perpId ? `funding30:${perpId}` : null, () => getFunding(perpId!, daysAgo(30)));
 
 // "Live from Perpl" source line: which numbers come from the API vs the exchange contract
@@ -67,7 +67,7 @@ function Kv({ k, v, note, tone }: { k: string; v: React.ReactNode; note?: React.
   );
 }
 
-// ── 1. Earn page: funding across the hedge markets ────────────────────────────
+// ── 1. Baskets page: funding across the hedge markets ────────────────────────────
 
 export function FundingStrip() {
   const m = usePerplMarkets();

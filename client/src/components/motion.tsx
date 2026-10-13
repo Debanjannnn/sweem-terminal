@@ -35,24 +35,36 @@ export function Reveal({
   );
 }
 
+// track / item / pill overrides per size; xs = bare chips (slippage), lg = side-panel tabs
+const SIZE = {
+  xs: ["flex w-auto gap-1 bg-transparent p-0", "px-2 py-1 text-xs", ""],
+  sm: ["flex w-auto", "py-1", ""],
+  md: ["", "", ""],
+  lg: ["gap-1 rounded-full border border-border bg-secondary/60 p-1", "truncate rounded-full py-2 text-[15px]", "rounded-full bg-background"],
+} as const;
+
 export function Segmented<T extends string>({
   value,
   onChange,
   options,
   id,
   className,
+  size = "md",
 }: {
   value: T;
   onChange: (v: T) => void;
   options: readonly { value: T; label: string }[];
   id: string;
   className?: string;
+  size?: keyof typeof SIZE;
 }) {
+  const [track, item, pill] = SIZE[size];
   return (
     <div
       role="tablist"
       className={cn(
         "grid w-full grid-flow-col rounded-lg bg-foreground/[0.05] p-0.5",
+        track,
         className,
       )}
     >
@@ -61,15 +73,17 @@ export function Segmented<T extends string>({
         return (
           <button
             key={o.value}
+            type="button"
             role="tab"
             aria-selected={on}
             onClick={() => onChange(o.value)}
             className={cn(
               "relative rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
+              item,
               on ? "text-foreground" : "text-muted-foreground hover:text-foreground",
             )}
           >
-            {on && <TabPill id={`segmented-${id}`} className="rounded-md bg-card shadow-sm" />}
+            {on && <TabPill id={`segmented-${id}`} className={cn("rounded-md bg-card shadow-sm", pill)} />}
             <span className="relative">{o.label}</span>
           </button>
         );

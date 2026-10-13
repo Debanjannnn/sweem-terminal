@@ -4,8 +4,10 @@ import { Cell, Line, LineChart, Pie, PieChart, ResponsiveContainer, Tooltip, XAx
 import { errText, fmtUsd } from "@/lib/api";
 import type { Backtest, Sleeve } from "@/lib/types";
 import { ErrorBox, Skeleton, Stat } from "@/components/ui";
-import { COLORS } from "@/components/create/CreateBasket";
 import { KIND_LABEL, venueName } from "./sources";
+import { cn } from "@/lib/utils";
+
+const COLORS = ["var(--primary)", "var(--chart-1)", "var(--chart-2)", "var(--warning)", "var(--chart-3)", "var(--chart-4)"];
 
 export const pct = (s: string | number | null | undefined, d = 2) =>
   s === null || s === undefined || s === "" ? "-" : `${(Number(s) * 100).toFixed(d)}%`;
@@ -49,7 +51,7 @@ export function BacktestView({ bt, loading, error }: { bt: Backtest | null; load
             />
             <Tooltip
               contentStyle={{ background: "var(--popover)", border: "1px solid var(--border)", borderRadius: 12, fontSize: 12 }}
-              formatter={(v) => [fmtUsd(Number(v)), "Strategy"]}
+              formatter={(v) => [fmtUsd(Number(v)), "Basket"]}
             />
             <Line type="linear" dataKey="usd" stroke="var(--primary)" strokeWidth={1.75} dot={false} isAnimationActive={false} />
           </LineChart>
@@ -88,7 +90,8 @@ export function BacktestView({ bt, loading, error }: { bt: Backtest | null; load
 }
 
 // token → source slices; token prefix only when there are several
-export function AllocationDonut({ sleeves }: { sleeves: Sleeve[] }) {
+// stacked: donut above a full-width legend (narrow cards)
+export function AllocationDonut({ sleeves, stacked = false }: { sleeves: Sleeve[]; stacked?: boolean }) {
   const data = sleeves.flatMap((sl) =>
     sl.sources.map((s) => ({
       name: `${sleeves.length > 1 ? `${sl.asset} · ` : ""}${KIND_LABEL[s.kind]} · ${venueName(s.venue)}`,
@@ -96,8 +99,8 @@ export function AllocationDonut({ sleeves }: { sleeves: Sleeve[] }) {
     })),
   );
   return (
-    <div className="flex flex-wrap items-center gap-6">
-      <div className="size-40">
+    <div className={cn("flex items-center gap-6", stacked ? "flex-col" : "flex-wrap")}>
+      <div className={stacked ? "size-44" : "size-40"}>
         <ResponsiveContainer width="100%" height="100%" initialDimension={{ width: 1, height: 1 }}>
           <PieChart>
             <Pie data={data} dataKey="value" innerRadius="62%" outerRadius="100%" stroke="var(--card)" strokeWidth={2} isAnimationActive={false}>
@@ -108,7 +111,7 @@ export function AllocationDonut({ sleeves }: { sleeves: Sleeve[] }) {
           </PieChart>
         </ResponsiveContainer>
       </div>
-      <ul className="min-w-40 flex-1 space-y-2 text-sm">
+      <ul className={cn("space-y-2 text-sm", stacked ? "w-full" : "min-w-40 flex-1")}>
         {data.map((d, i) => (
           <li key={d.name} className="flex items-center gap-2">
             <span className="size-2.5 shrink-0 rounded-full" style={{ background: COLORS[i % COLORS.length] }} />

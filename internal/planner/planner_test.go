@@ -125,26 +125,14 @@ func TestTrade(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, err = p.BasketBuy(ctx, []Leg{{"WETH", 6000}, {"cbBTC", 4000}}, decimal.NewFromInt(50_000_000), 0)
-	golden(t, "basket buy", s, `[{"action":"kuru.marketBuy","market":"WETH","quote":"30000000","minOut":"7500000000000000"},
-		{"action":"kuru.marketBuy","market":"cbBTC","quote":"20000000","minOut":"20000"}]`)
-	s, err = p.BasketSell(ctx, []SellLeg{{"WETH", decimal.NewFromInt(7_500_000_000_000_000)}, {"cbBTC", decimal.NewFromInt(10)}}, 0)
-	golden(t, "basket sell skips dust leg", s, `[{"action":"kuru.marketSell","market":"WETH","size":"7500000000000000","minOut":"30000000"}]`)
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	for name, err := range map[string]error{
 		"cap":         second(p.MarketBuy(ctx, "WETH", decimal.NewFromInt(1_000_000_001), 50)),
 		"min":         second(p.MarketBuy(ctx, "WETH", decimal.NewFromInt(999), 50)),
 		"market":      second(p.MarketBuy(ctx, "PEPE", decimal.NewFromInt(1e6), 50)),
-		"weights":     second(p.BasketBuy(ctx, []Leg{{"WETH", 6000}}, decimal.NewFromInt(1e6), 50)),
-		"dup legs":    second(p.BasketBuy(ctx, []Leg{{"WETH", 5000}, {"WETH", 5000}}, decimal.NewFromInt(1e6), 50)),
-		"all dust":    second(p.BasketSell(ctx, []SellLeg{{"WETH", decimal.NewFromInt(1)}}, 50)),
 		"limit small": second(p.Limit("MON", "buy", d("0.03"), d("199"), true, false)),
 	} {
-		want := map[string]string{"cap": "cap_exceeded", "min": "below_min_size", "market": "bad_request", "weights": "invalid_legs",
-			"dup legs": "invalid_legs", "all dust": "nothing_to_sell", "limit small": "below_min_size"}[name]
+		want := map[string]string{"cap": "cap_exceeded", "min": "below_min_size", "market": "bad_request",
+			"limit small": "below_min_size"}[name]
 		if code(err) != want {
 			t.Errorf("%s: got %v want %s", name, err, want)
 		}
@@ -350,17 +338,6 @@ func TestRebalance(t *testing.T) {
 	plan, err = p.Rebalance(ctx, s, legs2, bals2, []int{7000, 3000, 0}, true, 0)
 	if err != nil || len(plan.Steps) != 0 {
 		t.Errorf("balanced should be empty: %v %v", plan.Steps, err)
-	}
-}
-
-func TestAttribute(t *testing.T) {
-	got := Attribute([][]byte{
-		[]byte(`[{"action":"kuru.marketBuy","market":"WETH","quote":"1","minOut":"100"},{"action":"kuru.marketBuy","market":"MON","quote":"1","minOut":"5"}]`),
-		[]byte(`[{"action":"kuru.marketSell","market":"WETH","size":"40","minOut":"1"},{"action":"kuru.marketSell","market":"MON","size":"5","minOut":"1"}]`),
-		[]byte(`garbage`),
-	})
-	if len(got) != 1 || got["WETH"].String() != "60" {
-		t.Errorf("got %v", got)
 	}
 }
 

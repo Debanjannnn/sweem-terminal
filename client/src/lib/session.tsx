@@ -20,8 +20,6 @@ export type Session = {
   wallet: WalletWithMetadata | undefined;
   address: `0x${string}` | undefined;
   me: Me | null;
-  meError: string | null;
-  refreshMe: () => Promise<void>;
   delegated: boolean;
   exportWallet: () => Promise<void>;
   delegate: () => Promise<void>;
@@ -54,35 +52,25 @@ function SessionInner({ children }: { children: React.ReactNode }) {
   const { exportWallet } = useExportWallet();
 
   const [me, setMe] = useState<Me | null>(null);
-  const [meError, setMeError] = useState<string | null>(null);
   const [delegating, setDelegating] = useState(false);
   const [delegationError, setDelegationError] = useState<string | null>(null);
 
   const wallet = embeddedWallet(user?.linkedAccounts);
 
-  const refreshMe = useCallback(async () => {
-    try {
-      setMe(await getMe());
-      setMeError(null);
-    } catch (e) {
-      setMeError(errMsg(e));
-    }
-  }, []);
+  // failures keep the last /me (null until the first success); live = drop a reply that lands after logout/user switch
+  const refreshMe = useCallback((live: () => boolean = () => true) => getMe().then((m) => live() && setMe(m), () => {}), []);
 
   useEffect(() => {
     if (!ready || !authenticated) return;
     let live = true;
-    getMe()
-      .then((m) => live && (setMe(m), setMeError(null)))
-      .catch((e) => live && setMeError(errMsg(e)));
+    void refreshMe(() => live);
     return () => {
       live = false;
     };
-  }, [ready, authenticated, user?.id]);
+  }, [ready, authenticated, user?.id, refreshMe]);
 
   const doLogout = useCallback(async () => {
     setMe(null);
-    setMeError(null);
     await logout();
   }, [logout]);
 
@@ -90,16 +78,25 @@ function SessionInner({ children }: { children: React.ReactNode }) {
     if (wallet) await exportWallet({ address: wallet.address });
   }, [wallet, exportWallet]);
 
-  // Privy signer first (gives the wallet its server id), then register it with the api.
-  const delegate = useCallback(async () => {
-    if (!wallet) return;
-    if (!SIGNER_ID) {
-      setDelegationError("NEXT_PUBLIC_PRIVY_SIGNER_ID is not set");
-      return;
-    }
+  // busy/error wrapper for delegate + revoke; refreshes /me after
+  const delegation = async (fn: () => Promise<unknown>) => {
     setDelegating(true);
     setDelegationError(null);
     try {
+      await fn();
+      await refreshMe();
+    } catch (e) {
+      setDelegationError(errMsg(e));
+    } finally {
+      setDelegating(false);
+    }
+  };
+
+  // Privy signer first (gives the wallet its server id), then register it with the api.
+  const delegate = async () => {
+    if (!wallet) return;
+    if (!SIGNER_ID) return setDelegationError("NEXT_PUBLIC_PRIVY_SIGNER_ID is not set");
+    await delegation(async () => {
       let w = wallet;
       if (!w.delegated || !w.id) {
         const res = await addSigners({
@@ -110,28 +107,16 @@ function SessionInner({ children }: { children: React.ReactNode }) {
       }
       if (!w.id) throw new Error("wallet has no server id after adding signer");
       await putDelegation(w.id, w.address);
-      await refreshMe();
-    } catch (e) {
-      setDelegationError(errMsg(e));
-    } finally {
-      setDelegating(false);
-    }
-  }, [wallet, addSigners, refreshMe]);
+    });
+  };
 
-  const revoke = useCallback(async () => {
+  const revoke = async () => {
     if (!wallet) return;
-    setDelegating(true);
-    setDelegationError(null);
-    try {
+    await delegation(async () => {
       await removeSigners({ address: wallet.address });
       await deleteDelegation();
-      await refreshMe();
-    } catch (e) {
-      setDelegationError(errMsg(e));
-    } finally {
-      setDelegating(false);
-    }
-  }, [wallet, removeSigners, refreshMe]);
+    });
+  };
 
   return (
     <Ctx.Provider
@@ -143,8 +128,6 @@ function SessionInner({ children }: { children: React.ReactNode }) {
         wallet,
         address: wallet?.address as `0x${string}` | undefined,
         me,
-        meError,
-        refreshMe,
         delegated: !!me?.delegation?.active,
         exportWallet: doExportWallet,
         delegate,
@@ -189,8 +172,8 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   );
 }
 
-// key null = idle; changing key refetches; reload() refetches keeping current data.
-export function useAsync<T>(key: string | null, fn: () => Promise<T>) {
+// key null = idle; changing key refetches; reload() refetches keeping current data; pollMs = reload on an interval.
+export function useAsync<T>(key: string | null, fn: () => Promise<T>, pollMs?: number) {
   const [nonce, setNonce] = useState(0);
   const [s, setS] = useState<{ key: string | null; nonce: number; data: T | null; error: string | null }>({
     key: null,
@@ -212,6 +195,11 @@ export function useAsync<T>(key: string | null, fn: () => Promise<T>) {
   }, [key, nonce]);
 
   const reload = useCallback(() => setNonce((n) => n + 1), []);
+  useEffect(() => {
+    if (key === null || !pollMs) return;
+    const t = setInterval(reload, pollMs);
+    return () => clearInterval(t);
+  }, [key, pollMs, reload]);
   const same = key !== null && s.key === key;
   return {
     data: same ? s.data : null,

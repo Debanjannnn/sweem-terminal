@@ -5,19 +5,20 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useState } from "react";
 import { ChevronDown, ChevronUp, ChevronsUpDown, Plus } from "lucide-react";
 import { motion } from "motion/react";
-import { fmtUsd, fmtUsdCompact, getBaskets, shortHash } from "@/lib/api";
-import { useTickers, type Ticker } from "@/lib/hooks";
+import { fmtUsd, fmtUsdCompact, getStrategies, shortHash } from "@/lib/api";
+import { useRates, useTickers } from "@/lib/hooks";
 import { useAsync } from "@/lib/session";
 import { LISTED, MARKETS } from "@/lib/tokens";
 import { cn } from "@/lib/utils";
-import type { Basket } from "@/lib/types";
+import type { Rates, Strategy } from "@/lib/types";
 import { ErrorBox, Notice, Skeleton } from "@/components/ui";
 import { HeroSearch } from "@/components/BasketSearch";
 import { Sparkline } from "@/components/Sparkline";
 import { EASE, Flash, Reveal, TabPill } from "@/components/motion";
-import { ChangeText, IconStack } from "@/components/invest/BasketCard";
+import { ChangeText, IconStack } from "@/components/IconStack";
 import { TokenIcon } from "@/components/TokenIcon";
-import { basketIndex } from "@/components/basket/index";
+import { pct } from "@/components/earn/Backtest";
+import { liveApy, parts } from "@/components/earn/sources";
 
 type Row = {
   key: string;
@@ -30,30 +31,29 @@ type Row = {
   chgUsd: number | null;
   chg: number | null;
   vol: number | null;
+  apy: number | null; // baskets: live APY fraction
 };
 
-export const basketRow = (b: Basket, tickers: Record<string, Ticker>): Row => {
-  const series = basketIndex(b.legs.map((l) => ({ weightBps: l.weightBps, candles: tickers[l.market]?.candles ?? [] }))).map((p) => p.v);
-  const chg = series.length > 1 ? series.at(-1)! - series[0] : null;
-  return {
-    key: b.id,
-    href: `/baskets/${b.id}`,
-    name: b.name,
-    sub: b.legs.map((l) => `${l.market} ${l.weightBps / 100}%`).join(" · "),
-    icons: b.legs.map((l) => l.market),
-    series,
-    price: null,
-    chgUsd: null,
-    chg,
-    vol: null,
-  };
-};
+const basketRow = (s: Strategy, rates: Rates | null | undefined): Row => ({
+  key: s.id,
+  href: `/baskets/${s.id}`,
+  name: s.name,
+  sub: parts(s).map((sl) => `${sl.asset} ${sl.weightBps / 100}%`).join(" · "),
+  icons: parts(s).map((sl) => sl.asset),
+  series: [],
+  price: null,
+  chgUsd: null,
+  chg: null,
+  vol: null,
+  apy: liveApy(s, rates),
+});
 
 export function HomePage() {
   const params = useSearchParams();
   const [tab, setTab] = useState<"tokens" | "baskets">(params.get("tab") === "baskets" ? "baskets" : "tokens");
   const { tickers, loading, error } = useTickers();
-  const baskets = useAsync("baskets", () => getBaskets());
+  const baskets = useAsync("strategies", () => getStrategies());
+  const { rates } = useRates();
   const [sort, setSort] = useState<{ key: SortKey; desc: boolean } | null>(null);
 
   const tokenRows: Row[] = LISTED.map((m) => {
@@ -69,9 +69,10 @@ export function HomePage() {
       chgUsd: t.chgUsd,
       chg: t.chg,
       vol: t.candles.length ? t.vol : null,
+      apy: null,
     };
   });
-  const basketRows = (baskets.data ?? []).map((b) => basketRow(b, tickers));
+  const basketRows = (baskets.data ?? []).map((b) => basketRow(b, rates));
   const rows = [...(tab === "tokens" ? tokenRows : basketRows)];
   if (sort) {
     const v = (r: Row) => (sort.key === "name" ? r.name : r[sort.key]);
@@ -87,7 +88,7 @@ export function HomePage() {
   const top = (list: Row[], f: (r: Row) => number | null) => list.reduce<Row | null>((m, r) => (f(r) !== null && (!m || f(r)! > f(m)!) ? r : m), null);
   const mon = tokenRows.find((r) => r.key === "MON") ?? null;
   const gainer = top(tokenRows, (r) => r.chg);
-  const topBasket = top(basketRows, (r) => r.chg);
+  const topBasket = top(basketRows, (r) => r.apy);
 
   return (
     <main className="w-full px-4 pb-24 md:px-6">
@@ -117,7 +118,7 @@ export function HomePage() {
           <Highlight title="Biggest Gainer (24H)" row={gainer} loading={loading} value={(r) => <ChangeText value={r.chg} className="gap-1.5" />} />
         </Reveal>
         <Reveal delay={0.1}>
-          <Highlight title="Top Basket (24H)" row={topBasket} loading={loading || baskets.loading} value={(r) => <ChangeText value={r.chg} className="gap-1.5" />} />
+          <Highlight title="Top Basket (live APY)" row={topBasket} loading={baskets.loading && !baskets.data} value={(r) => <span className="text-positive">{pct(r.apy)}</span>} />
         </Reveal>
       </section>
 
@@ -147,12 +148,12 @@ export function HomePage() {
         <Table
           rows={rows}
           baskets={tab === "baskets"}
-          loading={tab === "tokens" ? loading : baskets.loading || loading}
+          loading={tab === "tokens" ? loading && tokenRows.every((r) => !r.series.length) : baskets.loading && !baskets.data}
           sort={sort}
           onSort={(key) =>
             setSort((s) => (s?.key !== key ? { key, desc: key !== "name" } : s.desc === (key !== "name") ? { key, desc: !s.desc } : null))
           }
-          owners={Object.fromEntries((baskets.data ?? []).map((b) => [b.id, b.owner]))}
+          owners={Object.fromEntries((baskets.data ?? []).map((b) => [b.id, b.creatorWallet ?? b.creator]))}
         />
       </section>
     </main>
@@ -166,7 +167,11 @@ function Highlight({ title, row, value, loading }: { title: string; row: Row | n
       <div className="mt-3 rounded-[22px] border border-white/10 bg-card p-6 transition-[box-shadow,scale,translate,border-color] duration-200 ease-out hover:-translate-y-0.5 hover:border-white/15 hover:ring-2 hover:ring-white/10 active:scale-[0.98]">
         {row && !loading ? (
           <>
-            <Sparkline data={row.series} className="h-32 w-full" />
+            {row.series.length ? (
+              <Sparkline data={row.series} className="h-32 w-full" />
+            ) : (
+              <p className="grid h-32 place-items-center text-sm text-muted-foreground">{row.sub}</p>
+            )}
             <div className="mt-1 flex items-center justify-between gap-3">
               <span className="flex min-w-0 items-center gap-2.5">
                 <IconStack symbols={row.icons} size={26} ring="ring-card" />
@@ -195,7 +200,7 @@ function Highlight({ title, row, value, loading }: { title: string; row: Row | n
   );
 }
 
-type SortKey = "name" | "price" | "chgUsd" | "chg" | "vol";
+type SortKey = "name" | "price" | "chgUsd" | "chg" | "vol" | "apy";
 
 function Table({
   rows,
@@ -216,9 +221,8 @@ function Table({
   const cols: { h: string; key?: SortKey; c: string }[] = baskets
     ? [
         { h: "Basket", key: "name", c: "w-[40%] pl-6 text-left" },
-        { h: "24h (%)", key: "chg", c: "text-right" },
-        { h: "Last 24h", c: "hidden text-center lg:table-cell" },
-        { h: "Owner", c: "hidden pr-6 text-right md:table-cell" },
+        { h: "Live APY", key: "apy", c: "text-right" },
+        { h: "Creator", c: "hidden pr-6 text-right md:table-cell" },
       ]
     : [
         { h: "Token", key: "name", c: "w-[30%] pl-6 text-left" },
@@ -253,7 +257,7 @@ function Table({
             </tr>
           </thead>
           <tbody className="divide-y divide-border">
-            {loading && rows.every((r) => !r.series.length) ? (
+            {loading ? (
               [0, 1, 2].map((i) => (
                 <tr key={i} className="h-16">
                   {cols.map(({ h, c }, j) => (
@@ -296,13 +300,8 @@ function Table({
                     </td>
                     {baskets ? (
                       <>
-                        <td className={cn("px-4", cols[1].c)}>
-                          <ChangeText value={r.chg} className="justify-end" />
-                        </td>
-                        <td className={cn("px-4", cols[2].c)}>
-                          <Sparkline data={r.series} area className="mx-auto h-9 w-[140px]" />
-                        </td>
-                        <td className={cn("tnum px-4 text-muted-foreground", cols[3].c)}>{owners[r.key] ? shortHash(owners[r.key]) : "-"}</td>
+                        <td className={cn("tnum px-4 font-medium text-positive", cols[1].c)}>{pct(r.apy)}</td>
+                        <td className={cn("tnum px-4 text-muted-foreground", cols[2].c)}>{owners[r.key] ? shortHash(owners[r.key]) : "-"}</td>
                       </>
                     ) : (
                       <>

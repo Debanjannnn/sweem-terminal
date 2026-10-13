@@ -6,10 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math"
 	"math/big"
 	"net/http"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -84,7 +85,7 @@ func (p *Poller) Poll(ctx context.Context) streams.RatesSnapshot {
 		s.Rates = append(s.Rates, r)
 	}
 	for venue, pool := range map[string]config.AavePool{"aave": p.Dep.Lending.AaveV3, "neverland": p.Dep.Lending.Neverland} {
-		for _, asset := range sortedKeys(pool.ATokens) {
+		for _, asset := range slices.Sorted(maps.Keys(pool.ATokens)) {
 			apy, err := p.reserveAPY(ctx, pool.Pool, p.Dep.Tokens[asset].Address)
 			add(streams.RateInfo{Source: "lending", Venue: venue, Asset: asset, Address: streams.Addr(pool.Pool), Apy: apy, Kind: "supply"}, err)
 		}
@@ -121,15 +122,6 @@ func (p *Poller) Poll(ctx context.Context) streams.RatesSnapshot {
 
 // slug turns "Euler k3USDC" into "euler-k3usdc".
 func slug(name string) string { return strings.ToLower(strings.Join(strings.Fields(name), "-")) }
-
-func sortedKeys(m map[string]string) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
-}
 
 func sel(sig string) []byte { return crypto.Keccak256([]byte(sig))[:4] }
 

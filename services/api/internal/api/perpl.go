@@ -13,18 +13,6 @@ import (
 	"github.com/snehendu098/sweem-terminal/internal/streams"
 )
 
-// perpOf maps a basis asset to its Perpl market (planner's hedge table), in display order.
-var perpOf = []struct{ Asset, Perp string }{{"WETH", "ETH"}, {"cbBTC", "BTC"}, {"MON", "MON"}}
-
-func perpFor(asset string) (string, bool) {
-	for _, x := range perpOf {
-		if x.Asset == asset {
-			return x.Perp, true
-		}
-	}
-	return "", false
-}
-
 func (s *Server) perplReader() perpl.Reader {
 	return perpl.Reader{C: s.Chain, Exchange: s.Plan.Dep.Perpl.Exchange}
 }
@@ -67,15 +55,15 @@ func (s *Server) perplMarkets(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("rates", "err", err) // contract state still useful without funding
 	}
 	out := PerplMarkets{GuardBuffer: s.GuardBuffer.String(), GateBand: s.GateBand.String(), Markets: []PerplMarket{}}
-	for _, x := range perpOf {
-		id := s.Plan.Dep.Perpl.PerpIds[x.Perp]
+	for _, asset := range planner.HedgeAssets {
+		name, id := planner.PerpName(asset), s.Plan.PerpID(asset)
 		m, err := s.perplReader().Market(ctx, id)
 		if err != nil {
 			slog.Error("perpl market", "perp", id, "err", err)
 			fail(w, "perpl markets", ErrRPC)
 			return
 		}
-		pm := PerplMarket{Asset: x.Asset, PerpID: id, Name: x.Perp, Mark: m.Mark.String(), Oracle: m.Oracle.String(),
+		pm := PerplMarket{Asset: asset, PerpID: id, Name: name, Mark: m.Mark.String(), Oracle: m.Oracle.String(),
 			LongOI: m.LongOI.String(), ShortOI: m.ShortOI.String(), InitMargin: m.Init.Round(6).String(), MaintMargin: m.Maint.Round(6).String()}
 		if f, ok := funding(rates, id); ok {
 			pm.FundingAPR, pm.FundingAPR7d = f.AprShort.String(), f.AprShort7d.String()
@@ -162,11 +150,10 @@ func (s *Server) positionPerpl(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) perplRisk(ctx context.Context, wallet string, st planner.Strategy, leg planner.LegState) (PerplRisk, error) {
-	name, ok := perpFor(st.Asset)
-	if !ok {
+	name, id := planner.PerpName(st.Asset), s.Plan.PerpID(st.Asset)
+	if name == "" {
 		return PerplRisk{}, fmt.Errorf("no perp for %s", st.Asset)
 	}
-	id := s.Plan.Dep.Perpl.PerpIds[name]
 	p, err := s.perplReader().Position(ctx, wallet, id)
 	if err != nil {
 		return PerplRisk{}, err
@@ -202,9 +189,13 @@ func (s *Server) perplRisk(ctx context.Context, wallet string, st planner.Strate
 	}
 
 	if fg := st.Rules.FundingGate; fg != nil {
-		apr, err := s.gateAPR(ctx, id, fg.LookbackDays)
+		rates, err := s.Rates.Rates(ctx)
 		if err != nil {
 			return v, err
+		}
+		apr, ok, err := s.Store.GateAPR(ctx, rates, id, fg.LookbackDays)
+		if err != nil || !ok {
+			return v, errors.Join(err, errors.New("funding missing"))
 		}
 		th, _ := decimal.NewFromString(fg.APR)
 		want := perpl.Gate(v.Open, apr, th, s.GateBand)
@@ -214,28 +205,4 @@ func (s *Server) perplRisk(ctx context.Context, wallet string, st planner.Strate
 		}
 	}
 	return v, nil
-}
-
-// gateAPR mirrors the scheduler's fundingAPR: trailing daily average over lookbackDays, else the live 7d APR.
-func (s *Server) gateAPR(ctx context.Context, perpID, days int) (decimal.Decimal, error) {
-	if days > 0 {
-		if apr, err := s.Store.FundingAPR(ctx, perpID, days); err != nil || apr != nil {
-			return deref(apr), err
-		}
-	}
-	rates, err := s.Rates.Rates(ctx)
-	if err != nil {
-		return decimal.Zero, err
-	}
-	if f, ok := funding(rates, perpID); ok {
-		return f.AprShort7d, nil
-	}
-	return decimal.Zero, errors.New("funding missing")
-}
-
-func deref(d *decimal.Decimal) decimal.Decimal {
-	if d == nil {
-		return decimal.Zero
-	}
-	return *d
 }

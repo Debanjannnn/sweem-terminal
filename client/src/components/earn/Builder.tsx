@@ -11,12 +11,12 @@ import { TokenIcon } from "@/components/TokenIcon";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ProtocolIcon } from "@/components/ProtocolIcon";
 import { Field, inputCls } from "@/components/automation/ScheduleForm";
-import { evenSplit, setWeight, weightsError } from "@/components/create/weights";
+import { evenSplit, setWeight, weightsError } from "./weights";
 import { cn } from "@/lib/utils";
 import { BacktestView, pct } from "./Backtest";
 import { fmtAmt, StrategyFlow } from "./StrategyFlow";
 import { BasisRiskCard } from "@/components/perpl/PerplRisk";
-import { ASSETS, blendedApy, leverageOf, defaultVenue, KIND_LABEL, kindsFor, lendingVenues, MAX_TOKENS, minDeposit, PERP, sourceApy, toBacktest, protocolOf, venueName } from "./sources";
+import { ASSETS, blendedApy, leverageOf, defaultVenue, KIND_LABEL, kindsFor, lendingVenues, LP_ASSUMED_APR, MAX_TOKENS, minDeposit, PERP, sourceApy, toBacktest, protocolOf, venueName } from "./sources";
 
 type Pick = { kind: SourceKind; venue: string; bps: number; leverage: string };
 
@@ -124,13 +124,15 @@ export function StrategyBuilder() {
   }
   async function publish(pub: boolean) {
     if (!authenticated) return login();
-    if (name.trim() === "") return setError("Name your strategy");
+    if (name.trim() === "") return setError("Name your basket");
     setBusy(pub ? "public" : "private");
     setError(null);
     try {
       const body = multi ? { sleeves } : { asset: tokens[0], sources: sleeves[0].sources };
       const s = await createStrategy({ name: name.trim(), ...body, rules, public: pub });
-      router.push(`/earn/${s.id}`);
+      // carry the preview amount to the deploy panel, in USDC (single token: asset units at spot)
+      const usd = unit === "USDC" ? amt : prices[unit] ? amt * prices[unit] : 0;
+      router.push(`/baskets/${s.id}${usd > 0 ? `?amount=${usd.toFixed(2)}` : ""}`);
     } catch (e) {
       setError(errText(e));
       setBusy(null);
@@ -148,8 +150,8 @@ export function StrategyBuilder() {
     <main className="w-full px-4 pb-24 pt-8 md:px-6">
       <div className="mx-auto w-full space-y-6">
         <div>
-          <h1 className="text-xl font-medium sm:text-2xl">Build a strategy</h1>
-          <p className="mt-1 text-sm text-muted-foreground">Up to {MAX_TOKENS} tokens, each with its own mix of yield sources, plus shared rules. Backtest on mainnet history, then publish for others to follow.</p>
+          <h1 className="text-xl font-medium sm:text-2xl">Build a basket</h1>
+          <p className="mt-1 text-sm text-muted-foreground">Up to {MAX_TOKENS} tokens, each with its own mix of yield sources, plus shared rules. Backtest on mainnet history, then publish for others to buy.</p>
         </div>
 
         <div className="flex items-stretch gap-6 px-1">
@@ -171,8 +173,8 @@ export function StrategyBuilder() {
               <input
                 value={name}
                 onChange={(e) => setName(e.target.value.slice(0, 60))}
-                placeholder="Delta-neutral ETH"
-                aria-label="Strategy name"
+                placeholder="Delta-neutral ETH basket"
+                aria-label="Basket name"
                 className="w-full bg-transparent text-2xl font-medium tracking-tight outline-none placeholder:text-muted-foreground/40"
               />
               <div className="flex flex-wrap gap-2">
@@ -299,7 +301,7 @@ export function StrategyBuilder() {
                             </SelectContent>
                           </Select>
                         )}
-                        {kind === "lp" && <Notice>Estimated yield ({pct(0.13, 0)} assumed APR, no venue history) and a 4-day withdraw lock.</Notice>}
+                        {kind === "lp" && <Notice>Estimated yield ({pct(LP_ASSUMED_APR, 0)} assumed APR, no venue history) and a 4-day withdraw lock.</Notice>}
                         {kind === "basis" && (
                           <Field label={`Leverage (1–${PERP[asset].maxLev}×) on Perpl ${PERP[asset].name}`}>
                             <input className={inputCls} inputMode="decimal" value={p.leverage} onChange={(e) => update(i, { leverage: e.target.value })} />
@@ -407,7 +409,7 @@ export function StrategyBuilder() {
               {invalid && <p className="text-xs text-warning">{invalid}</p>}
               {error && <ErrorBox message={error} />}
               <Button className="w-full py-3" pending={busy === "public"} disabled={!ready || !!invalid || busy !== null} onClick={() => void publish(true)}>
-                {authenticated ? "Publish strategy" : "Log in to publish"}
+                {authenticated ? "Publish basket" : "Log in to publish"}
               </Button>
               {authenticated && (
                 <Button variant="ghost" className="w-full" pending={busy === "private"} disabled={!!invalid || busy !== null} onClick={() => void publish(false)}>
@@ -415,7 +417,7 @@ export function StrategyBuilder() {
                 </Button>
               )}
               <p className="text-xs leading-relaxed text-muted-foreground">
-                Followers run the same allocation in their own wallets. Open fee 0.4%, you earn 0.2% on followers.
+                Buyers run the same allocation in their own wallets. Open fee 0.4%, you earn 0.2% on every buy.
               </p>
             </Panel>
           </div>

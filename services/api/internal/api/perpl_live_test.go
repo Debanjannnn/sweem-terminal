@@ -25,7 +25,7 @@ func TestLivePerplRisk(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &Server{Chain: c, Plan: &planner.Planner{Dep: testDep(t)}, Rates: liveRates{},
+	s := &Server{Chain: c, Plan: &planner.Planner{Dep: testDep(t)}, Rates: liveRates{}, Store: PG{}, // lookback 0: no DB
 		GuardBuffer: decimal.RequireFromString("0.03"), GateBand: decimal.RequireFromString("0.02")}
 	st := planner.Strategy{Asset: "WETH", Sources: []planner.Source{{Kind: "basis", Venue: "perpl", WeightBps: 10000}},
 		Rules: planner.Rules{FundingGate: &planner.Gate{APR: "0.10"}}}

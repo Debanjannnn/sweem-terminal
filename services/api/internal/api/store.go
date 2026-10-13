@@ -9,7 +9,9 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
+	"github.com/snehendu098/sweem-terminal/internal/pg"
 	"github.com/snehendu098/sweem-terminal/internal/planner"
+	"github.com/snehendu098/sweem-terminal/internal/streams"
 )
 
 type Store interface {
@@ -25,13 +27,6 @@ type Store interface {
 	Executions(ctx context.Context, did string, before *time.Time) ([]Execution, error) // newest first, 200 per page
 	Execution(ctx context.Context, did, id string) (Execution, error)
 
-	BasketDefs(ctx context.Context, owner string) ([]Basket, error)                 // owner "" = public
-	BasketDef(ctx context.Context, did, id string) (Basket, error)                  // public or did's own
-	SaveBasket(ctx context.Context, did, id string, in BasketInput) (Basket, error) // id "" creates
-	DeleteBasket(ctx context.Context, did, id string) error
-	BasketFills(ctx context.Context, did, wallet, basketID string) ([]planner.ExecFills, error)
-	Attributions(ctx context.Context, did, wallet string) (map[string][]planner.ExecFills, map[string]string, error)
-
 	CreateOrder(ctx context.Context, did string, o Order, e NewExec) (orderID, execID string, err error)
 	Orders(ctx context.Context, did string) ([]Order, error)
 	Order(ctx context.Context, did, id string) (Order, error)
@@ -43,13 +38,14 @@ type Store interface {
 	SetBacktest(ctx context.Context, id string, summary json.RawMessage) error
 
 	HasPerplAccount(ctx context.Context, did, wallet string) (bool, error)
-	FundingAPR(ctx context.Context, perpID, days int) (*decimal.Decimal, error) // trailing daily avg × 365 (scheduler's gate input); nil = no data
+	GateAPR(ctx context.Context, r streams.RatesSnapshot, perpID, days int) (decimal.Decimal, bool, error) // the scheduler's funding-gate input
 	OpenPosition(ctx context.Context, did, wallet string, st Strategy, principal string, plan planner.Plan, fee, creatorOwed string) (posID, execID string, err error)
 	Positions(ctx context.Context, did string) ([]Position, error)
 	Position(ctx context.Context, did, id string) (Position, planner.Strategy, error)
 	Peers(ctx context.Context, did, exceptID string) ([]planner.Peer, error)
 	LastWithdraw(ctx context.Context, posID string) (w LastWithdraw, found bool, err error)
-	StartWithdraw(ctx context.Context, did, posID string, e NewExec) (string, error) // open or withdrawing (no run in flight) → withdrawing
+	StartWithdraw(ctx context.Context, did, posID string, e NewExec) (string, error)   // open or withdrawing (no run in flight) → withdrawing
+	PartialWithdraw(ctx context.Context, did, posID string, e NewExec) (string, error) // open, nothing in flight; stays open
 	SettlePosition(ctx context.Context, posID, status string) error
 
 	CreatePrepare(ctx context.Context, did string, p Prepare) (string, error)
@@ -84,8 +80,8 @@ type Delegation struct {
 type NewExec struct {
 	Kind       string
 	Steps      []planner.Step
-	BasketID   *string
 	PositionID *string
+	Legs       []planner.LegState // position legs after the run; the scheduler's reconcile applies them on confirm
 }
 
 type Execution struct {
@@ -101,18 +97,8 @@ type Execution struct {
 	Error      *string         `json:"error"`
 	ScheduleID *string         `json:"scheduleId"`
 	PositionID *string         `json:"positionId"`
-	BasketID   *string         `json:"basketId"`
 	CreatedAt  time.Time       `json:"createdAt"`
 	UpdatedAt  time.Time       `json:"updatedAt"`
-}
-
-type Basket struct {
-	ID        string        `json:"id"`
-	Owner     string        `json:"owner"`
-	Name      string        `json:"name"`
-	Legs      []planner.Leg `json:"legs"`
-	Public    bool          `json:"public"`
-	CreatedAt time.Time     `json:"createdAt"`
 }
 
 type Order struct {
@@ -186,7 +172,6 @@ type Prepare struct {
 	ID          string
 	Wallet      string
 	Kind        string
-	BasketID    *string
 	Steps       []planner.Step
 	Txs         []planner.TxRequest
 	ExpiresAt   time.Time
@@ -285,9 +270,13 @@ func insertExec(ctx context.Context, q querier, did string, e NewExec) (string, 
 	if err != nil {
 		return "", err
 	}
+	var legs []byte // nil ⇒ SQL null
+	if e.Legs != nil {
+		legs, _ = json.Marshal(e.Legs)
+	}
 	var id string
-	err = q.QueryRow(ctx, `insert into executions(user_id, slot, kind, steps, basket_id, position_id)
-values ($1, 0, $2, $3, $4, $5) returning id::text`, did, e.Kind, steps, e.BasketID, e.PositionID).Scan(&id)
+	err = q.QueryRow(ctx, `insert into executions(user_id, slot, kind, steps, position_id, legs)
+values ($1, 0, $2, $3, $4, $5) returning id::text`, did, e.Kind, steps, e.PositionID, legs).Scan(&id)
 	return id, err
 }
 
@@ -302,13 +291,13 @@ func (p PG) FailExecution(ctx context.Context, id, code string) error {
 }
 
 const execSQL = `select e.id::text, e.kind, e.signer, e.status, e.step_done, coalesce(jsonb_array_length(e.steps),0), coalesce(e.steps,'[]'),
-  e.tx_hashes, e.tx_hash, e.error, e.schedule_id::text, e.position_id::text, e.basket_id::text, e.created_at, e.updated_at
+  e.tx_hashes, e.tx_hash, e.error, e.schedule_id::text, e.position_id::text, e.created_at, e.updated_at
 from executions e left join schedules s on s.id=e.schedule_id where coalesce(e.user_id, s.user_id)=$1`
 
 func scanExec(r pgx.CollectableRow) (Execution, error) {
 	var e Execution
 	return e, r.Scan(&e.ID, &e.Kind, &e.Signer, &e.Status, &e.StepDone, &e.StepsTotal, &e.Steps, &e.TxHashes, &e.TxHash, &e.Error,
-		&e.ScheduleID, &e.PositionID, &e.BasketID, &e.CreatedAt, &e.UpdatedAt)
+		&e.ScheduleID, &e.PositionID, &e.CreatedAt, &e.UpdatedAt)
 }
 
 func (p PG) Executions(ctx context.Context, did string, before *time.Time) ([]Execution, error) {
@@ -323,74 +312,6 @@ func (p PG) Execution(ctx context.Context, did, id string) (Execution, error) {
 	rows, _ := p.DB.Query(ctx, execSQL+` and e.id=$2`, did, id)
 	e, err := pgx.CollectExactlyOneRow(rows, scanExec)
 	return e, notFound(err)
-}
-
-const basketCols = `id::text, owner, name, legs, public, created_at`
-
-func scanBasket(r pgx.CollectableRow) (Basket, error) {
-	var b Basket
-	return b, r.Scan(&b.ID, &b.Owner, &b.Name, &b.Legs, &b.Public, &b.CreatedAt)
-}
-
-func (p PG) BasketDefs(ctx context.Context, owner string) ([]Basket, error) {
-	rows, _ := p.DB.Query(ctx, `select `+basketCols+` from basket_defs where ($1='' and public) or owner=$1 order by created_at desc limit 500`, owner)
-	return collect(rows, scanBasket)
-}
-
-func (p PG) BasketDef(ctx context.Context, did, id string) (Basket, error) {
-	rows, _ := p.DB.Query(ctx, `select `+basketCols+` from basket_defs where id=$2 and (public or owner=$1)`, did, id)
-	b, err := pgx.CollectExactlyOneRow(rows, scanBasket)
-	return b, notFound(err)
-}
-
-func (p PG) SaveBasket(ctx context.Context, did, id string, in BasketInput) (Basket, error) {
-	legs, _ := json.Marshal(in.Legs)
-	var rows pgx.Rows
-	if id == "" {
-		rows, _ = p.DB.Query(ctx, `insert into basket_defs(owner, name, legs, public) values ($1,$2,$3,$4) returning `+basketCols, did, in.Name, legs, in.Public)
-	} else {
-		rows, _ = p.DB.Query(ctx, `update basket_defs set name=$3, legs=$4, public=$5 where id=$2 and owner=$1 returning `+basketCols, did, id, in.Name, legs, in.Public)
-	}
-	b, err := pgx.CollectExactlyOneRow(rows, scanBasket)
-	return b, notFound(err)
-}
-
-func (p PG) DeleteBasket(ctx context.Context, did, id string) error {
-	tag, err := p.DB.Exec(ctx, `delete from basket_defs where id=$2 and owner=$1`, did, id)
-	if err == nil && tag.RowsAffected() == 0 {
-		return ErrNotFound
-	}
-	return err
-}
-
-// fillsSQL: confirmed basket executions with the indexer's taker fills (Kuru Trade size) per tx of ours.
-const fillsSQL = `select e.basket_id::text, coalesce(b.name,''), e.steps, e.tx_hashes,
-  coalesce((select jsonb_object_agg(lower(t.tx_hash), t.sz) from (select tx_hash, sum(size)::text sz from user_trades
-    where tx_hash = any(e.tx_hashes) and role='taker' and lower(wallet)=$2 group by tx_hash) t), '{}')
-from executions e left join basket_defs b on b.id=e.basket_id
-where e.user_id=$1 and e.basket_id is not null and e.status='confirmed' and ($3='' or e.basket_id::text=$3)
-order by e.created_at`
-
-func (p PG) fills(ctx context.Context, did, wallet, basketID string) (map[string][]planner.ExecFills, map[string]string, error) {
-	rows, _ := p.DB.Query(ctx, fillsSQL, did, wallet, basketID)
-	out, names := map[string][]planner.ExecFills{}, map[string]string{}
-	var id, name string
-	var e planner.ExecFills
-	_, err := pgx.ForEachRow(rows, []any{&id, &name, &e.Steps, &e.TxHashes, &e.Fills}, func() error {
-		out[id], names[id] = append(out[id], e), name
-		e = planner.ExecFills{}
-		return nil
-	})
-	return out, names, err
-}
-
-func (p PG) BasketFills(ctx context.Context, did, wallet, basketID string) ([]planner.ExecFills, error) {
-	m, _, err := p.fills(ctx, did, wallet, basketID)
-	return m[basketID], err
-}
-
-func (p PG) Attributions(ctx context.Context, did, wallet string) (map[string][]planner.ExecFills, map[string]string, error) {
-	return p.fills(ctx, did, wallet, "")
 }
 
 func (p PG) CreateOrder(ctx context.Context, did string, o Order, e NewExec) (orderID, execID string, err error) {
@@ -475,15 +396,8 @@ func (p PG) SetBacktest(ctx context.Context, id string, summary json.RawMessage)
 	return err
 }
 
-func (p PG) FundingAPR(ctx context.Context, perpID, days int) (*decimal.Decimal, error) {
-	var apr *string
-	err := p.DB.QueryRow(ctx, `select (avg(rate) * 365)::text from series_funding_daily
-		where perp_id = $1 and day >= (now() at time zone 'utc')::date - $2::int and day < (now() at time zone 'utc')::date`, perpID, days).Scan(&apr)
-	if err != nil || apr == nil {
-		return nil, err
-	}
-	v, err := decimal.NewFromString(*apr)
-	return &v, err
+func (p PG) GateAPR(ctx context.Context, r streams.RatesSnapshot, perpID, days int) (decimal.Decimal, bool, error) {
+	return pg.GateAPR(ctx, p.DB, r, perpID, days)
 }
 
 // HasPerplAccount: the indexer saw AccountCreated, or a confirmed plan of ours created it (indexer lag).
@@ -497,10 +411,8 @@ func (p PG) HasPerplAccount(ctx context.Context, did, wallet string) (bool, erro
 }
 
 func (p PG) OpenPosition(ctx context.Context, did, wallet string, st Strategy, principal string, plan planner.Plan, fee, creatorOwed string) (posID, execID string, err error) {
-	legs, _ := json.Marshal(plan.Legs)
 	err = pgx.BeginFunc(ctx, p.DB, func(tx pgx.Tx) error {
-		if err := tx.QueryRow(ctx, `insert into strategy_positions(strategy_id, user_id, wallet, principal_usdc, legs) values ($1,$2,$3,$4::numeric,$5) returning id::text`,
-			st.ID, did, wallet, principal, legs).Scan(&posID); err != nil {
+		if posID, err = pg.InsertPosition(ctx, tx, st.ID, did, wallet, principal, plan.Legs); err != nil {
 			return err
 		}
 		if execID, err = insertExec(ctx, tx, did, NewExec{Kind: "deploy", Steps: plan.Steps, PositionID: &posID}); err != nil {
@@ -510,12 +422,7 @@ func (p PG) OpenPosition(ctx context.Context, did, wallet string, st Strategy, p
 		if st.Creator != did {
 			creator = &st.Creator
 		}
-		if _, err := tx.Exec(ctx, `update strategy_positions set execution_id=$2 where id=$1`, posID, execID); err != nil {
-			return err
-		}
-		_, err := tx.Exec(ctx, `insert into fee_ledger(execution_id, user_id, strategy_id, creator, fee_usdc, creator_owed_usdc) values ($1,$2,$3,$4,$5::numeric,$6::numeric)`,
-			execID, did, st.ID, creator, fee, creatorOwed)
-		return err
+		return pg.LinkDeploy(ctx, tx, posID, execID, did, st.ID, creator, fee, creatorOwed)
 	})
 	return
 }
@@ -571,6 +478,27 @@ order by created_at desc limit 1`, posID).Scan(&w.Status, &w.Steps, &w.StepDone)
 }
 
 // StartWithdraw claims the position (row lock): open, or withdrawing with no withdraw run in flight.
+// PartialWithdraw sells part of an open position; its legs (e.Legs) land via the scheduler's reconcile on confirm.
+func (p PG) PartialWithdraw(ctx context.Context, did, posID string, e NewExec) (execID string, err error) {
+	err = pgx.BeginFunc(ctx, p.DB, func(tx pgx.Tx) error {
+		var status string
+		var busy bool
+		if err := tx.QueryRow(ctx, `select status, exists(select 1 from executions where position_id=$1 and (status in ('pending','submitted') or legs is not null))
+from strategy_positions where id=$1 and user_id=$2 for update`, posID, did).Scan(&status, &busy); err != nil {
+			return notFound(err)
+		}
+		if status != "open" {
+			return ErrNotOpen
+		}
+		if busy {
+			return ErrWithdrawBusy
+		}
+		execID, err = insertExec(ctx, tx, did, e)
+		return err
+	})
+	return
+}
+
 func (p PG) StartWithdraw(ctx context.Context, did, posID string, e NewExec) (execID string, err error) {
 	err = pgx.BeginFunc(ctx, p.DB, func(tx pgx.Tx) error {
 		var status string
@@ -599,7 +527,7 @@ func (p PG) SettlePosition(ctx context.Context, posID, status string) error {
 	return err
 }
 
-const scheduleCols = `id::text, kind, coalesce(target_type,'basket'), coalesce(target_id, basket, ''), amount_usdc::text, interval_seconds, next_run_at,
+const scheduleCols = `id::text, kind, target_type, target_id, amount_usdc::text, interval_seconds, next_run_at,
   trigger_price::text, sell_bps, drift_bps, max_slippage_bps, max_per_run_usdc::text, active, created_at`
 
 func scanSchedule(r pgx.CollectableRow) (Schedule, error) {
@@ -609,14 +537,14 @@ func scanSchedule(r pgx.CollectableRow) (Schedule, error) {
 }
 
 func (p PG) Schedules(ctx context.Context, did string) ([]Schedule, error) {
-	rows, _ := p.DB.Query(ctx, `select `+scheduleCols+` from schedules where user_id=$1 order by created_at desc`, did)
+	rows, _ := p.DB.Query(ctx, `select `+scheduleCols+` from schedules where user_id=$1 and target_type is not null order by created_at desc`, did)
 	return collect(rows, scanSchedule)
 }
 
 func (p PG) CreateSchedule(ctx context.Context, did string, in ScheduleInput) (Schedule, error) {
 	var target, deleg bool
 	if err := p.DB.QueryRow(ctx, `select case $2
-    when 'basket' then exists(select 1 from basket_defs where id::text=$3 and (public or owner=$1))
+    when 'strategy' then exists(select 1 from strategies where id::text=$3 and (public or creator=$1))
     when 'position' then exists(select 1 from strategy_positions where id::text=$3 and user_id=$1)
     else true end,
   exists(select 1 from delegations where user_id=$1 and active)`, did, in.Target.Type, in.Target.ID).Scan(&target, &deleg); err != nil {
@@ -708,15 +636,15 @@ func (p PG) CreatePrepare(ctx context.Context, did string, x Prepare) (string, e
 		return "", err
 	}
 	var id string
-	err := p.DB.QueryRow(ctx, `insert into trade_prepares(user_id, wallet, kind, basket_id, steps, txs, expires_at) values ($1,$2,$3,$4,$5,$6,$7) returning id::text`,
-		did, x.Wallet, x.Kind, x.BasketID, steps, txs, x.ExpiresAt).Scan(&id)
+	err := p.DB.QueryRow(ctx, `insert into trade_prepares(user_id, wallet, kind, steps, txs, expires_at) values ($1,$2,$3,$4,$5,$6) returning id::text`,
+		did, x.Wallet, x.Kind, steps, txs, x.ExpiresAt).Scan(&id)
 	return id, err
 }
 
 func (p PG) Prepare(ctx context.Context, did, id string) (Prepare, error) {
 	x := Prepare{ID: id}
-	err := p.DB.QueryRow(ctx, `select wallet, kind, basket_id::text, steps, txs, expires_at, execution_id::text from trade_prepares where id=$1 and user_id=$2`, id, did).
-		Scan(&x.Wallet, &x.Kind, &x.BasketID, &x.Steps, &x.Txs, &x.ExpiresAt, &x.ExecutionID)
+	err := p.DB.QueryRow(ctx, `select wallet, kind, steps, txs, expires_at, execution_id::text from trade_prepares where id=$1 and user_id=$2`, id, did).
+		Scan(&x.Wallet, &x.Kind, &x.Steps, &x.Txs, &x.ExpiresAt, &x.ExecutionID)
 	return x, notFound(err)
 }
 
@@ -736,8 +664,8 @@ func (p PG) RecordPrepare(ctx context.Context, did string, x Prepare, status str
 		if len(stepHashes) > 0 {
 			last = &stepHashes[len(stepHashes)-1]
 		}
-		if err := tx.QueryRow(ctx, `insert into executions(user_id, slot, kind, steps, basket_id, status, step_done, tx_hashes, tx_hash, signer)
-values ($1, 0, $2, $3, $4, $5, $6, $7, $8, 'client') returning id::text`, did, x.Kind, steps, x.BasketID, status, len(stepHashes), stepHashes, last).Scan(&execID); err != nil {
+		if err := tx.QueryRow(ctx, `insert into executions(user_id, slot, kind, steps, status, step_done, tx_hashes, tx_hash, signer)
+values ($1, 0, $2, $3, $4, $5, $6, $7, 'client') returning id::text`, did, x.Kind, steps, status, len(stepHashes), stepHashes, last).Scan(&execID); err != nil {
 			return err
 		}
 		_, err := tx.Exec(ctx, `update trade_prepares set execution_id=$2 where id=$1`, x.ID, execID)

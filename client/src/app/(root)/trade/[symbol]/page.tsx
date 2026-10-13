@@ -4,11 +4,11 @@ import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useState } from "react";
 import { motion } from "motion/react";
-import { fmtUsd, fmtUsdCompact } from "@/lib/api";
+import { fmtNum, fmtUsd, fmtUsdCompact } from "@/lib/api";
 import { addressUrl } from "@/lib/config";
 import { mid, useBook, useCandles, useHoldings } from "@/lib/hooks";
 import { marketOf, pairsOf } from "@/lib/tokens";
-import { Button, Card, Detail, Notice, Panel, PanelTabs, Stat } from "@/components/ui";
+import { Button, Card, Detail, Notice, Panel, Stat } from "@/components/ui";
 import { TokenIcon } from "@/components/TokenIcon";
 import { PriceChart, RANGES, type Range } from "@/components/chart/PriceChart";
 import { OrderBook } from "@/components/trade/OrderBook";
@@ -98,7 +98,7 @@ export default function TradePage() {
               <Stat label="24h high" value={day24.loading ? null : hs.length ? fmtUsd(Math.max(...hs)) : "-"} />
               <Stat label="24h low" value={day24.loading ? null : ls.length ? fmtUsd(Math.min(...ls)) : "-"} />
               <Stat label="24h volume" value={day24.loading ? null : day24.candles.length ? fmtUsdCompact(vol) : "-"} />
-              <Stat label="Your balance" value={held ? Number(held.amount).toLocaleString("en-US", { maximumFractionDigits: 6 }) : "-"} note={held && price ? fmtUsd(Number(held.amount) * price) : undefined} />
+              <Stat label="Your balance" value={held ? fmtNum(Number(held.amount), 6) : "-"} note={held && price ? fmtUsd(Number(held.amount) * price) : undefined} />
             </dl>
           </Card>
 
@@ -124,8 +124,9 @@ export default function TradePage() {
         </div>
 
         <aside className="space-y-3 lg:sticky lg:top-24 lg:self-start">
-          <PanelTabs
+          <Segmented
             id="trade"
+            size="lg"
             value={tab}
             onChange={setTab}
             options={[

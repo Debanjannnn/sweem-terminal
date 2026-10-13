@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"maps"
 	"math/big"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -17,7 +19,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/snehendu098/sweem-terminal/internal/config"
 
-	"github.com/shopspring/decimal"
 	"github.com/snehendu098/sweem-terminal/internal/httpx"
 	"github.com/snehendu098/sweem-terminal/internal/planner"
 )
@@ -41,70 +42,6 @@ func (s *Server) markets(w http.ResponseWriter, _ *http.Request) {
 	httpx.JSON(w, http.StatusOK, map[string]any{"tokens": s.Plan.Dep.Tokens, "markets": ms})
 }
 
-func (s *Server) publicBaskets(w http.ResponseWriter, r *http.Request) {
-	v, err := s.Store.BasketDefs(r.Context(), "")
-	reply(w, "baskets", v, err)
-}
-
-func (s *Server) publicBasket(w http.ResponseWriter, r *http.Request) {
-	if id, ok := id(w, r); ok {
-		v, err := s.Store.BasketDef(r.Context(), "", id)
-		reply(w, "basket", v, err)
-	}
-}
-
-func (s *Server) myBaskets(w http.ResponseWriter, r *http.Request) {
-	v, err := s.Store.BasketDefs(r.Context(), did(r))
-	reply(w, "my baskets", v, err)
-}
-
-type BasketInput struct {
-	Name   string        `json:"name"`
-	Legs   []planner.Leg `json:"legs"`
-	Public bool          `json:"public"`
-}
-
-// saveBasket creates (no id) or updates (own id) a basket definition.
-func (s *Server) saveBasket(w http.ResponseWriter, r *http.Request) {
-	bid := r.PathValue("id")
-	if bid != "" {
-		var ok bool
-		if bid, ok = id(w, r); !ok {
-			return
-		}
-	}
-	var in BasketInput
-	if !decode(w, r, &in) {
-		return
-	}
-	in.Name = strings.TrimSpace(in.Name)
-	if in.Name == "" || len(in.Name) > 64 {
-		httpx.Error(w, http.StatusBadRequest, "invalid_name")
-		return
-	}
-	if err := s.Plan.ValidateLegs(in.Legs); err != nil {
-		fail(w, "legs", err)
-		return
-	}
-	v, err := s.Store.SaveBasket(r.Context(), did(r), bid, in)
-	if err != nil {
-		fail(w, "save basket", err)
-		return
-	}
-	status := http.StatusOK
-	if bid == "" {
-		status = http.StatusCreated
-	}
-	httpx.JSON(w, status, v)
-}
-
-func (s *Server) deleteBasket(w http.ResponseWriter, r *http.Request) {
-	if id, ok := id(w, r); ok {
-		err := s.Store.DeleteBasket(r.Context(), did(r), id)
-		reply(w, "delete basket", map[string]bool{"deleted": true}, err)
-	}
-}
-
 // launch inserts a plain execution and starts it.
 func (s *Server) launch(w http.ResponseWriter, r *http.Request, e NewExec, extra map[string]any, after func(context.Context, bool)) {
 	execID, err := s.Store.InsertExecution(r.Context(), did(r), e)
@@ -116,120 +53,54 @@ func (s *Server) launch(w http.ResponseWriter, r *http.Request, e NewExec, extra
 	accepted(w, execID, e.Kind, e.Steps, extra)
 }
 
-// TradeInput is the body of /me/trade, /me/baskets/{id}/buy|sell and /me/trade/prepare (Kind picks which).
+// TradeInput is the body of /me/trade and /me/trade/prepare.
 type TradeInput struct {
-	Kind        string `json:"kind"` // trade | basket_buy | basket_sell
+	Kind        string `json:"kind"` // trade
 	Market      string `json:"market"`
 	Side        string `json:"side"`
 	Amount      string `json:"amount"`
-	BasketID    string `json:"basketId"`
-	AmountUsdc  string `json:"amountUsdc"`
-	Bps         *int   `json:"bps"`
 	SlippageBps *int   `json:"slippageBps"`
 	Wallet      string `json:"wallet"` // prepare only: the Privy embedded wallet that will sign
 }
 
 var errBad = &planner.Error{Code: "bad_request", Detail: "invalid trade input"}
 
-// planTrade turns a trade input into a plan for wallet; basket runs return their basket id for attribution.
-func (s *Server) planTrade(ctx context.Context, me, wallet string, in TradeInput) ([]planner.Step, *string, error) {
+// planTrade turns a market trade input into a plan.
+func (s *Server) planTrade(ctx context.Context, in TradeInput) ([]planner.Step, error) {
 	sl, ok := slip(in.SlippageBps)
-	if !ok {
-		return nil, nil, errBad
+	m, okm := s.Plan.Dep.Kuru.Markets[in.Market]
+	amt, oka := human(in.Amount)
+	if !ok || in.Kind != "trade" || !okm || !oka {
+		return nil, errBad
 	}
-	switch in.Kind {
-	case "trade":
-		m, okm := s.Plan.Dep.Kuru.Markets[in.Market]
-		amt, oka := human(in.Amount)
-		if !okm || !oka {
-			return nil, nil, errBad
-		}
-		switch in.Side {
-		case "buy":
-			atoms, _ := s.Plan.ToAtoms(m.Quote, amt)
-			steps, err := s.Plan.MarketBuy(ctx, in.Market, atoms, sl)
-			return steps, nil, err
-		case "sell":
-			atoms, _ := s.Plan.ToAtoms(m.Base, amt)
-			steps, err := s.Plan.MarketSell(ctx, in.Market, atoms, sl)
-			return steps, nil, err
-		}
-		return nil, nil, errBad
-	case "basket_buy", "basket_sell":
-		if uuid.Validate(in.BasketID) != nil {
-			return nil, nil, errBad
-		}
-		bid := in.BasketID
-		b, err := s.Store.BasketDef(ctx, me, bid)
-		if err != nil {
-			return nil, nil, err
-		}
-		if in.Kind == "basket_buy" {
-			amt, ok := human(in.AmountUsdc)
-			if !ok {
-				return nil, nil, errBad
-			}
-			atoms, _ := s.Plan.ToAtoms("USDC", amt)
-			steps, err := s.Plan.BasketBuy(ctx, b.Legs, atoms, sl)
-			return steps, &bid, err
-		}
-		part := 10_000
-		if in.Bps != nil {
-			part = *in.Bps
-		}
-		if part < 1 || part > 10_000 {
-			return nil, nil, errBad
-		}
-		fills, err := s.Store.BasketFills(ctx, me, wallet, bid)
-		if err != nil {
-			return nil, nil, err
-		}
-		held := s.Plan.AttributeFills(fills)
-		var legs []planner.SellLeg
-		for _, l := range b.Legs {
-			amt := held[l.Market].Amount.Mul(decimal.NewFromInt(int64(part))).Div(decimal.NewFromInt(10_000)).Floor()
-			if !amt.IsPositive() {
-				continue
-			}
-			bal, err := planner.WalletBalance(ctx, s.Chain, s.Plan.Dep, wallet, s.Plan.Dep.Kuru.Markets[l.Market].Base)
-			if err != nil {
-				slog.Error("rpc balance", "err", err)
-				return nil, nil, ErrRPC
-			}
-			legs = append(legs, planner.SellLeg{Market: l.Market, Amount: decimal.Min(amt, bal)})
-		}
-		steps, err := s.Plan.BasketSell(ctx, legs, sl)
-		return steps, &bid, err
+	switch in.Side {
+	case "buy":
+		atoms, _ := s.Plan.ToAtoms(m.Quote, amt)
+		return s.Plan.MarketBuy(ctx, in.Market, atoms, sl)
+	case "sell":
+		atoms, _ := s.Plan.ToAtoms(m.Base, amt)
+		return s.Plan.MarketSell(ctx, in.Market, atoms, sl)
 	}
-	return nil, nil, errBad
+	return nil, errBad
 }
 
-// delegatedTrade runs a trade on the executor from the delegated wallet.
-func (s *Server) delegatedTrade(kind string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var in TradeInput
-		if !decode(w, r, &in) {
-			return
-		}
-		in.Kind = kind
-		if kind != "trade" {
-			var ok bool
-			if in.BasketID, ok = id(w, r); !ok {
-				return
-			}
-		}
-		wallet, err := s.Store.Wallet(r.Context(), did(r))
-		var steps []planner.Step
-		var bid *string
-		if err == nil {
-			steps, bid, err = s.planTrade(r.Context(), did(r), wallet, in)
-		}
-		if err != nil {
-			fail(w, "plan "+kind, err)
-			return
-		}
-		s.launch(w, r, NewExec{Kind: kind, Steps: steps, BasketID: bid}, nil, nil)
+// delegatedTrade runs a market trade on the executor from the delegated wallet.
+func (s *Server) delegatedTrade(w http.ResponseWriter, r *http.Request) {
+	var in TradeInput
+	if !decode(w, r, &in) {
+		return
 	}
+	in.Kind = "trade"
+	_, err := s.Store.Wallet(r.Context(), did(r))
+	var steps []planner.Step
+	if err == nil {
+		steps, err = s.planTrade(r.Context(), in)
+	}
+	if err != nil {
+		fail(w, "plan trade", err)
+		return
+	}
+	s.launch(w, r, NewExec{Kind: "trade", Steps: steps}, nil, nil)
 }
 
 const prepareTTL = 2 * time.Minute
@@ -245,7 +116,7 @@ func (s *Server) prepare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx, me, wallet := r.Context(), did(r), strings.ToLower(in.Wallet)
-	steps, bid, err := s.planTrade(ctx, me, wallet, in)
+	steps, err := s.planTrade(ctx, in)
 	if err != nil {
 		fail(w, "plan prepare", err)
 		return
@@ -256,7 +127,7 @@ func (s *Server) prepare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	expires := time.Now().Add(prepareTTL).UTC().Truncate(time.Second)
-	pid, err := s.Store.CreatePrepare(ctx, me, Prepare{Wallet: wallet, Kind: in.Kind, BasketID: bid, Steps: steps, Txs: txs, ExpiresAt: expires})
+	pid, err := s.Store.CreatePrepare(ctx, me, Prepare{Wallet: wallet, Kind: in.Kind, Steps: steps, Txs: txs, ExpiresAt: expires})
 	if err != nil {
 		fail(w, "create prepare", err)
 		return
@@ -467,39 +338,16 @@ type TokenBalance struct {
 	Amount  string `json:"amount"`
 }
 
-type LegHolding struct {
-	Market      string `json:"market"`
-	Raw         string `json:"raw"`
-	Amount      string `json:"amount"`
-	Provisional bool   `json:"provisional"` // some buy/sell not indexed yet: planned amount stands in for its fill
-}
-
-type BasketHolding struct {
-	BasketID string       `json:"basketId"`
-	Name     string       `json:"name"`
-	Legs     []LegHolding `json:"legs"`
-}
-
 func (s *Server) holdings(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	wallet, err := s.Store.KnownWallet(ctx, did(r))
-	var att map[string][]planner.ExecFills
-	var names map[string]string
-	if err == nil {
-		att, names, err = s.Store.Attributions(ctx, did(r), wallet)
-	}
 	if err != nil {
 		fail(w, "holdings", err)
 		return
 	}
 	dep := s.Plan.Dep
-	syms := make([]string, 0, len(dep.Tokens))
-	for sym := range dep.Tokens {
-		syms = append(syms, sym)
-	}
-	sort.Strings(syms)
 	toks := []TokenBalance{}
-	for _, sym := range syms {
+	for _, sym := range slices.Sorted(maps.Keys(dep.Tokens)) {
 		// ponytail: one RPC call per token; batch (multicall) when the token list grows
 		raw, err := planner.WalletBalance(ctx, s.Chain, dep, wallet, sym)
 		if err != nil {
@@ -510,17 +358,5 @@ func (s *Server) holdings(w http.ResponseWriter, r *http.Request) {
 		t := dep.Tokens[sym]
 		toks = append(toks, TokenBalance{sym, strings.ToLower(t.Address), raw.String(), raw.Shift(-int32(t.Decimals)).String()})
 	}
-	bs := []BasketHolding{}
-	for bid, execs := range att {
-		h := BasketHolding{BasketID: bid, Name: names[bid], Legs: []LegHolding{}}
-		for m, v := range s.Plan.AttributeFills(execs) {
-			h.Legs = append(h.Legs, LegHolding{m, v.Amount.String(), v.Amount.Shift(-int32(dep.Tokens[dep.Kuru.Markets[m].Base].Decimals)).String(), v.Provisional})
-		}
-		sort.Slice(h.Legs, func(i, j int) bool { return h.Legs[i].Market < h.Legs[j].Market })
-		if len(h.Legs) > 0 {
-			bs = append(bs, h)
-		}
-	}
-	sort.Slice(bs, func(i, j int) bool { return bs[i].BasketID < bs[j].BasketID })
-	httpx.JSON(w, http.StatusOK, map[string]any{"wallet": wallet, "tokens": toks, "baskets": bs})
+	httpx.JSON(w, http.StatusOK, map[string]any{"wallet": wallet, "tokens": toks})
 }

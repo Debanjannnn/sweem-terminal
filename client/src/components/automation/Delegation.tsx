@@ -33,7 +33,7 @@ export function DelegationCard({ compact = false }: { compact?: boolean }) {
           <p className="mt-1 text-xs leading-5 text-muted-foreground">
             {delegated
               ? `Enabled ${fmtTime(me!.delegation!.createdAt)}. Revoking stops every schedule.`
-              : "Lets DCA, TP/SL and strategies run from your wallet while you're offline."}
+              : "Lets DCA, TP/SL and baskets run from your wallet while you're offline."}
           </p>
         </div>
       </div>

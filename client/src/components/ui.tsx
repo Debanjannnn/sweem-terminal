@@ -2,7 +2,6 @@
 
 import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
-import { TabPill } from "./motion";
 
 export function useDismissable() {
   const [open, setOpen] = useState(false);
@@ -113,28 +112,6 @@ export function Label({ children }: { children: React.ReactNode }) {
   return <span className="text-sm text-muted-foreground">{children}</span>;
 }
 
-export function Tooltip({
-  label,
-  children,
-  className,
-}: {
-  label: string;
-  children: React.ReactNode;
-  className?: string;
-}) {
-  return (
-    <span className={cn("group relative inline-flex", className)} title={label}>
-      {children}
-      <span
-        role="tooltip"
-        className="pointer-events-none absolute bottom-full left-1/2 z-40 mb-2 hidden -translate-x-1/2 rounded-md border border-border bg-popover px-2 py-1 text-[11px] whitespace-nowrap text-foreground shadow-xl group-hover:block group-focus-within:block"
-      >
-        {label}
-      </span>
-    </span>
-  );
-}
-
 const TONE = {
   good: "border-positive/30 bg-positive/10 text-positive",
   warn: "border-warning/30 bg-warning/10 text-warning",
@@ -185,6 +162,16 @@ export function Detail({ label, children }: { label: string; children: React.Rea
   );
 }
 
+// key/value line inside a <dl>
+export function Row({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="flex items-center justify-between gap-4">
+      <dt className="text-muted-foreground">{label}</dt>
+      <dd className="tnum truncate">{children}</dd>
+    </div>
+  );
+}
+
 export function Stat({ label, value, note }: { label: string; value: React.ReactNode | null; note?: React.ReactNode }) {
   return (
     <div className="min-w-0">
@@ -197,27 +184,4 @@ export function Stat({ label, value, note }: { label: string; value: React.React
 
 export function Notice({ tone = "warn", children }: { tone?: keyof typeof TONE; children: React.ReactNode }) {
   return <p className={cn("rounded-xl border px-3 py-2 text-xs leading-5", TONE[tone])}>{children}</p>;
-}
-
-// Tabs styled like the side-panel switcher
-export function PanelTabs<T extends string>({ id, value, onChange, options }: { id: string; value: T; onChange: (v: T) => void; options: { value: T; label: string }[] }) {
-  return (
-    <div role="tablist" className="grid grid-flow-col gap-1 rounded-full border border-border bg-secondary/60 p-1">
-      {options.map((o) => (
-        <button
-          key={o.value}
-          role="tab"
-          aria-selected={value === o.value}
-          onClick={() => onChange(o.value)}
-          className={cn(
-            "relative truncate rounded-full px-3 py-2 text-[15px] font-medium transition-colors",
-            value === o.value ? "text-foreground" : "text-muted-foreground hover:text-foreground",
-          )}
-        >
-          {value === o.value && <TabPill id={`panel-${id}`} className="rounded-full bg-background" />}
-          <span className="relative">{o.label}</span>
-        </button>
-      ))}
-    </div>
-  );
 }

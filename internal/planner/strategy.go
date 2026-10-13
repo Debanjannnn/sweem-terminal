@@ -2,7 +2,6 @@ package planner
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -121,6 +120,15 @@ type perp struct {
 }
 
 var perps = map[string]perp{"WETH": {"ETH", 2, 3, 12}, "cbBTC": {"BTC", 1, 5, 15}, "MON": {"MON", 6, 0, 10}}
+
+// HedgeAssets are the basis assets, in display order.
+var HedgeAssets = []string{"WETH", "cbBTC", "MON"}
+
+// PerpName is the Perpl market hedging asset ("" = none).
+func PerpName(asset string) string { return perps[asset].Name }
+
+// PerpID is the Perpl perp id hedging asset (0 = none).
+func (p *Planner) PerpID(asset string) int { return p.Dep.Perpl.PerpIds[PerpName(asset)] }
 
 const (
 	perplSlipBps   = 100 // IOC limit through spot; Perpl caps market slippage at 100 bps
@@ -750,29 +758,4 @@ func (p *Planner) Rebalance(ctx context.Context, s Strategy, legs []LegState, ba
 	}
 	steps, err := p.check(p.Dep, steps)
 	return Plan{Steps: steps, Legs: out}, err
-}
-
-// Deprecated: use AttributeFills (actual fills). Attribute nets a basket's holdings per market from its confirmed executions' steps: Σ marketBuy minOut − Σ marketSell size (base atoms).
-func Attribute(plans [][]byte) map[string]decimal.Decimal {
-	out := map[string]decimal.Decimal{}
-	for _, raw := range plans {
-		var steps []Step
-		if json.Unmarshal(raw, &steps) != nil {
-			continue
-		}
-		for _, s := range steps {
-			switch s.Action {
-			case "kuru.marketBuy":
-				out[s.Market] = out[s.Market].Add(d(s.MinOut))
-			case "kuru.marketSell":
-				out[s.Market] = out[s.Market].Sub(d(s.Size))
-			}
-		}
-	}
-	for m, v := range out {
-		if !v.IsPositive() {
-			delete(out, m)
-		}
-	}
-	return out
 }

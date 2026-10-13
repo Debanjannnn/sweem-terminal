@@ -11,3 +11,6 @@ generated/
 *.log
 .run/
 contracts/lib/
+.terraform/
+*.tfstate*
+*.tfvars

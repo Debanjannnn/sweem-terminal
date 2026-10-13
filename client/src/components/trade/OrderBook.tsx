@@ -1,6 +1,6 @@
 "use client";
 
-import { fmtUsd } from "@/lib/api";
+import { fmtNum, fmtUsd } from "@/lib/api";
 import { mid } from "@/lib/hooks";
 import type { Book, Level } from "@/lib/types";
 import { Panel, Skeleton } from "@/components/ui";
@@ -21,7 +21,7 @@ export function OrderBook({ book, symbol, quote = "USDC", stale, error }: { book
         style={{ width: `${max ? (Number(l[1]) / max) * 100 : 0}%` }}
       />
       <span className={`tnum relative ${ask ? "text-destructive" : "text-positive"}`}>{fmtUsd(Number(l[0]))}</span>
-      <span className="tnum relative text-right">{Number(l[1]).toLocaleString("en-US", { maximumFractionDigits: 6 })}</span>
+      <span className="tnum relative text-right">{fmtNum(Number(l[1]), 6)}</span>
     </div>
   );
   return (

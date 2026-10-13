@@ -156,30 +156,7 @@ func TestHTTPRoutes(t *testing.T) {
 		t.Fatalf("unknown market %d", c)
 	}
 
-	body := fmt.Sprintf(`{"amountUsdc":"6000000000","slippageBps":50,"legs":[{"market":%q,"weightBps":5000},{"market":%q,"weightBps":5000}]}`, mk[0], strings.ToUpper(mk[1]))
-	c, v, b := call(t, "POST", u+"/quote/basket", body)
-	if c != 200 || v["ok"] != true || v["partial"] != true || v["fillableUsdc"] != "5705000000" || len(v["legs"].([]any)) != 2 { // MON leg exhausts its book
-		t.Fatalf("basket %d %s", c, b)
-	}
-	// sell: per-leg holdings attributed to the basket
-	sell := fmt.Sprintf(`{"side":"sell","slippageBps":0,"legs":[{"market":%q,"amount":"1000000000000000000"},{"market":%q,"amount":"300000000000000000000"}]}`, mk[0], mk[1])
-	if c, v, b := call(t, "POST", u+"/quote/basket", sell); c != 200 || v["side"] != "sell" || v["ok"] != true || v["expectedOutUsdc"] != "2008100000" || v["minOutUsdc"] != "2008100000" {
-		t.Fatalf("sell basket %d %s", c, b)
-	}
-	for _, bad := range []string{
-		fmt.Sprintf(`{"side":"sell","legs":[{"market":%q}]}`, mk[0]),
-		fmt.Sprintf(`{"side":"hold","amountUsdc":"1","legs":[{"market":%q,"weightBps":10000}]}`, mk[0]),
-		`{"amountUsdc":"1","legs":[]}`,
-		fmt.Sprintf(`{"amountUsdc":"1","legs":[{"market":%q,"weightBps":9000}]}`, mk[0]),
-		fmt.Sprintf(`{"amountUsdc":"1","legs":[{"market":%q,"weightBps":5000},{"market":%q,"weightBps":5000}]}`, mk[0], mk[0]),
-		`not json`,
-	} {
-		if c, _, _ := call(t, "POST", u+"/quote/basket", bad); c != 400 {
-			t.Errorf("%s: %d", bad, c)
-		}
-	}
-
-	c, _, b = call(t, "GET", u+"/candles/"+mk[0]+"?interval=1m", "")
+	c, _, b := call(t, "GET", u+"/candles/"+mk[0]+"?interval=1m", "")
 	var cs []streams.Candle
 	json.Unmarshal(b, &cs)
 	if c != 200 || len(cs) != 3 || cs[0].T >= cs[2].T || !cs[2].C.Equal(d("1.5")) || cs[2].N != 3 {
@@ -200,9 +177,6 @@ func TestHTTPRoutes(t *testing.T) {
 	must(t, rdb.Del(ctx, streams.HeartbeatKey).Err())
 	if c, v, _ := call(t, "GET", u+"/quote/"+mk[0]+"?side=buy&amount=3000000000", ""); c != 503 || v["error"] != "stale" {
 		t.Fatalf("stale quote %d %v", c, v)
-	}
-	if c, v, _ := call(t, "POST", u+"/quote/basket", body); c != 503 || v["error"] != "stale" {
-		t.Fatalf("stale basket %d %v", c, v)
 	}
 }
 

@@ -13,10 +13,10 @@ import {
   type ISeriesApi,
   type UTCTimestamp,
 } from "lightweight-charts";
-import { fmtUsd, fmtUsdCompact } from "@/lib/api";
+import { fmtNum, fmtUsd, fmtUsdCompact } from "@/lib/api";
 import type { Interval } from "@/lib/types";
 import { ErrorBox, Skeleton } from "@/components/ui";
-import { ChangeText } from "@/components/invest/BasketCard";
+import { ChangeText } from "@/components/IconStack";
 import { cn } from "@/lib/utils";
 import { Flash, Segmented, TabPill } from "@/components/motion";
 
@@ -43,7 +43,7 @@ const GRID = "rgba(255,255,255,0.04)";
 
 // chart runs in UTC; shift so axis + crosshair read local time
 const toTime = (t: number) => Math.floor(t / 1000 - new Date(t).getTimezoneOffset() * 60) as UTCTimestamp;
-const fmtPx = (p: number) => p.toLocaleString("en-US", { maximumFractionDigits: Math.abs(p) >= 1000 ? 2 : Math.abs(p) >= 1 ? 4 : 6 });
+const fmtPx = (p: number) => fmtNum(p, Math.abs(p) >= 1000 ? 2 : Math.abs(p) >= 1 ? 4 : 6);
 
 type Api = { chart: IChartApi; main: ISeriesApi<"Candlestick"> | ISeriesApi<"Area">; vol: ISeriesApi<"Histogram">; key: string; n: number };
 

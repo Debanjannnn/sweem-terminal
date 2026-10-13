@@ -27,23 +27,9 @@ export type Quote = {
   maxImpactBps: number;
 };
 
-export type BasketQuote = {
-  side: "buy" | "sell";
-  amountUsdc?: string;
-  fillableUsdc?: string;
-  expectedOutUsdc?: string;
-  minOutUsdc?: string;
-  partial: boolean;
-  ok: boolean;
-  legs: { market: string; weightBps?: number; amountUsdc?: string; amount?: string; quote?: Quote; error?: string }[];
-};
-
-export type RateInfo = { source: string; venue: string; asset: string; address: string; apy: string; kind: string; ts: number };
-export type FundingInfo = { perpId: number; name: string; rate: string; intervalSec: number; aprShort: string; aprShort7d: string; block: number; ts: number };
+type RateInfo = { source: string; venue: string; asset: string; address: string; apy: string; kind: string; ts: number };
+type FundingInfo = { perpId: number; name: string; rate: string; intervalSec: number; aprShort: string; aprShort7d: string; block: number; ts: number };
 export type Rates = { ts: number; rates: RateInfo[]; funding: FundingInfo[]; stale: boolean };
-
-export type Leg = { market: string; weightBps: number };
-export type Basket = { id: string; owner: string; name: string; legs: Leg[]; public: boolean; createdAt: string };
 
 export type SourceKind = "lending" | "staking" | "lp" | "basis";
 export type Source = { kind: SourceKind; venue: string; weightBps: number; params?: { leverage?: string } };
@@ -90,7 +76,7 @@ export type Delegation = {
 
 export type Me = { id: string; walletAddress: string | null; createdAt: string; delegation: Delegation | null };
 
-export type ExecutionStatus = "pending" | "submitted" | "confirmed" | "failed" | "rejected";
+type ExecutionStatus = "pending" | "submitted" | "confirmed" | "failed" | "rejected";
 
 export type Step = { action: string; market?: string; token?: string; amount?: string; side?: string; venue?: string; [k: string]: unknown };
 
@@ -107,7 +93,6 @@ export type Execution = {
   error: string | null;
   scheduleId: string | null;
   positionId: string | null;
-  basketId: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -125,7 +110,6 @@ export type Earnings = {
 export type Holdings = {
   wallet: string;
   tokens: { symbol: string; address: string; raw: string; amount: string }[];
-  baskets: { basketId: string; name: string; legs: { market: string; raw: string; amount: string }[] }[];
 };
 
 export type Order = {
@@ -141,7 +125,7 @@ export type Order = {
 };
 
 // token: sleeve asset; absent = position asset (single-token rows)
-export type LegState = { token?: string; kind: string; venue: string; asset: string; collateral?: string; lot?: string; entryPx?: string };
+type LegState = { token?: string; kind: string; venue: string; asset: string; collateral?: string; lot?: string; entryPx?: string };
 
 export type Position = {
   id: string;
@@ -150,7 +134,7 @@ export type Position = {
   asset: string;
   wallet: string;
   principalUsdc: string;
-  status: "opening" | "open" | "closing" | "closed" | "failed";
+  status: "opening" | "open" | "withdrawing" | "closed" | "failed";
   legs: LegState[];
   openedAt: string;
   closedAt: string | null;
@@ -158,7 +142,7 @@ export type Position = {
 };
 
 export type ScheduleKind = "dca" | "take_profit" | "stop_loss" | "rebalance";
-export type Target = { type: "market" | "basket" | "position"; id: string };
+export type Target = { type: "market" | "position" | "strategy"; id: string };
 
 export type ScheduleInput = {
   kind: ScheduleKind;
@@ -189,7 +173,7 @@ export type Schedule = {
 };
 
 // history POST /backtest
-export type BacktestPoint = { day: string; usd: string; asset: string; hodlUsd: string; basisActive: boolean };
+type BacktestPoint = { day: string; usd: string; asset: string; hodlUsd: string; basisActive: boolean };
 export type Backtest = {
   label: string;
   asset: string;
@@ -213,10 +197,7 @@ export type Backtest = {
 };
 
 // POST /me/trade/prepare
-export type PrepareInput =
-  | { kind: "trade"; market: string; side: "buy" | "sell"; amount: string; slippageBps?: number }
-  | { kind: "basket_buy"; basketId: string; amountUsdc: string; slippageBps?: number }
-  | { kind: "basket_sell"; basketId: string; bps: number; slippageBps?: number };
+export type PrepareInput = { kind: "trade"; market: string; side: "buy" | "sell"; amount: string; slippageBps?: number };
 export type TxRequest = { to: string; data: string; value: string; chainId: number; description: string; step: number };
 export type Prepared = { prepareId: string; kind: string; steps: Step[]; txs: TxRequest[]; expiresAt: string };
 

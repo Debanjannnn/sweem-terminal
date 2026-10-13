@@ -18,6 +18,7 @@ import (
 	"github.com/snehendu098/sweem-terminal/internal/config"
 	"github.com/snehendu098/sweem-terminal/internal/httpx"
 	"github.com/snehendu098/sweem-terminal/internal/perpl"
+	"github.com/snehendu098/sweem-terminal/internal/pg"
 	"github.com/snehendu098/sweem-terminal/internal/planner"
 	"github.com/snehendu098/sweem-terminal/internal/streams"
 )
@@ -214,10 +215,10 @@ func TestDrift(t *testing.T) {
 func TestFundingAPRNoLookback(t *testing.T) { // days == 0 never touches the DB
 	snap := streams.RatesSnapshot{Funding: []streams.FundingInfo{{PerpID: 20, AprShort7d: d("0.2")}}}
 	s := &Scheduler{}
-	if apr, ok, err := s.fundingAPR(context.Background(), snap, 20, 0); err != nil || !ok || !apr.Equal(d("0.2")) {
+	if apr, ok, err := pg.GateAPR(context.Background(), s.DB, snap, 20, 0); err != nil || !ok || !apr.Equal(d("0.2")) {
 		t.Fatal(apr, ok, err)
 	}
-	if _, ok, _ := s.fundingAPR(context.Background(), snap, 30, 0); ok {
+	if _, ok, _ := pg.GateAPR(context.Background(), s.DB, snap, 30, 0); ok {
 		t.Fatal("unknown perp")
 	}
 }

@@ -9,6 +9,7 @@ const MARK: Record<string, string> = {
   shmonad: "shmonad.png",
   kuru: "kuru-clob.png",
   perpl: "perpl.png",
+  aurora: "aurora.png",
 };
 
 export function ProtocolIcon({ protocol, size = 20, className }: { protocol: string; size?: number; className?: string }) {

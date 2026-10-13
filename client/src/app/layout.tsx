@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { Geist_Mono, Inter } from "next/font/google";
 import "./globals.css";
 import { SessionProvider } from "@/lib/session";
-import { Toaster } from "@/components/Toaster";
+import { Toaster } from "sonner";
 import { MotionRoot } from "@/components/motion";
 
 const inter = Inter({ variable: "--font-inter", subsets: ["latin"] });
@@ -10,7 +10,7 @@ const mono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"] });
 
 export const metadata: Metadata = {
   title: "sweem: trade and earn on Monad",
-  description: "Trade Kuru markets and baskets, automate with DCA and TP/SL, and follow yield strategies. Monad mainnet, non-custodial.",
+  description: "Trade Kuru markets, buy yield baskets, automate with DCA and TP/SL. Monad mainnet, non-custodial.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
@@ -22,7 +22,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       <body className={`min-h-full font-sans bg-background text-foreground antialiased`}>
         <MotionRoot>
           <SessionProvider>{children}</SessionProvider>
-          <Toaster />
+          <Toaster theme="dark" position="bottom-right" />
         </MotionRoot>
       </body>
     </html>

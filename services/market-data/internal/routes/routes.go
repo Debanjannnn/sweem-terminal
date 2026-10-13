@@ -54,7 +54,6 @@ func New(ctx context.Context, rdb *redis.Client, db *pgxpool.Pool, origins []str
 	mux.HandleFunc("GET /api/v1/markets", s.markets)
 	mux.HandleFunc("GET /api/v1/books/{market}", s.book)
 	mux.HandleFunc("GET /api/v1/quote/{market}", s.quote)
-	mux.HandleFunc("POST /api/v1/quote/basket", s.basket)
 	mux.HandleFunc("GET /api/v1/candles/{market}", s.candles)
 	mux.HandleFunc("GET /api/v1/rates", s.rates)
 	return httpx.CORS(origins, mux)
@@ -192,77 +191,6 @@ func (s srv) quote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.JSON(w, http.StatusOK, res)
-}
-
-type basketReq struct {
-	Side         string `json:"side"` // buy (default) | sell
-	AmountUsdc   string `json:"amountUsdc"`
-	SlippageBps  *int64 `json:"slippageBps"`
-	MaxImpactBps *int64 `json:"maxImpactBps"`
-	Legs         []struct {
-		Market    string `json:"market"`
-		WeightBps int64  `json:"weightBps"` // buy
-		Amount    string `json:"amount"`    // sell: base atoms
-	} `json:"legs"`
-}
-
-// basket: buy splits amountUsdc by weightBps (sum 10000); sell takes per-leg base amounts.
-func (s srv) basket(w http.ResponseWriter, r *http.Request) {
-	var req basketReq
-	err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10)).Decode(&req)
-	if req.Side == "" {
-		req.Side = "buy"
-	}
-	slip, impact := int64(defaultSlip), int64(defaultImpact)
-	if req.SlippageBps != nil {
-		slip = *req.SlippageBps
-	}
-	if req.MaxImpactBps != nil {
-		impact = *req.MaxImpactBps
-	}
-	buy := req.Side == "buy"
-	valid := err == nil && (buy || req.Side == "sell") && (!buy || intRE.MatchString(req.AmountUsdc)) &&
-		len(req.Legs) > 0 && len(req.Legs) <= 10 && slip >= 0 && slip <= 10_000 && impact >= 0 && impact <= 10_000
-	var sum int64
-	seen := map[string]bool{}
-	for i, l := range req.Legs {
-		m := strings.ToLower(l.Market)
-		if !addrRE.MatchString(m) || seen[m] || (buy && l.WeightBps <= 0) || (!buy && !intRE.MatchString(l.Amount)) {
-			valid = false
-		}
-		seen[m], req.Legs[i].Market, sum = true, m, sum+l.WeightBps
-	}
-	if !valid || (buy && sum != 10_000) {
-		httpx.Error(w, http.StatusBadRequest, "bad_request")
-		return
-	}
-	markets, ok := load[[]streams.MarketInfo](s, w, r, streams.RegistryMarkets, http.StatusServiceUnavailable)
-	if !ok {
-		return
-	}
-	var ms []streams.MarketInfo
-	var bs []streams.BookSnapshot
-	var ws []int64
-	var amts []decimal.Decimal
-	for _, l := range req.Legs {
-		m, b, ok := s.legState(w, r, markets, l.Market)
-		if !ok {
-			return
-		}
-		ms, bs, ws = append(ms, m), append(bs, b), append(ws, l.WeightBps)
-		if !buy {
-			amts = append(amts, decimal.RequireFromString(l.Amount))
-		}
-	}
-	if s.stateStale(r, bs...) {
-		httpx.Error(w, http.StatusServiceUnavailable, "stale")
-		return
-	}
-	if buy {
-		httpx.JSON(w, http.StatusOK, quote.BuyBasket(decimal.RequireFromString(req.AmountUsdc), ws, ms, bs, slip, impact))
-	} else {
-		httpx.JSON(w, http.StatusOK, quote.SellBasket(amts, ms, bs, slip, impact))
-	}
 }
 
 // candles returns up to 1000 candles in [from, to) (unix ms), newest last; default is the latest 1000.

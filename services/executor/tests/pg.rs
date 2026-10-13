@@ -41,7 +41,7 @@ async fn execution_state_machine() {
         let (db, user, steps) = (db.clone(), user.clone(), steps.to_string());
         async move {
             db.query_one(
-                "insert into executions(user_id,slot,kind,steps) values ($1,$2,'basket_buy',$3::text::jsonb) returning id::text",
+                "insert into executions(user_id,slot,kind,steps) values ($1,$2,'trade',$3::text::jsonb) returning id::text",
                 &[&user, &slot, &steps],
             )
             .await
@@ -79,8 +79,8 @@ async fn execution_state_machine() {
 
     // inactive schedule
     let s: String = db.query_one(
-        "insert into schedules(user_id,basket,kind,amount_usdc,interval_seconds,next_run_at,max_slippage_bps,max_per_run_usdc,active)
-         values ($1,'WETH','recurring',10,86400,now(),50,10,false) returning id::text",
+        "insert into schedules(user_id,kind,target_type,target_id,amount_usdc,interval_seconds,next_run_at,max_slippage_bps,max_per_run_usdc,active)
+         values ($1,'dca','market','WETH',10,86400,now(),50,10,false) returning id::text",
         &[&user],
     ).await.unwrap().get(0);
     let id: String = db.query_one(

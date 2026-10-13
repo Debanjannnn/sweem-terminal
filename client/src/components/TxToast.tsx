@@ -68,4 +68,3 @@ export function showToast(card: Card, id?: string | number): string | number {
 }
 
 export const toastError = (e: unknown, id?: string | number) => showToast({ tone: "error", title: errMsg(e) }, id);
-export const dismissToast = (id: string | number) => toast.dismiss(id);

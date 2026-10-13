@@ -3,11 +3,11 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { Search } from "lucide-react";
-import { getBaskets, getStrategies } from "@/lib/api";
+import { getStrategies } from "@/lib/api";
 import { useAsync } from "@/lib/session";
 import { LISTED, pairsOf } from "@/lib/tokens";
 import { cn } from "@/lib/utils";
-import { IconStack } from "@/components/invest/BasketCard";
+import { IconStack } from "@/components/IconStack";
 import { parts } from "@/components/earn/sources";
 import { EASE } from "@/components/motion";
 import { AnimatePresence, motion, useIsPresent } from "motion/react";
@@ -51,7 +51,7 @@ export function HeroSearch() {
       className="group mx-auto flex w-full max-w-[580px] cursor-pointer items-center gap-3 rounded-full border-2 border-white/10 bg-card py-3.5 pr-5 pl-5 text-left text-muted-foreground ring-white/5 transition-[box-shadow,border-color] hover:border-white/15 hover:ring-4 md:py-4"
     >
       <Search className="size-5 shrink-0 transition-colors group-hover:text-foreground" />
-      <span className="flex-1 text-[15px] md:text-[17px]">Search tokens, baskets and strategies</span>
+      <span className="flex-1 text-[15px] md:text-[17px]">Search tokens and baskets</span>
       <span className="hidden gap-1 sm:flex">
         <Kbd>⌘</Kbd>
         <Kbd>K</Kbd>
@@ -107,7 +107,6 @@ function SearchDialog({ onClose }: { onClose: () => void }) {
   const list = useRef<HTMLDivElement>(null);
   const [q, setQ] = useState("");
   const [active, setActive] = useState(0);
-  const baskets = useAsync("baskets", () => getBaskets());
   const strategies = useAsync("strategies", () => getStrategies());
   const present = useIsPresent();
 
@@ -116,19 +115,11 @@ function SearchDialog({ onClose }: { onClose: () => void }) {
   const s = q.trim().toLowerCase();
   const all = [
     ...LISTED.map((m) => ({ key: m.symbol, href: `/trade/${m.symbol}`, title: m.token.name, tag: `$${m.token.symbol}`, sub: `Token · Kuru / ${pairsOf(m).map((p) => p.quote.symbol).join(", ")}`, icons: [m.token.symbol] })),
-    ...(baskets.data ?? []).map((b) => ({
-      key: b.id,
-      href: `/baskets/${b.id}`,
-      title: b.name,
-      tag: "Basket",
-      sub: b.legs.map((l) => `${l.market} ${l.weightBps / 100}%`).join(" · "),
-      icons: b.legs.map((l) => l.market),
-    })),
     ...(strategies.data ?? []).map((st) => ({
       key: st.id,
-      href: `/earn/${st.id}`,
+      href: `/baskets/${st.id}`,
       title: st.name,
-      tag: "Earn",
+      tag: "Basket",
       sub: parts(st).map((sl) => `${sl.asset} · ${sl.sources.map((x) => x.kind).join(", ")}`).join(" | "),
       icons: parts(st).map((sl) => sl.asset),
     })),
@@ -176,7 +167,7 @@ function SearchDialog({ onClose }: { onClose: () => void }) {
             setActive(0);
           }}
           onKeyDown={onKey}
-          placeholder="Search tokens, baskets or strategies…"
+          placeholder="Search tokens or baskets…"
           role="combobox"
           aria-expanded
           aria-controls="basket-search-list"
@@ -212,7 +203,7 @@ function SearchDialog({ onClose }: { onClose: () => void }) {
         {items.length === 0 && (
           <p className="py-10 text-center text-sm text-muted-foreground">No results found.</p>
         )}
-        {(baskets.error || strategies.error) && <p className="px-3 py-2 text-xs text-muted-foreground">Some results unavailable (api offline).</p>}
+        {strategies.error && <p className="px-3 py-2 text-xs text-muted-foreground">Some results unavailable (api offline).</p>}
       </div>
 
       <div className="hidden items-center justify-center gap-5 border-t border-border px-3 py-3 text-xs md:flex">

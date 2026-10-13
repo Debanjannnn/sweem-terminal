@@ -12,8 +12,9 @@ import { cn } from "@/lib/utils";
 
 const KINDS: Record<Target["type"], ScheduleKind[]> = {
   market: ["dca", "take_profit", "stop_loss"],
-  basket: ["dca", "take_profit", "stop_loss", "rebalance"],
   position: ["take_profit", "stop_loss", "rebalance"],
+  // recurring buy: each run deploys amountUsdc into the basket as a new position
+  strategy: ["dca"],
 };
 export const KIND_LABEL: Record<string, string> = {
   dca: "DCA",
@@ -49,7 +50,7 @@ export function Field({ label, hint, children }: { label: string; hint?: React.R
   );
 }
 
-// current = live price (market, USDC/unit) or value (basket/position, USDC) for TP/SL hints
+// current = live price (market, USDC/unit) or value (position, USDC) for TP/SL hints
 // quote: what a market target is priced/paid in (AUSD books); baskets/positions are USDC
 export function ScheduleForm({ target, current, onCreated, quote = "USDC" }: { target: Target; current: number | null; onCreated: () => void; quote?: string }) {
   const { authenticated, login, delegated } = useSession();
@@ -86,7 +87,6 @@ export function ScheduleForm({ target, current, onCreated, quote = "USDC" }: { t
     }
     if (kind === "rebalance") {
       if (!(intervalSeconds >= 60)) return "Check cadence must be at least 1 minute.";
-      if (target.type === "basket" && !(driftBps >= 1 && driftBps <= 10000)) return "Drift band must be 0.01%–100%.";
       return { ...base, intervalSeconds, ...(drift.trim() && driftBps > 0 ? { driftBps } : {}) };
     }
     if (!pos(trigger)) return "Trigger must be a positive number.";
@@ -146,14 +146,14 @@ export function ScheduleForm({ target, current, onCreated, quote = "USDC" }: { t
 
   return (
     <div className="space-y-4">
-      <Segmented
-        id={`schedule-kind-${target.type}`}
-        value={kind}
-        onChange={(k) => (setKind(k), setError(null))}
-        options={kinds.map((k) => ({ value: k, label: KIND_LABEL[k] }))}
-      />
-
-      {!delegated && <DelegationCard compact />}
+      {kinds.length > 1 && (
+        <Segmented
+          id={`schedule-kind-${target.type}`}
+          value={kind}
+          onChange={(k) => (setKind(k), setError(null))}
+          options={kinds.map((k) => ({ value: k, label: KIND_LABEL[k] }))}
+        />
+      )}
 
       {kind === "dca" && (
         <>
@@ -210,7 +210,7 @@ export function ScheduleForm({ target, current, onCreated, quote = "USDC" }: { t
 
       {kind === "rebalance" && (
         <>
-          <Field label="Drift band (%)" hint={target.type === "position" ? "blank = strategy rules" : "rebalance when a leg drifts this far"}>
+          <Field label="Drift band (%)" hint={target.type === "position" ? "blank = basket rules" : "rebalance when a leg drifts this far"}>
             <input className={inputCls} inputMode="decimal" value={drift} onChange={(e) => setDrift(e.target.value)} />
           </Field>
           {intervalPicker("Check every")}
@@ -228,9 +228,13 @@ export function ScheduleForm({ target, current, onCreated, quote = "USDC" }: { t
 
       {error && <ErrorBox message={error} />}
 
-      <Button className="w-full" pending={pending} disabled={!delegated} onClick={() => void submit()}>
-        {delegated ? `Create ${KIND_LABEL[kind].toLowerCase()}` : "Enable delegation first"}
-      </Button>
+      {delegated ? (
+        <Button className="w-full" pending={pending} onClick={() => void submit()}>
+          Create {target.type === "strategy" ? "recurring buy" : KIND_LABEL[kind].toLowerCase()}
+        </Button>
+      ) : (
+        <DelegationCard compact />
+      )}
     </div>
   );
 }

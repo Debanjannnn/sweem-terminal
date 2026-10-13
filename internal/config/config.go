@@ -55,50 +55,16 @@ func parse[T any](e *Env, key string, def T, fn func(string) (T, error)) T {
 	return v
 }
 
-const ChainID = 10143
+const MainnetChainID = 143
 
-// ExpectedChainID is the chain every service must be on: env CHAIN_ID, default testnet until services migrate.
+// ExpectedChainID is the chain every service must be on: env CHAIN_ID, default mainnet.
 func ExpectedChainID() uint64 {
 	id, err := strconv.ParseUint(strings.TrimSpace(os.Getenv("CHAIN_ID")), 10, 64)
 	if err != nil {
-		return ChainID
+		return MainnetChainID
 	}
 	return id
 }
-
-type Deployments struct {
-	ChainID    uint64            `json:"chainId"`
-	Factory    string            `json:"factory"`
-	Baskets    map[string]string `json:"baskets"`
-	StartBlock uint64            `json:"startBlock"`
-	Kuru       struct {
-		AccountCore string            `json:"accountCore"`
-		SpotRouter  string            `json:"spotRouter"`
-		USDC        string            `json:"usdc"`
-		Faucet      string            `json:"faucet"`
-		Markets     map[string]string `json:"markets"`
-	} `json:"kuru"`
-}
-
-func LoadDeployments(path string) (*Deployments, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var d Deployments
-	if err := json.Unmarshal(b, &d); err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
-	}
-	if d.ChainID != ChainID {
-		return nil, fmt.Errorf("%s: chainId %d, want %d", path, d.ChainID, ChainID)
-	}
-	if d.Factory == "" {
-		return nil, fmt.Errorf("%s: factory missing", path)
-	}
-	return &d, nil
-}
-
-const MainnetChainID = 143
 
 type Token struct {
 	Address  string `json:"address"`

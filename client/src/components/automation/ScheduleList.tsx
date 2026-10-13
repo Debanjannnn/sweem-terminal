@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { ExternalLink, Trash2 } from "lucide-react";
 import { deleteSchedule, errText, fmtBps, fmtTime, fmtUsd, getExecutions, getSchedules, shortHash } from "@/lib/api";
 import { useAsync, useSession } from "@/lib/session";
@@ -24,19 +24,15 @@ const describe = (s: Schedule) =>
         ? `Sell ${(s.sellBps ?? 0) / 100}% when ${s.kind === "take_profit" ? "≥" : "≤"} ${fmtUsd(Number(s.triggerPrice))}`
         : "Legacy schedule";
 
-export const targetHref = (t: Target | null) =>
-  !t ? null : t.type === "market" ? `/trade/${t.id}` : t.type === "basket" ? `/baskets/${t.id}` : "/portfolio";
+const targetHref = (t: Target | null) =>
+  !t ? null : t.type === "market" ? `/trade/${t.id}` : t.type === "strategy" ? `/baskets/${t.id}` : "/portfolio";
 
 // Schedules (optionally for one target); refreshes every 15s.
 export function ScheduleList({ target, names }: { target?: Target; names?: Record<string, string> }) {
   const { authenticated } = useSession();
-  const schedules = useAsync(authenticated ? "schedules" : null, getSchedules);
+  const schedules = useAsync(authenticated ? "schedules" : null, getSchedules, 15_000);
   const [deleting, setDeleting] = useState<string | null>(null);
   const { reload } = schedules;
-  useEffect(() => {
-    const t = setInterval(reload, 15_000);
-    return () => clearInterval(t);
-  }, [reload]);
   if (!authenticated) return null;
 
   const mine = (schedules.data ?? [])
@@ -81,7 +77,7 @@ export function ScheduleList({ target, names }: { target?: Target; names?: Recor
                   <span className="tnum text-sm">{describe(s)}</span>
                   {href && s.target && (
                     <Link href={href} className="text-xs text-muted-foreground underline-offset-4 hover:underline">
-                      {names?.[s.target.id] ?? (s.target.type === "market" ? s.target.id : `${s.target.type} ${s.target.id.slice(0, 8)}`)}
+                      {names?.[s.target.id] ?? (s.target.type === "market" ? s.target.id : `${s.target.type === "strategy" ? "basket" : s.target.type} ${s.target.id.slice(0, 8)}`)}
                     </Link>
                   )}
                   <span className="ml-auto">
@@ -117,12 +113,7 @@ export function ScheduleList({ target, names }: { target?: Target; names?: Recor
 // Every api + scheduler execution for the user, newest first.
 export function ExecutionLog() {
   const { authenticated } = useSession();
-  const ex = useAsync(authenticated ? "executions" : null, getExecutions);
-  const { reload } = ex;
-  useEffect(() => {
-    const t = setInterval(reload, 15_000);
-    return () => clearInterval(t);
-  }, [reload]);
+  const ex = useAsync(authenticated ? "executions" : null, getExecutions, 15_000);
   const runs = [...(ex.data ?? [])].sort((x, y) => y.createdAt.localeCompare(x.createdAt)).slice(0, 30);
   return (
     <Panel>

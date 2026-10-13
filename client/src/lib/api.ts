@@ -1,11 +1,8 @@
 import { getAccessToken } from "@privy-io/react-auth";
 import { API_URL, HISTORY_URL, MARKET_DATA_URL } from "./config";
-import { marketOf } from "./tokens";
 import type {
   Accepted,
   Backtest,
-  Basket,
-  BasketQuote,
   Book,
   Candle,
   Earnings,
@@ -13,7 +10,6 @@ import type {
   FundingDay,
   Holdings,
   Interval,
-  Leg,
   Me,
   Order,
   PerplMarkets,
@@ -93,9 +89,6 @@ const json = (body: unknown): RequestInit => ({
 });
 
 // api — public
-// drops rows from an older api (retired ERC-20 baskets have no legs)
-export const getBaskets = () => request<Basket[]>(`${API_URL}/baskets`).then((l) => l.filter((b) => Array.isArray(b?.legs)));
-export const getBasket = (id: string) => request<Basket>(`${API_URL}/baskets/${id}`);
 export const getStrategies = (creator?: string) => request<Strategy[]>(`${API_URL}/strategies${q({ creator })}`);
 // authed when logged in so the creator can see their private strategy
 export const getStrategy = async (id: string) => {
@@ -108,8 +101,6 @@ export const getMe = () => authed<Me>("/me");
 export const putDelegation = (walletId: string, walletAddress: string) =>
   authed<Me["delegation"]>("/me/delegation", "POST", { walletId, walletAddress });
 export const deleteDelegation = () => authed<{ revoked: boolean }>("/me/delegation", "DELETE");
-export const getMyBaskets = () => authed<Basket[]>("/me/baskets");
-export const createBasket = (b: { name: string; legs: Leg[]; public: boolean }) => authed<Basket>("/me/baskets", "POST", b);
 // client-signed: unsigned txs for the user's own wallet (no delegation), then hashes back for on-chain verification
 export const prepareTrade = (b: PrepareInput & { wallet: string }) => authed<Prepared>("/me/trade/prepare", "POST", b);
 export const recordTrade = (prepareId: string, txHashes: string[]) => authed<Execution>("/me/trade/record", "POST", { prepareId, txHashes });
@@ -122,13 +113,11 @@ export const createStrategy = (s: StrategyInput) => authed<Strategy>("/strategie
 export const getMyStrategies = () => authed<Strategy[]>("/me/strategies");
 export const deployStrategy = (id: string, amountUsdc: string, slippageBps?: number) =>
   authed<Accepted>(`/me/strategies/${id}/deploy`, "POST", { amountUsdc, slippageBps });
-export const withdrawPosition = (id: string) => authed<Accepted>(`/me/positions/${id}/withdraw`, "POST", {});
+// bps 1..10000; < 10000 = partial sell, position stays open
+export const withdrawPosition = (id: string, bps = 10000) => authed<Accepted>(`/me/positions/${id}/withdraw`, "POST", { bps });
 export const getEarnings = () => authed<Earnings>("/me/earnings");
 export const getPositionPerpl = (id: string) => authed<PerplRisk[]>(`/me/positions/${id}/perpl`);
 export const getPerplMarkets = () => request<PerplMarkets>(`${API_URL}/perpl/markets`);
-// delegated (executor signs); 409 delegation_inactive without it
-export const basketBuy = (id: string, b: { amountUsdc: string; slippageBps?: number }) => authed<Accepted>(`/me/baskets/${id}/buy`, "POST", b);
-export const basketSell = (id: string, b: { bps: number; slippageBps?: number }) => authed<Accepted>(`/me/baskets/${id}/sell`, "POST", b);
 export const MARGIN_TOKENS = ["USDC", "MON", "WETH", "cbBTC", "XAUt0"] as const;
 export type MarginToken = (typeof MARGIN_TOKENS)[number];
 // amount human decimal
@@ -146,17 +135,6 @@ export const getBook = (orderbook: string) => request<Book>(`${MARKET_DATA_URL}/
 // amount raw atoms: buy = USDC, sell = base
 export const getQuote = (orderbook: string, side: "buy" | "sell", amount: bigint, slippageBps = 50) =>
   request<Quote>(`${MARKET_DATA_URL}/quote/${orderbook}${q({ side, amount: amount.toString(), slippageBps })}`);
-// buy: amountUsdc atoms split by weightBps; sell: per-leg base atoms
-export type BasketQuoteInput = { side: "buy"; amountUsdc: bigint; legs: Leg[] } | { side: "sell"; legs: { market: string; amount: bigint }[] };
-export const getBasketQuote = (b: BasketQuoteInput, slippageBps = 50) =>
-  request<BasketQuote>(`${MARKET_DATA_URL}/quote/basket`, json({
-      side: b.side,
-      amountUsdc: b.side === "buy" ? b.amountUsdc.toString() : undefined,
-      slippageBps,
-      legs: b.side === "buy"
-        ? b.legs.map((l) => ({ market: marketOf(l.market)?.orderbook ?? l.market, weightBps: l.weightBps }))
-        : b.legs.map((l) => ({ market: marketOf(l.market)?.orderbook ?? l.market, amount: l.amount.toString() })),
-    }),);
 export const getCandles = (orderbook: string, interval: Interval, from?: number, to?: number) =>
   request<Candle[]>(`${MARKET_DATA_URL}/candles/${orderbook}${q({ interval, from, to })}`);
 export const getRates = () => request<Rates>(`${MARKET_DATA_URL}/rates`);
@@ -189,13 +167,7 @@ export const fmtUsd = (n: number) =>
     ? n.toLocaleString("en-US", { style: "currency", currency: "USD", maximumSignificantDigits: 2 })
     : n.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: Math.abs(n) < 1 ? 4 : 2 });
 
-export const fmtPct = (n: number, digits = 2) => `${n.toFixed(digits)}%`;
-
-// -0.001 must not print as "-0.00%": round before deciding the sign.
-export const fmtPctSigned = (n: number, digits = 2) => {
-  const r = Number(n.toFixed(digits));
-  return `${r > 0 ? "+" : ""}${r.toFixed(digits)}%`;
-};
+export const fmtNum = (n: number, maxFrac = 4) => n.toLocaleString("en-US", { maximumFractionDigits: maxFrac });
 
 export const fmtBps = (bps: number) => `${(bps / 100).toFixed(2)}%`;
 
@@ -218,7 +190,6 @@ const COPY: Record<string, string> = {
   unsupported_source: "One of the sources isn't supported for this asset.",
   treasury_unset: "Fees are not configured yet (treasury unset).",
   too_many_steps: "Plan is too long (over 32 steps).",
-  nothing_to_sell: "Nothing held in this basket to sell.",
   quote_unavailable: "Market data is down or stale, try again shortly.",
   history_unavailable: "Backtest service unavailable.",
   rpc_unavailable: "Monad RPC unavailable, try again shortly.",

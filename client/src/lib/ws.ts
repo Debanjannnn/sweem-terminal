@@ -53,7 +53,7 @@ export function subscribe(topic: string, fn: Listener): () => void {
   };
 }
 
-// topic e.g. `nav.${basket}`, `book.${market}`, `trades.${market}` (lowercase addrs); null = off
+// topic e.g. `book.${market}`, `trades.${market}` (lowercase addrs); null = off
 export function useTopic<T>(raw: string | null): T | null {
   const topic = raw?.toLowerCase() ?? null;
   const [last, setLast] = useState<{ topic: string; data: T } | null>(null);

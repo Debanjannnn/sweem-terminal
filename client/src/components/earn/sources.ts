@@ -14,27 +14,34 @@ export const parts = (s: Pick<Strategy, "asset" | "sources" | "sleeves">): Sleev
 // MON is lent as WMON (planner wraps)
 const lendAsset = (asset: string) => (asset === "MON" ? "WMON" : asset);
 
-// basis hedge on Perpl: asset → perp
+// basis hedge on Perpl: asset → perp (ids from deployments.json)
+const PERP_IDS: Record<string, number> = DEPLOYMENTS.perpl.perpIds;
 export const PERP: Record<string, { id: number; name: string; maxLev: number }> = {
-  WETH: { id: 20, name: "ETH", maxLev: 12 },
-  cbBTC: { id: 1, name: "BTC", maxLev: 15 },
-  MON: { id: 10, name: "MON", maxLev: 10 },
+  WETH: { id: PERP_IDS.ETH, name: "ETH", maxLev: 12 },
+  cbBTC: { id: PERP_IDS.BTC, name: "BTC", maxLev: 15 },
+  MON: { id: PERP_IDS.MON, name: "MON", maxLev: 10 },
 };
 
 const slug = (name: string) => name.toLowerCase().replace(/ /g, "-");
 const VAULTS = DEPLOYMENTS.lending.erc4626.map((v) => ({ venue: slug(v.name), name: v.name, asset: v.asset, protocol: v.protocol }));
 
-// venue id → protocol (ProtocolIcon key); "perpl" basis legs trade spot on Kuru and short on Perpl
-export const protocolOf = (venue: string) =>
-  ({ aave: "aave", neverland: "neverland", shmonad: "shmonad", "kuru-activevault": "kuru", perpl: "perpl" })[venue] ??
-  VAULTS.find((v) => v.venue === venue)?.protocol ??
-  venue;
+// venue id → display name + protocol (ProtocolIcon key); "perpl" basis legs trade spot on Kuru and short on Perpl
+const VENUES: Record<string, { name: string; protocol: string }> = {
+  ...Object.fromEntries(VAULTS.map((v) => [v.venue, { name: v.name, protocol: v.protocol }])),
+  aave: { name: "Aave V3", protocol: "aave" },
+  neverland: { name: "Neverland", protocol: "neverland" },
+  shmonad: { name: "shMonad", protocol: "shmonad" },
+  "kuru-activevault": { name: "Kuru ActiveVault", protocol: "kuru" },
+  perpl: { name: "Kuru + Perpl", protocol: "perpl" },
+};
+export const protocolOf = (venue: string) => VENUES[venue]?.protocol ?? venue;
+export const venueName = (venue: string) => VENUES[venue]?.name ?? venue;
 
 export function lendingVenues(asset: string): { venue: string; name: string }[] {
   const a = lendAsset(asset);
   const out: { venue: string; name: string }[] = [];
-  if (a in DEPLOYMENTS.lending.aaveV3.aTokens) out.push({ venue: "aave", name: "Aave V3" });
-  if (a in DEPLOYMENTS.lending.neverland.aTokens) out.push({ venue: "neverland", name: "Neverland" });
+  if (a in DEPLOYMENTS.lending.aaveV3.aTokens) out.push({ venue: "aave", name: VENUES.aave.name });
+  if (a in DEPLOYMENTS.lending.neverland.aTokens) out.push({ venue: "neverland", name: VENUES.neverland.name });
   return [...out, ...VAULTS.filter((v) => v.asset === a)];
 }
 
@@ -51,11 +58,6 @@ export function kindsFor(asset: string): SourceKind[] {
 export const defaultVenue = (kind: SourceKind, asset: string) =>
   kind === "lending" ? (lendingVenues(asset)[0]?.venue ?? "") : kind === "staking" ? "shmonad" : kind === "lp" ? "kuru-activevault" : "perpl";
 
-export const venueName = (venue: string) =>
-  ({ aave: "Aave V3", neverland: "Neverland", shmonad: "shMonad", "kuru-activevault": "Kuru ActiveVault", perpl: "Kuru + Perpl" })[venue] ??
-  VAULTS.find((v) => v.venue === venue)?.name ??
-  venue;
-
 export const leverageOf = (s: Source) => Number(s.params?.leverage ?? 2);
 
 // live APY per source; null = no rate. basis = trailing-7d short APR × L/(L+1) (spot share earns funding)
@@ -71,16 +73,18 @@ export function sourceApy(s: Source, asset: string, rates: Rates | null | undefi
   return r ? Number(r.apy) : null;
 }
 
-const sleeveApy = (sl: Sleeve, rates: Rates | null | undefined) => {
-  const ps = sl.sources.map((s) => sourceApy(s, sl.asset, rates));
-  return ps.every((p) => p === null) ? null : ps.reduce<number>((a, p, i) => a + (p ?? 0) * (sl.sources[i].weightBps / TOTAL_BPS), 0);
+// Σ weight × apy; null = no apy anywhere
+const weighted = <T extends { weightBps: number }>(xs: T[], apy: (x: T) => number | null) => {
+  const ps = xs.map(apy);
+  return ps.every((p) => p === null) ? null : ps.reduce<number>((a, p, i) => a + (p ?? 0) * (xs[i].weightBps / TOTAL_BPS), 0);
 };
 
-// Σ sleeve weight × Σ source weight × live rate; null = no rate anywhere
-export const blendedApy = (sleeves: Sleeve[], rates: Rates | null | undefined) => {
-  const ps = sleeves.map((sl) => sleeveApy(sl, rates));
-  return ps.every((p) => p === null) ? null : ps.reduce<number>((a, p, i) => a + (p ?? 0) * (sleeves[i].weightBps / TOTAL_BPS), 0);
-};
+// Σ sleeve weight × Σ source weight × live rate
+export const blendedApy = (sleeves: Sleeve[], rates: Rates | null | undefined) =>
+  weighted(sleeves, (sl) => weighted(sl.sources, (s) => sourceApy(s, sl.asset, rates)));
+
+// api estimate when present, else blended from live rates
+export const liveApy = (s: Strategy, rates: Rates | null | undefined) => (s.apy?.estimate != null ? Number(s.apy.estimate) : blendedApy(parts(s), rates));
 
 const ruleBody = (rules: Rules, basis?: Source) => ({
   driftBps: String(rules.driftBps ?? 500),

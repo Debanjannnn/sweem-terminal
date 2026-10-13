@@ -1,0 +1,26 @@
+# prod overlay (Vultr): docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+# only Caddy is published; everything else stays on the compose network
+services:
+  postgres: {ports: !reset [], restart: unless-stopped}
+  redis: {ports: !reset [], restart: unless-stopped}
+  publisher: {ports: !reset [], restart: unless-stopped}
+  market-data: {ports: !reset [], restart: unless-stopped}
+  api: {ports: !reset [], restart: unless-stopped}
+  scheduler: {ports: !reset [], restart: unless-stopped}
+  executor: {restart: unless-stopped}
+  history: {ports: !reset [], restart: unless-stopped}
+  indexer: {ports: !reset [], restart: unless-stopped}
+
+  # TLS + routing: api.$DOMAIN, data.$DOMAIN (REST + WS), history.$DOMAIN
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    environment: {DOMAIN: "${DOMAIN:?set DOMAIN in .env}"}
+    volumes:
+      - ./infra/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy:/data
+    depends_on: [api, market-data, history]
+
+volumes:
+  caddy:

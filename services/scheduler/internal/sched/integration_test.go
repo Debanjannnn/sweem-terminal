@@ -4,7 +4,6 @@ package sched
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -224,26 +223,32 @@ func TestTakeProfitFiresOnce(t *testing.T) {
 	}
 }
 
-func TestBasketRebalance(t *testing.T) {
+// recurring buy: a dca schedule on a strategy opens a new position per run, with its fee row, once across instances.
+func TestRecurringBuy(t *testing.T) {
 	e := setup(t)
-	var bid string
-	e.db.QueryRow(context.Background(), `insert into basket_defs(owner,name,legs) values ($1,'b','[{"market":"WETH","weightBps":5000},{"market":"MON","weightBps":5000}]') returning id`, user).Scan(&bid)
-	// held: 0.07 WETH ($280) + 4000 MON ($120) ⇒ 70/30
-	bought, _ := json.Marshal([]planner.Step{{Action: "kuru.marketBuy", Market: "WETH", MinOut: "70000000000000000"}, {Action: "kuru.marketBuy", Market: "MON", MinOut: "4000000000000000000000"}})
-	e.exec(t, `insert into executions(user_id,slot,kind,status,steps,basket_id) values ($1,0,'basket_buy','confirmed',$2,$3)`, user, bought, bid)
-	e.chain.wallet["WETH"], e.chain.wallet["MON"] = d("1000000000000000000"), d("100000000000000000000000")
-	e.exec(t, `insert into schedules(user_id,kind,target_type,target_id,interval_seconds,next_run_at,drift_bps,max_slippage_bps,max_per_run_usdc)
-		values ($1,'rebalance','basket',$2,3600,now() - interval '1 minute',500,50,1000)`, user, bid)
+	var stid string
+	e.exec(t, `insert into users(id) values ('did:privy:creator')`)
+	e.db.QueryRow(context.Background(), `insert into strategies(creator,name,asset,sources) values ('did:privy:creator','b','USDC','[{"kind":"lending","venue":"aave","weightBps":10000}]') returning id`).Scan(&stid)
+	e.exec(t, `insert into schedules(user_id,kind,target_type,target_id,amount_usdc,interval_seconds,next_run_at,max_slippage_bps,max_per_run_usdc)
+		values ($1,'dca','strategy',$2,100,3600,now() - interval '1 minute',50,100)`, user, stid)
 	e.race(time.Now())
 	ids := e.calls(1)
 	if len(ids) != 1 {
 		t.Fatalf("calls = %v", ids)
 	}
-	_, steps := e.steps(t, ids[0])
-	// sell $80 of WETH (0.02), buy MON with its minOut
-	if len(steps) != 2 || steps[0].Action != "kuru.marketSell" || steps[0].Market != "WETH" || steps[0].Size != "20000000000000000" ||
-		steps[1].Action != "kuru.marketBuy" || steps[1].Market != "MON" || steps[1].Quote != steps[0].MinOut {
-		t.Fatalf("%+v", steps)
+	kind, steps := e.steps(t, ids[0])
+	if kind != "deploy" || len(steps) != 2 || steps[0].Action != "fee.transfer" || steps[0].Amount != "400000" || steps[1].Action != "lend.supply" || steps[1].Amount != "99600000" {
+		t.Fatalf("%s %+v", kind, steps)
+	}
+	var status, principal, fee, owed string
+	deadline := time.Now().Add(3 * time.Second)
+	for status != "open" && time.Now().Before(deadline) {
+		e.db.QueryRow(context.Background(), `select p.status, p.principal_usdc::text, f.fee_usdc::text, f.creator_owed_usdc::text from strategy_positions p
+			join executions x on x.id = p.execution_id join fee_ledger f on f.execution_id = x.id where x.id = $1 and p.user_id = $2`, ids[0], user).Scan(&status, &principal, &fee, &owed)
+		time.Sleep(20 * time.Millisecond)
+	}
+	if status != "open" || principal != "100" || fee != "0.4" || owed != "0.2" {
+		t.Fatalf("position %s %s fee %s owed %s", status, principal, fee, owed)
 	}
 }
 
@@ -456,7 +461,7 @@ func TestFundingAPRLookback(t *testing.T) {
 	e := setup(t)
 	ctx := context.Background()
 	snap := streams.RatesSnapshot{Funding: []streams.FundingInfo{{PerpID: 20, AprShort7d: d("0.2")}}}
-	if apr, ok, err := e.a.fundingAPR(ctx, snap, 20, 7); err != nil || !ok || !apr.Equal(d("0.2")) {
+	if apr, ok, err := pg.GateAPR(ctx, e.db, snap, 20, 7); err != nil || !ok || !apr.Equal(d("0.2")) {
 		t.Fatalf("no history ⇒ 7d fallback: %s %v %v", apr, ok, err)
 	}
 	day := time.Now().UTC().Truncate(24 * time.Hour)
@@ -467,7 +472,7 @@ func TestFundingAPRLookback(t *testing.T) {
 	}{{0, 1, "1"}, {1, 1, "0.0001"}, {1, 2, "0.0001"}, {2, 1, "0.0004"}, {10, 1, "1"}} { // today + 10d ago are out of a 7d window
 		e.exec(t, `insert into series_funding(perp_id, ts, rate) values (20, $1, $2)`, day.AddDate(0, 0, -r.ago).Add(time.Duration(r.h)*time.Hour), r.rate)
 	}
-	if apr, ok, err := e.a.fundingAPR(ctx, snap, 20, 7); err != nil || !ok || !apr.Equal(d("0.1095")) { // mean(0.0002, 0.0004) × 365
+	if apr, ok, err := pg.GateAPR(ctx, e.db, snap, 20, 7); err != nil || !ok || !apr.Equal(d("0.1095")) { // mean(0.0002, 0.0004) × 365
 		t.Fatalf("%s %v %v", apr, ok, err)
 	}
 }

@@ -15,7 +15,6 @@ import (
 
 const (
 	RegistryMarkets = "registry:markets"
-	RegistryBaskets = "registry:baskets" // retired with ERC-20 baskets; no writer on mainnet
 	HeartbeatKey    = "publisher:heartbeat"
 	Rates           = "rates" // stream of RatesSnapshot
 	RatesLatest     = "rates:latest"
@@ -27,8 +26,6 @@ func Book(market string) string       { return "book:" + strings.ToLower(market)
 func BookLatest(market string) string { return Book(market) + ":latest" }
 func Trades(market string) string     { return "trades:" + strings.ToLower(market) }
 func Ref(market string) string        { return "ref:" + strings.ToLower(market) }
-func Nav(basket string) string        { return "nav:" + strings.ToLower(basket) } // retired, no writer
-func NavLatest(basket string) string  { return Nav(basket) + ":latest" }
 
 func Candles(market, interval string) string {
 	return "candles:" + strings.ToLower(market) + ":" + interval
@@ -70,19 +67,6 @@ type MarketInfo struct {
 	TickSize       Dec    `json:"tickSize"`
 	MinSize        Dec    `json:"minSize"`
 	TakerFeePps    Dec    `json:"takerFeePps"`
-}
-
-type Component struct {
-	Market    Addr `json:"market"`
-	Token     Addr `json:"token"`
-	WeightBps int  `json:"weightBps"`
-}
-
-type BasketInfo struct {
-	Address    Addr        `json:"address"`
-	Name       string      `json:"name"`
-	Symbol     string      `json:"symbol"`
-	Components []Component `json:"components"`
 }
 
 // Level is [price, size].
@@ -154,26 +138,6 @@ type RatesSnapshot struct {
 	Ts      int64         `json:"ts"`
 	Rates   []RateInfo    `json:"rates"`
 	Funding []FundingInfo `json:"funding"`
-}
-
-// NavComponent, NavPoint, BasketInfo, Component: retired ERC-20 basket types, kept until scheduler/seeder drop them.
-type NavComponent struct {
-	Market  Addr `json:"market"`
-	Token   Addr `json:"token"`
-	Balance Dec  `json:"balance"`
-	Mid     Dec  `json:"mid"`
-	Value   Dec  `json:"value"`
-}
-
-type NavPoint struct {
-	Basket      Addr           `json:"basket"`
-	Block       uint64         `json:"block"`
-	Ts          int64          `json:"ts"`
-	Supply      Dec            `json:"supply"`
-	TotalNav    Dec            `json:"totalNav"`
-	NavPerShare Dec            `json:"navPerShare"`
-	Stale       bool           `json:"stale"`
-	Components  []NavComponent `json:"components"`
 }
 
 // Publish XADDs msg to stream (if set) and SETs latestKey (if set), atomically.

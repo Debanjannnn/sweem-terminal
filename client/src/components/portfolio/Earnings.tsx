@@ -38,7 +38,7 @@ export function EarningsCard() {
           <ul className="space-y-1 text-xs">
             {d.rows.map((r) => (
               <li key={r.executionId} className="flex items-center gap-2">
-                <Link href={`/earn/${r.strategyId}`} className="hover:underline">
+                <Link href={`/baskets/${r.strategyId}`} className="hover:underline">
                   {fmtTime(r.createdAt)}
                 </Link>
                 <StatusPill status={r.paid ? "paid" : "owed"} />

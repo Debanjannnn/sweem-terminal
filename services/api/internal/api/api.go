@@ -67,8 +67,6 @@ type Server struct {
 // Routes registers every /api/v1 route on mux.
 func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/markets", s.markets)
-	mux.HandleFunc("GET /api/v1/baskets", s.publicBaskets)
-	mux.HandleFunc("GET /api/v1/baskets/{id}", s.publicBasket)
 	mux.HandleFunc("GET /api/v1/strategies", s.strategies)
 	mux.Handle("GET /api/v1/strategies/{id}", s.optionalMe(s.strategy))
 	mux.HandleFunc("POST /api/v1/strategies/{id}/backtest", s.backtest)
@@ -78,13 +76,7 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/me", s.me(s.user))
 	mux.Handle("POST /api/v1/me/delegation", s.me(s.putDelegation))
 	mux.Handle("DELETE /api/v1/me/delegation", s.me(s.deleteDelegation))
-	mux.Handle("GET /api/v1/me/baskets", s.me(s.myBaskets))
-	mux.Handle("POST /api/v1/me/baskets", s.me(s.saveBasket))
-	mux.Handle("POST /api/v1/me/baskets/{id}", s.me(s.saveBasket))
-	mux.Handle("DELETE /api/v1/me/baskets/{id}", s.me(s.deleteBasket))
-	mux.Handle("POST /api/v1/me/baskets/{id}/buy", s.me(s.delegatedTrade("basket_buy")))
-	mux.Handle("POST /api/v1/me/baskets/{id}/sell", s.me(s.delegatedTrade("basket_sell")))
-	mux.Handle("POST /api/v1/me/trade", s.me(s.delegatedTrade("trade")))
+	mux.Handle("POST /api/v1/me/trade", s.me(s.delegatedTrade))
 	mux.Handle("POST /api/v1/me/trade/prepare", s.me(s.prepare))
 	mux.Handle("POST /api/v1/me/trade/record", s.me(s.record))
 	mux.Handle("POST /api/v1/me/margin/deposit", s.me(s.margin(true)))
@@ -361,7 +353,7 @@ type ScheduleInput struct {
 func (in *ScheduleInput) Validate() string {
 	t := in.Target.Type
 	switch {
-	case t != "market" && t != "basket" && t != "position", in.Target.ID == "":
+	case t != "market" && t != "position" && t != "strategy", in.Target.ID == "":
 		return "invalid_target"
 	case t != "market" && uuid.Validate(in.Target.ID) != nil:
 		return "invalid_target"
@@ -383,7 +375,7 @@ func (in *ScheduleInput) Validate() string {
 	}
 	interval := in.IntervalSeconds != nil && *in.IntervalSeconds >= 60
 	switch in.Kind {
-	case "dca":
+	case "dca": // market buy, or a recurring buy into a basket (strategy: new position per run)
 		if t == "position" {
 			return "invalid_target"
 		}
@@ -398,6 +390,9 @@ func (in *ScheduleInput) Validate() string {
 		}
 		in.TriggerPrice, in.SellBps, in.DriftBps = nil, nil, nil
 	case "take_profit", "stop_loss":
+		if t == "strategy" {
+			return "invalid_target"
+		}
 		if !norm(in.TriggerPrice) {
 			return "invalid_trigger_price"
 		}
@@ -406,13 +401,13 @@ func (in *ScheduleInput) Validate() string {
 		}
 		in.AmountUSDC, in.IntervalSeconds, in.DriftBps = nil, nil, nil
 	case "rebalance":
-		if t == "market" {
+		if t != "position" {
 			return "invalid_target"
 		}
 		if !interval {
 			return "invalid_interval_seconds"
 		}
-		if (t == "basket" && in.DriftBps == nil) || (in.DriftBps != nil && (*in.DriftBps < 1 || *in.DriftBps > 10000)) {
+		if in.DriftBps != nil && (*in.DriftBps < 1 || *in.DriftBps > 10000) {
 			return "invalid_drift_bps"
 		}
 		in.AmountUSDC, in.TriggerPrice, in.SellBps = nil, nil, nil

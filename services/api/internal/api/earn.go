@@ -80,7 +80,7 @@ func (s *Server) partAPY(asset string, srcs []planner.Source, r streams.RatesSna
 			}
 		}
 		if src.Kind == "basis" {
-			perpID := s.Plan.Dep.Perpl.PerpIds[map[string]string{"WETH": "ETH", "cbBTC": "BTC", "MON": "MON"}[asset]]
+			perpID := s.Plan.PerpID(asset)
 			for _, f := range r.Funding {
 				if f.PerpID == perpID {
 					l, _ := decimal.NewFromString(src.Params.Leverage)
@@ -193,7 +193,7 @@ func (s *Server) historyBody(st planner.Strategy) map[string]any {
 		leg := map[string]any{"kind": src.Kind, "venue": src.Venue, "weight": bpsFrac(src.WeightBps)}
 		if src.Kind == "basis" {
 			leg["venue"] = ""
-			leg["perpId"] = s.Plan.Dep.Perpl.PerpIds[map[string]string{"WETH": "ETH", "cbBTC": "BTC", "MON": "MON"}[st.Asset]]
+			leg["perpId"] = s.Plan.PerpID(st.Asset)
 			rules["basisLeverage"] = src.Params.Leverage
 		}
 		legs = append(legs, leg)
@@ -352,12 +352,16 @@ func (s *Server) positions(w http.ResponseWriter, r *http.Request) {
 // on-chain state (planner.ResumeWithdraw), so a retry never re-closes a short or withdraws twice.
 func (s *Server) withdraw(w http.ResponseWriter, r *http.Request) {
 	pid, ok := id(w, r)
-	var in struct{ SlippageBps *int }
+	var in struct{ Bps, SlippageBps *int }
 	if !ok || (r.ContentLength != 0 && !decode(w, r, &in)) {
 		return
 	}
 	sl, oks := slip(in.SlippageBps)
-	if !oks {
+	bps := 10_000
+	if in.Bps != nil {
+		bps = *in.Bps
+	}
+	if !oks || bps < 1 || bps > 10_000 {
 		httpx.Error(w, http.StatusBadRequest, "bad_request")
 		return
 	}
@@ -389,6 +393,21 @@ func (s *Server) withdraw(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		slog.Error("live state", "err", err)
 		httpx.Error(w, http.StatusBadGateway, "rpc_unavailable")
+		return
+	}
+	if bps < 10_000 && pos.Status == "open" { // partial sell: position stays open with smaller legs
+		plan, err := s.Plan.WithdrawBps(ctx, st, pos.Legs, live.Bals, bps, sl)
+		if err != nil {
+			fail(w, "plan withdraw", err)
+			return
+		}
+		execID, err := s.Store.PartialWithdraw(ctx, me, pid, NewExec{Kind: "withdraw", Steps: plan.Steps, PositionID: &pid, Legs: plan.Legs})
+		if err != nil {
+			fail(w, "partial withdraw", err)
+			return
+		}
+		s.start(execID, nil)
+		accepted(w, execID, "withdraw", plan.Steps, map[string]any{"positionId": pid, "bps": bps})
 		return
 	}
 	steps, done := last.Steps, last.StepDone

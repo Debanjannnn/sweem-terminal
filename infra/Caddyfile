@@ -1,0 +1,11 @@
+api.{$DOMAIN} {
+	reverse_proxy api:8080
+}
+
+data.{$DOMAIN} {
+	reverse_proxy market-data:8082
+}
+
+history.{$DOMAIN} {
+	reverse_proxy history:8087
+}

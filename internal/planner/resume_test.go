@@ -67,23 +67,6 @@ func TestResumeWithdraw(t *testing.T) {
 	}
 }
 
-func TestAttributeFills(t *testing.T) {
-	p, _ := planner()
-	h1, h2, h3 := "0xAA", "0xbb", "0xcc"
-	got := p.AttributeFills([]ExecFills{
-		// buy WETH filled 0.0101 (size 101000000 at 1e10 precision) vs planned minOut 0.01; cbBTC not indexed yet
-		{Steps: []byte(`[{"action":"kuru.marketBuy","market":"WETH","quote":"1","minOut":"10000000000000000"},{"action":"kuru.marketBuy","market":"cbBTC","quote":"1","minOut":"5000"}]`),
-			TxHashes: []string{h1, h2}, Fills: map[string]string{"0xaa": "101000000"}},
-		{Steps: []byte(`[{"action":"kuru.marketSell","market":"WETH","size":"5000000000000000","minOut":"1"}]`), TxHashes: []string{h3}, Fills: map[string]string{"0xcc": "50000000"}},
-	})
-	if w := got["WETH"]; w.Amount.String() != "5100000000000000" || w.Provisional {
-		t.Errorf("WETH %+v", w)
-	}
-	if c := got["cbBTC"]; c.Amount.String() != "5000" || !c.Provisional {
-		t.Errorf("cbBTC %+v", c)
-	}
-}
-
 // fake Perpl: account 42 with 7 AUSD free; position lot 130 on perp 20 only.
 type perplChain struct{ noAccount bool }
 

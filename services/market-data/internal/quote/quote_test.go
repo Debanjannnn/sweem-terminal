@@ -117,30 +117,3 @@ func TestMonUnits(t *testing.T) {
 		t.Fatalf("%+v", q)
 	}
 }
-
-func TestBasket(t *testing.T) {
-	r := BuyBasket(d("5000000"), []int64{6000, 4000}, []streams.MarketInfo{weth, weth}, []streams.BookSnapshot{book, book}, 50, 50)
-	if r.Ok || r.Legs[0].Error != "below_min_size" || r.Legs[0].AmountUsdc != "3000000" {
-		t.Fatalf("%+v", r)
-	}
-	r = BuyBasket(d("6000000000"), []int64{5000, 5000}, []streams.MarketInfo{weth, weth}, []streams.BookSnapshot{book, book}, 50, 50)
-	if !r.Ok || r.Partial || len(r.Legs) != 2 || r.FillableUsdc != "6000000000" || r.Legs[1].Quote.ExpectedOut != "1497512437800000000" {
-		t.Fatalf("%+v", r)
-	}
-}
-
-func TestSellBasket(t *testing.T) {
-	mon := streams.MarketInfo{Market: "0x065c9d28e428a0db40191a54d33d5b7c71a9c394", BaseDecimals: 18, QuoteDecimals: 6,
-		PricePrecision: d("100000000"), SizePrecision: d("10000000000"), MinSize: d("2000000000000")}
-	monBook := streams.BookSnapshot{Bids: []streams.Level{{d("0.027"), d("1000")}}}
-	// 1.5 WETH → 2000 + 0.5×1990 = 2995 USDC; 300 MON → 8.1 USDC
-	r := SellBasket([]decimal.Decimal{d("1500000000000000000"), d("300000000000000000000")}, []streams.MarketInfo{weth, mon}, []streams.BookSnapshot{book, monBook}, 100, 100)
-	if !r.Ok || r.Side != "sell" || r.ExpectedOutUsdc != "3003100000" || r.MinOutUsdc != "2973069000" || r.Partial {
-		t.Fatalf("%+v", r)
-	}
-	// 2000 MON exhausts the 1000-MON bid; 100 MON is below minSize
-	r = SellBasket([]decimal.Decimal{d("2000000000000000000000"), d("100000000000000000000")}, []streams.MarketInfo{mon, mon}, []streams.BookSnapshot{monBook, monBook}, 0, 100)
-	if r.Ok || !r.Partial || r.Legs[1].Error != "below_min_size" || r.ExpectedOutUsdc != "27000000" || r.Legs[0].Quote.Fillable != "1000000000000000000000" {
-		t.Fatalf("%+v", r)
-	}
-}

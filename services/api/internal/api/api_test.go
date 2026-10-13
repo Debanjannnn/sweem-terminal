@@ -35,7 +35,7 @@ func TestValidate(t *testing.T) {
 		return in
 	}
 	sl := func(mut func(*ScheduleInput)) ScheduleInput {
-		in := ScheduleInput{Kind: "stop_loss", Target: Target{"basket", uid}, TriggerPrice: ptr("95"), SellBps: ptr(10000),
+		in := ScheduleInput{Kind: "stop_loss", Target: Target{"position", uid}, TriggerPrice: ptr("95"), SellBps: ptr(10000),
 			MaxSlippageBps: 1000, MaxPerRunUSDC: "100", AmountUSDC: ptr("1")}
 		if mut != nil {
 			mut(&in)
@@ -51,7 +51,10 @@ func TestValidate(t *testing.T) {
 		{sl(nil), ""},
 		{rb, ""},
 		{sl(func(i *ScheduleInput) { i.Kind = "take_profit" }), ""},
-		{dca(func(i *ScheduleInput) { i.Target = Target{"basket", "nope"} }), "invalid_target"},
+		{dca(func(i *ScheduleInput) { i.Target = Target{"strategy", uid} }), ""}, // recurring buy into a basket
+		{dca(func(i *ScheduleInput) { i.Target = Target{"strategy", "nope"} }), "invalid_target"},
+		{dca(func(i *ScheduleInput) { i.Target = Target{"basket", uid} }), "invalid_target"},
+		{sl(func(i *ScheduleInput) { i.Target = Target{"strategy", uid} }), "invalid_target"},
 		{dca(func(i *ScheduleInput) { i.Target = Target{"position", uid} }), "invalid_target"},
 		{dca(func(i *ScheduleInput) { i.Target = Target{"pool", "x"} }), "invalid_target"},
 		{dca(func(i *ScheduleInput) { i.Kind = "recurring" }), "invalid_kind"},
@@ -62,7 +65,8 @@ func TestValidate(t *testing.T) {
 		{dca(func(i *ScheduleInput) { i.MaxSlippageBps = 0 }), "invalid_max_slippage_bps"},
 		{sl(func(i *ScheduleInput) { i.TriggerPrice = ptr("-1") }), "invalid_trigger_price"},
 		{sl(func(i *ScheduleInput) { i.SellBps = ptr(0) }), "invalid_sell_bps"},
-		{sl(func(i *ScheduleInput) { i.Kind = "rebalance"; i.IntervalSeconds = ptr(int64(60)) }), "invalid_drift_bps"},
+		{sl(func(i *ScheduleInput) { i.Kind = "rebalance"; i.IntervalSeconds = ptr(int64(60)); i.DriftBps = ptr(0) }), "invalid_drift_bps"},
+		{func() ScheduleInput { x := rb; x.Target = Target{"strategy", uid}; return x }(), "invalid_target"},
 		{func() ScheduleInput { x := rb; x.Target = Target{"market", "WETH"}; return x }(), "invalid_target"},
 	}
 	for i, tc := range cases {
@@ -140,12 +144,6 @@ func (f *fakeStore) FailExecution(_ context.Context, id, code string) error {
 func (f *fakeStore) CreateSchedule(_ context.Context, _ string, in ScheduleInput) (Schedule, error) {
 	return Schedule{ID: "s1", Kind: in.Kind, Target: in.Target}, f.err
 }
-func (f *fakeStore) BasketDef(_ context.Context, _, id string) (Basket, error) {
-	return Basket{ID: id, Legs: []planner.Leg{{Market: "WETH", WeightBps: 5000}, {Market: "MON", WeightBps: 5000}}}, f.err
-}
-func (f *fakeStore) SaveBasket(_ context.Context, did, id string, in BasketInput) (Basket, error) {
-	return Basket{ID: "b1", Owner: did, Name: in.Name, Legs: in.Legs}, f.err
-}
 func (f *fakeStore) Strategy(_ context.Context, id, _ string) (Strategy, error) {
 	return f.strat, f.err
 }
@@ -184,6 +182,12 @@ func (f *fakeStore) StartWithdraw(_ context.Context, _, _ string, e NewExec) (st
 	f.execs = append(f.execs, e)
 	f.mu.Unlock()
 	return "e3", f.err
+}
+func (f *fakeStore) PartialWithdraw(_ context.Context, _, _ string, e NewExec) (string, error) {
+	f.mu.Lock()
+	f.execs = append(f.execs, e)
+	f.mu.Unlock()
+	return "e4", f.err
 }
 func (f *fakeStore) SetBacktest(context.Context, string, json.RawMessage) error {
 	f.log("backtest")
@@ -286,15 +290,14 @@ func TestHandlers(t *testing.T) {
 		{"trade cap", "POST", "/api/v1/me/trade", "good", `{"market":"WETH","side":"buy","amount":"1000.000001"}`, nil, nil, wallet, "", 422, "cap_exceeded"},
 		{"trade buy", "POST", "/api/v1/me/trade", "good", `{"market":"WETH","side":"buy","amount":"100","slippageBps":50}`, nil, nil, wallet, "", 202,
 			`"steps":[{"action":"kuru.marketBuy","market":"WETH","quote":"100000000","minOut":"24875000000000000"}]`},
-		{"basket bad legs", "POST", "/api/v1/me/baskets", "good", `{"name":"x","legs":[{"market":"WETH","weightBps":9000}]}`, nil, nil, "", "", 400, "invalid_legs"},
-		{"basket create", "POST", "/api/v1/me/baskets", "good", `{"name":" Blue ","legs":[{"market":"WETH","weightBps":10000}],"public":true}`, nil, nil, "", "", 201, `"name":"Blue"`},
-		{"basket buy", "POST", "/api/v1/me/baskets/" + uid + "/buy", "good", `{"amountUsdc":"10"}`, nil, nil, wallet, "", 202, `"kind":"basket_buy"`},
-		{"basket buy missing", "POST", "/api/v1/me/baskets/" + uid + "/buy", "good", `{"amountUsdc":"10"}`, nil, ErrNotFound, wallet, "", 404, "not_found"},
+		{"old basket routes gone", "POST", "/api/v1/me/baskets/" + uid + "/buy", "good", `{"amountUsdc":"10"}`, nil, nil, wallet, "", 404, ""},
 		{"order below min", "POST", "/api/v1/me/orders", "good", `{"market":"WETH","side":"buy","price":"3600","size":"0.001"}`, nil, nil, wallet, "", 422, "below_min_size"},
 		{"deploy", "POST", "/api/v1/me/strategies/" + uid + "/deploy", "good", `{"amountUsdc":"100"}`, nil, nil, wallet, "", 202, `"positionId":"p1","steps":[{"action":"fee.transfer","amount":"400000"},{"action":"lend.supply","venue":"aaveV3","asset":"USDC","amount":"99600000"}]`},
 		{"deploy bad amount", "POST", "/api/v1/me/strategies/" + uid + "/deploy", "good", `{"amountUsdc":"-1"}`, nil, nil, wallet, "", 400, "bad_request"},
 		{"withdraw not open", "POST", "/api/v1/me/positions/" + uid + "/withdraw", "good", ``, nil, nil, wallet, "closing", 409, "position_not_open"},
 		{"withdraw", "POST", "/api/v1/me/positions/" + uid + "/withdraw", "good", ``, nil, nil, wallet, "open", 202, `{"action":"lend.withdraw","venue":"aaveV3","asset":"USDC","amount":"5000000"}`},
+		{"withdraw half", "POST", "/api/v1/me/positions/" + uid + "/withdraw", "good", `{"bps":5000}`, nil, nil, wallet, "open", 202, `"amount":"2500000"}]}`},
+		{"withdraw bad bps", "POST", "/api/v1/me/positions/" + uid + "/withdraw", "good", `{"bps":0}`, nil, nil, wallet, "open", 400, "bad_request"},
 		{"strategies apy", "GET", "/api/v1/strategies", "", "", nil, nil, "", "", 200, `"apy":{"estimate":"0.040000"`},
 		{"backtest proxy error", "POST", "/api/v1/strategies/" + uid + "/backtest", "", `{"from":"2026-01-01"}`, nil, nil, "", "", 422, `"no_data"`},
 		{"bad id", "GET", "/api/v1/me/executions/xyz", "good", "", nil, nil, "", "", 400, "bad_request"},

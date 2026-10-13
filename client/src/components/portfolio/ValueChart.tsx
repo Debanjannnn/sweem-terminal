@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { Triangle } from "lucide-react";
-import { fmtPctSigned, fmtUsd, getCandles } from "@/lib/api";
+import { fmtUsd, getCandles } from "@/lib/api";
 import { useAsync } from "@/lib/session";
 import { marketOf } from "@/lib/tokens";
 import { Panel, Skeleton } from "@/components/ui";
@@ -47,7 +47,7 @@ export function ValueChart({ legs, flat, total, loading }: { legs: { market: str
             </Flash>
             <span className={cn("inline-flex items-center gap-1 font-mono text-sm", up ? "text-positive" : "text-destructive")}>
               <Triangle className={cn("size-2.5 fill-current", !up && "rotate-180")} />
-              {usd2(Math.abs(diff))} ({fmtPctSigned(first > 0 ? (diff / first) * 100 : 0).replace(/^[+-]/, "")}) {range}
+              {usd2(Math.abs(diff))} ({Math.abs(first > 0 ? (diff / first) * 100 : 0).toFixed(2)}%) {range}
             </span>
           </div>
         )}

@@ -5,13 +5,14 @@ import { useState } from "react";
 import { ArrowDown, ArrowUp, ChevronDown, Fuel, Search } from "lucide-react";
 import { fmtUsd } from "@/lib/api";
 import { fmtUnits } from "@/lib/tokens";
-import type { Basket } from "@/lib/types";
+import type { Strategy } from "@/lib/types";
 import { Panel, Skeleton, useDismissable } from "@/components/ui";
 import { TokenIcon } from "@/components/TokenIcon";
-import { IconStack } from "@/components/invest/BasketCard";
+import { IconStack } from "@/components/IconStack";
 import { cn } from "@/lib/utils";
+import { AnyChainButton } from "@/components/deposit/AnyChainDeposit";
 
-export type AssetClass = "Basket" | "Crypto" | "Stablecoin";
+export type AssetClass = "Crypto" | "Stablecoin";
 
 export type Row = {
   key: string;
@@ -27,13 +28,12 @@ export type Row = {
 };
 
 const CHIP: Record<AssetClass, string> = {
-  Basket: "border-primary/30 bg-primary/10 text-primary",
   Crypto: "border-chart-2/30 bg-chart-2/10 text-chart-2",
   Stablecoin: "border-border bg-secondary/60 text-muted-foreground",
 };
 
 const SELECT = "rounded-full bg-secondary/70 px-3 py-2 text-sm text-foreground outline-none transition-colors hover:bg-secondary";
-const CLASSES = [{ value: "all", label: "All asset classes" }, ...(["Basket", "Crypto", "Stablecoin"] as const).map((c) => ({ value: c, label: c }))];
+const CLASSES = [{ value: "all", label: "All asset classes" }, ...(["Crypto", "Stablecoin"] as const).map((c) => ({ value: c, label: c }))];
 
 export function Holdings({
   rows,
@@ -48,7 +48,7 @@ export function Holdings({
   usdc: bigint | undefined;
   mon: bigint | undefined;
   lowGas: boolean;
-  baskets: Basket[] | null;
+  baskets: Strategy[] | null;
 }) {
   const [cls, setCls] = useState<"all" | AssetClass>("all");
   const [query, setQuery] = useState("");
@@ -62,6 +62,7 @@ export function Holdings({
     <Panel className="p-5 sm:p-6">
       <div className="flex flex-wrap items-center gap-3">
         <h2 className="mr-auto text-lg font-medium">My Holdings</h2>
+        <AnyChainButton className="rounded-full border border-border px-3 py-1.5 hover:bg-secondary hover:no-underline" />
         <select aria-label="Asset class" value={cls} onChange={(e) => setCls(e.target.value as typeof cls)} className={SELECT}>
           {CLASSES.map((c) => (
             <option key={c.value} value={c.value}>
@@ -200,7 +201,7 @@ export function Holdings({
   );
 }
 
-function InvestMenu({ baskets }: { baskets: Basket[] | null }) {
+function InvestMenu({ baskets }: { baskets: Strategy[] | null }) {
   const { open, setOpen, ref } = useDismissable();
   return (
     <div ref={ref} className="relative">
@@ -219,7 +220,7 @@ function InvestMenu({ baskets }: { baskets: Basket[] | null }) {
             </li>
           ) : (
             [
-              { href: "/earn", name: "Earn strategies", tag: "Earn" },
+              { href: "/baskets", name: "All baskets", tag: "" },
               ...baskets.map((b) => ({ href: `/baskets/${b.id}`, name: b.name, tag: "Basket" })),
             ].map((b) => (
               <li key={b.href}>

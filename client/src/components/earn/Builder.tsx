@@ -354,31 +354,33 @@ export function StrategyBuilder() {
           <div className="space-y-4 lg:sticky lg:top-24">
             <Panel>
               <div className="flex items-center justify-between gap-3 px-5 pt-5">
+                <Label>Amount</Label>
+                {min.total !== 0 && (
+                  <span className="tnum text-xs text-muted-foreground">min {min.total === null ? "-" : fmtUsd(min.total)}</span>
+                )}
+              </div>
+              <div className="flex items-center gap-3 px-5 pt-3 pb-5">
+                <input
+                  value={amount}
+                  onChange={(e) => setAmount(e.target.value)}
+                  inputMode="decimal"
+                  placeholder="0"
+                  aria-label={`Amount in ${unit}`}
+                  className="tnum w-full min-w-0 bg-transparent text-4xl font-medium tracking-tight outline-none placeholder:text-muted-foreground/40"
+                />
+                <span className="inline-flex shrink-0 items-center gap-2 rounded-full bg-secondary/70 py-2 pl-3 pr-4 text-sm font-medium">
+                  <TokenIcon symbol={unit} size={20} />
+                  {unit}
+                </span>
+              </div>
+              <Divider />
+              <div className="px-5 pt-5">
                 <Label>Routing</Label>
-                <label className="flex items-center gap-2 rounded-full border border-border bg-secondary/30 py-1 pl-3 pr-1.5 text-sm">
-                  <input
-                    value={amount}
-                    onChange={(e) => setAmount(e.target.value)}
-                    inputMode="decimal"
-                    aria-label={`Preview amount in ${unit}`}
-                    className="tnum w-20 bg-transparent text-right outline-none"
-                  />
-                  <span className="inline-flex items-center gap-1.5 rounded-full bg-secondary px-2 py-0.5 text-xs font-medium">
-                    <TokenIcon symbol={unit} size={14} />
-                    {unit}
-                  </span>
-                </label>
               </div>
               <StrategyFlow asset={asset} amount={flowAmt} legs={flowLegs} />
             </Panel>
 
             <Panel className="space-y-4 p-5 sm:p-6">
-              {min.total !== 0 && (
-                <div className="flex items-center justify-between text-sm">
-                  <span className="text-muted-foreground">Min deposit</span>
-                  <span className="tnum">{min.total === null ? "-" : fmtUsd(min.total)}</span>
-                </div>
-              )}
               {invalid && <p className="text-xs text-warning">{invalid}</p>}
               {error && <ErrorBox message={error} />}
               <Button className="w-full py-3" pending={busy === "public"} disabled={!ready || !!invalid || busy !== null} onClick={() => void publish(true)}>

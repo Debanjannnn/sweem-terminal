@@ -1,12 +1,12 @@
 variable "region" {
   type    = string
-  default = "sgp"
+  default = "atl"
 }
 
-# 4 GB builds the Rust executor with the swap Ansible adds; vultr-cli plans list for others
+# whole stack idles ~500 MB; images are built on the deploy machine, not here
 variable "plan" {
   type    = string
-  default = "vc2-2c-4gb"
+  default = "vc2-1c-1gb"
 }
 
 variable "ssh_public_key" {

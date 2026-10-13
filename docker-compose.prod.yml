@@ -1,17 +1,17 @@
-# prod overlay (Vultr): docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+# prod overlay (Vultr, one box): images from GHCR, built by .github/workflows/images.yml; TAG pins a commit sha
 # only Caddy is published; everything else stays on the compose network
 services:
   postgres: {ports: !reset [], restart: unless-stopped}
   redis: {ports: !reset [], restart: unless-stopped}
-  publisher: {ports: !reset [], restart: unless-stopped}
-  market-data: {ports: !reset [], restart: unless-stopped}
-  api: {ports: !reset [], restart: unless-stopped}
-  scheduler: {ports: !reset [], restart: unless-stopped}
-  executor: {restart: unless-stopped}
-  history: {ports: !reset [], restart: unless-stopped}
-  indexer: {ports: !reset [], restart: unless-stopped}
+  publisher: {image: "ghcr.io/snehendu098/sweem-publisher:${TAG:-latest}", ports: !reset [], restart: unless-stopped}
+  market-data: {image: "ghcr.io/snehendu098/sweem-market-data:${TAG:-latest}", ports: !reset [], restart: unless-stopped}
+  api: {image: "ghcr.io/snehendu098/sweem-api:${TAG:-latest}", ports: !reset [], restart: unless-stopped}
+  scheduler: {image: "ghcr.io/snehendu098/sweem-scheduler:${TAG:-latest}", ports: !reset [], restart: unless-stopped}
+  executor: {image: "ghcr.io/snehendu098/sweem-executor:${TAG:-latest}", restart: unless-stopped}
+  history: {image: "ghcr.io/snehendu098/sweem-history:${TAG:-latest}", ports: !reset [], restart: unless-stopped}
+  indexer: {image: "ghcr.io/snehendu098/sweem-indexer:${TAG:-latest}", ports: !reset [], restart: unless-stopped}
 
-  # TLS + routing: api.$DOMAIN, data.$DOMAIN (REST + WS), history.$DOMAIN
+  # TLS for api.$DOMAIN: / → api, /data → market-data (REST + WS), /history → history
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped

@@ -1,11 +1,12 @@
+# api and market-data both serve /api/v1/markets, api and history /api/v1/backtest: prefix the latter two
 api.{$DOMAIN} {
-	reverse_proxy api:8080
-}
-
-data.{$DOMAIN} {
-	reverse_proxy market-data:8082
-}
-
-history.{$DOMAIN} {
-	reverse_proxy history:8087
+	handle_path /data/* {
+		reverse_proxy market-data:8082
+	}
+	handle_path /history/* {
+		reverse_proxy history:8087
+	}
+	handle {
+		reverse_proxy api:8080
+	}
 }

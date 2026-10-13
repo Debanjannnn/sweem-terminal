@@ -1,13 +1,15 @@
-# ansible-playbook -i "$(terraform -chdir=../terraform output -raw ip)," site.yml
-# ships the repo (no client) + local .env/.env.api/.env.executor, then builds and runs the prod compose stack
+# make deploy (= ansible-playbook -i "<ip>," site.yml)
+# pulls the GHCR images CI built (.github/workflows/images.yml), ships compose files + env, restarts the stack.
+# GHCR_TOKEN (classic PAT, read:packages) comes from .env.ghcr via make.
 - hosts: all
   vars:
     app: /opt/sweem
     repo: "{{ playbook_dir }}/../.."
+    compose: docker compose -f docker-compose.yml -f docker-compose.prod.yml
   tasks:
-    - name: Swap (Rust build needs more than 4 GB)
+    - name: Swap
       shell: |
-        fallocate -l 4G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+        fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
         echo '/swapfile none swap sw 0 0' >> /etc/fstab
       args: {creates: /swapfile}
 
@@ -15,27 +17,40 @@
       lineinfile: {path: /etc/ssh/sshd_config, regexp: '^#?PasswordAuthentication', line: PasswordAuthentication no}
       notify: restart ssh
 
-    - name: Docker
-      apt: {name: [docker.io, docker-compose-v2, docker-buildx, rsync], update_cache: true}
+    - name: Docker, rsync, security upgrades
+      apt: {name: [docker.io, docker-compose-v2, rsync, unattended-upgrades], update_cache: true}
 
-    - name: Unattended security upgrades
-      apt: {name: unattended-upgrades}
+    - name: GHCR login
+      shell: docker login ghcr.io -u snehendu098 --password-stdin
+      args: {stdin: "{{ lookup('env', 'GHCR_TOKEN') }}"}
+      no_log: true
+      changed_when: false
 
-    - name: Repo
+    - name: Compose files, migrations, Caddyfile, deployments
       synchronize:
-        src: "{{ repo }}/"
+        src: "{{ repo }}/{{ item }}"
         dest: "{{ app }}/"
         delete: true
-        rsync_opts: [--exclude=.git, --exclude=client, --exclude=target, --exclude=node_modules, --exclude=infra/terraform, --exclude=.env*, --exclude=.run]
+        rsync_opts: [--relative]
+      loop: [./docker-compose.yml, ./docker-compose.prod.yml, ./migrations, ./infra/Caddyfile, ./contracts/deployments]
 
     - name: Env files
       copy: {src: "{{ repo }}/{{ item }}", dest: "{{ app }}/{{ item }}", mode: "0600"}
       loop: [.env, .env.api, .env.executor]
 
-    - name: Build and start
-      command: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build --remove-orphans
+    - name: Pull
+      command: "{{ compose }} pull"
       args: {chdir: "{{ app }}"}
       changed_when: true
+
+    - name: Start
+      command: "{{ compose }} up -d --no-build --remove-orphans"
+      args: {chdir: "{{ app }}"}
+      changed_when: true
+
+    - name: Drop old images
+      command: docker image prune -f
+      changed_when: false
 
   handlers:
     - name: restart ssh

@@ -37,10 +37,10 @@ e2e:
 	CHAIN_ID=143 E2E_DEPLOYMENTS_PATH=$(CURDIR)/contracts/deployments/143.json \
 	go test -tags e2e -count=1 -v -timeout 45m ./e2e/
 
-# Vultr: VULTR_API_KEY + infra/terraform/terraform.tfvars
+# Vultr: VULTR_API_KEY in .env.vultr (not shipped to the server) + infra/terraform/terraform.tfvars
 provision:
-	terraform -chdir=infra/terraform init && terraform -chdir=infra/terraform apply
+	set -a && . ./.env.vultr && set +a && terraform -chdir=infra/terraform init && terraform -chdir=infra/terraform apply
 
-# ships repo + .env/.env.api/.env.executor, builds and restarts the prod stack
+# pulls CI-built GHCR images, ships compose + .env/.env.api/.env.executor, restarts the prod stack (GHCR_TOKEN in .env.ghcr)
 deploy:
-	cd infra/ansible && ansible-playbook -i "$$(terraform -chdir=../terraform output -raw ip)," site.yml
+	set -a && . ./.env.ghcr && set +a && cd infra/ansible && ansible-playbook -i "$$(terraform -chdir=../terraform output -raw ip)," site.yml

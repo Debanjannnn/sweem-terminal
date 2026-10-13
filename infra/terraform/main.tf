@@ -50,8 +50,5 @@ resource "vultr_instance" "sweem" {
   os_id             = data.vultr_os.ubuntu.id
   ssh_key_ids       = [vultr_ssh_key.deploy.id]
   firewall_group_id = vultr_firewall_group.sweem.id
-  backups           = "enabled"
-  backups_schedule {
-    type = "daily"
-  }
+  backups           = "disabled"
 }

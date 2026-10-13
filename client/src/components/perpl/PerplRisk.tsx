@@ -182,7 +182,8 @@ function FundingBars({ data, threshold }: { data: FundingDay[]; threshold: numbe
       <ResponsiveContainer width="100%" height="100%" initialDimension={{ width: 1, height: 1 }}>
         <BarChart data={rows} margin={{ top: 4, right: 0, bottom: 0, left: 0 }}>
           <XAxis dataKey="day" tick={{ fill: "var(--muted-foreground)", fontSize: 10 }} axisLine={false} tickLine={false} minTickGap={40} />
-          <YAxis hide domain={["auto", "auto"]} />
+          {/* tight to the data, zero and the gate line: "auto" pads to round ticks and floats the date axis off the bars */}
+          <YAxis hide domain={[(lo: number) => Math.min(lo, 0, threshold ?? 0), (hi: number) => Math.max(hi, 0, threshold ?? 0)]} />
           <Tooltip
             cursor={{ fill: "var(--secondary)" }}
             contentStyle={{ background: "var(--popover)", border: "1px solid var(--border)", borderRadius: 12, fontSize: 12 }}

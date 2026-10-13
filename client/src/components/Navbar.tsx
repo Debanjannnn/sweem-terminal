@@ -9,6 +9,8 @@ import { errMsg, fmtNum, shortHash } from "@/lib/api";
 import { addressUrl } from "@/lib/config";
 import { useCopy, useHoldings } from "@/lib/hooks";
 import { useSession } from "@/lib/session";
+import { USDC } from "@/lib/tokens";
+import { getAddress } from "viem";
 import { cn } from "@/lib/utils";
 import { BasketSearch } from "./BasketSearch";
 import { Row, Spinner, useDismissable } from "./ui";
@@ -107,9 +109,8 @@ export function Navbar() {
 }
 
 function WalletMenu() {
-  const { address, logout, exportWallet } = useSession();
+  const { address, mainAddress, logout, exportWallet } = useSession();
   const { open, setOpen, ref } = useDismissable();
-  const { copied, copy } = useCopy();
   const [err, setErr] = useState<string | null>(null);
 
   return (
@@ -118,7 +119,7 @@ function WalletMenu() {
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
         aria-label="Wallet"
-        className="tnum inline-flex h-9 items-center gap-2 rounded-full bg-secondary px-3.5 text-sm font-medium transition-colors hover:bg-accent"
+        className="tnum inline-flex h-9 shrink-0 items-center gap-2 whitespace-nowrap rounded-full bg-secondary px-3.5 text-sm font-medium transition-colors hover:bg-accent"
       >
         <WalletIcon className="size-4 text-muted-foreground" />
         {address ? shortHash(address) : "Connected"}
@@ -129,25 +130,15 @@ function WalletMenu() {
             <Spinner label="Creating your wallet…" />
           ) : (
             <>
-              <div className="flex items-center justify-between gap-3">
-                <a
-                  href={addressUrl(address)}
-                  target="_blank"
-                  rel="noreferrer"
-                  title={address}
-                  className="tnum underline-offset-4 hover:underline"
-                >
-                  {shortHash(address)}
-                </a>
-                <button
-                  onClick={() => copy(address)}
-                  aria-label="Copy wallet address"
-                  className="rounded-md p-1.5 text-muted-foreground transition-colors hover:text-foreground"
-                >
-                  {copied === address ? <Check className="size-4 text-positive" /> : <Copy className="size-4" />}
-                </button>
-              </div>
+              <dl className="space-y-1">
+                {mainAddress && <AddressRow label="Main wallet" address={mainAddress} />}
+                <AddressRow label="Embedded wallet" address={address} />
+              </dl>
               <Wallet />
+              <dl className="space-y-1 border-t border-border pt-3">
+                <AddressRow label="USDC contract" address={getAddress(USDC.address)} />
+                <Row label="MON">Native token, no contract</Row>
+              </dl>
               <AnyChainButton className="w-full justify-center rounded-lg border border-border bg-secondary/50 px-3 py-2 text-foreground hover:bg-secondary hover:no-underline" />
               <Automation />
               {err && <p className="text-xs break-words text-destructive">{err}</p>}
@@ -166,6 +157,28 @@ function WalletMenu() {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+// short address → explorer, with copy
+function AddressRow({ label, address }: { label: string; address: string }) {
+  const { copied, copy } = useCopy();
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <dt className="text-muted-foreground">{label}</dt>
+      <dd className="flex items-center gap-0.5">
+        <a href={addressUrl(address)} target="_blank" rel="noreferrer" title={address} className="tnum underline-offset-4 hover:underline">
+          {shortHash(address)}
+        </a>
+        <button
+          onClick={() => copy(address)}
+          aria-label={`Copy ${label.toLowerCase()} address`}
+          className="rounded-md p-1.5 text-muted-foreground transition-colors hover:text-foreground"
+        >
+          {copied === address ? <Check className="size-3.5 text-positive" /> : <Copy className="size-3.5" />}
+        </button>
+      </dd>
     </div>
   );
 }

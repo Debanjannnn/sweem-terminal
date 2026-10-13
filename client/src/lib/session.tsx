@@ -19,6 +19,7 @@ export type Session = {
   logout: () => Promise<void>;
   wallet: WalletWithMetadata | undefined;
   address: `0x${string}` | undefined;
+  mainAddress: string | undefined; // external wallet used to log in; undefined for email logins
   me: Me | null;
   delegated: boolean;
   exportWallet: () => Promise<void>;
@@ -45,6 +46,9 @@ function embeddedWallet(accounts: readonly unknown[] | undefined): WalletWithMet
       (a.walletClientType === "privy" || a.walletClientType === "privy-v2"),
   );
 }
+
+const externalWallet = (accounts: readonly unknown[] | undefined) =>
+  (accounts as WalletWithMetadata[] | undefined)?.find((a) => a.type === "wallet" && a.chainType === "ethereum" && !a.walletClientType?.startsWith("privy"));
 
 function SessionInner({ children }: { children: React.ReactNode }) {
   const { ready, authenticated, user, login, logout } = usePrivy();
@@ -127,6 +131,7 @@ function SessionInner({ children }: { children: React.ReactNode }) {
         logout: doLogout,
         wallet,
         address: wallet?.address as `0x${string}` | undefined,
+        mainAddress: externalWallet(user?.linkedAccounts)?.address,
         me,
         delegated: !!me?.delegation?.active,
         exportWallet: doExportWallet,

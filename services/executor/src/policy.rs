@@ -146,7 +146,7 @@ mod tests {
             assert_eq!(c[2]["field"], "function_name");
         }
         let spenders = r[0]["conditions"][3]["value"].as_array().unwrap();
-        assert_eq!(spenders.len(), 4 + 5 + 2 + 8);
+        assert_eq!(spenders.len(), d.kuru.markets.len() + 5 + 2 + 8);
         assert!(spenders.contains(&json!(lower(&d.lending.aave_v3.pool))));
         assert!(!r[0]["conditions"][1]["value"].as_array().unwrap().contains(&json!(lower(&Address::ZERO))), "native MON is no approve target");
         assert_eq!(r[1]["conditions"][3]["value"], TREASURY_PLACEHOLDER);

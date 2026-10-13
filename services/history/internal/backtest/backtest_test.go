@@ -263,3 +263,15 @@ func TestCombine(t *testing.T) {
 	near(t, "maxDD falling", r.MaxDrawdownUSD, 1-(420+300)/1000.0)
 	near(t, "hodl maxDD falling", r.HodlMaxDrawdownUSD, 1-700/1000.0)
 }
+
+func TestHoldTracksPrice(t *testing.T) {
+	price := map[string]float64{"2026-01-01": 2000, "2026-01-02": 1000, "2026-01-03": 3000}
+	in := Input{Asset: "WETH", Amount: 1, From: day("2026-01-01"), To: day("2026-01-03"),
+		Legs: []Leg{{Kind: "hold", Weight: 1}}, Rules: rules}
+	res := run(t, in, Series{Price: price})
+	near(t, "final", res.FinalUSD, 3000)
+	near(t, "dd", res.MaxDrawdownUSD, 0.5)
+	if res.CostsUSD != 0 || res.Rebalances != 0 {
+		t.Fatalf("%+v", res)
+	}
+}

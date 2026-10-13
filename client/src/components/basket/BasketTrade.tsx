@@ -1,11 +1,14 @@
 "use client";
 
 import { useState } from "react";
+import { ArrowDown } from "lucide-react";
 import { basketBuy, basketSell, errText, fmtUsd, getBasketQuote } from "@/lib/api";
 import { useAsync, useSession } from "@/lib/session";
 import { fmtUnits, MARKETS, parseAmount, USDC } from "@/lib/tokens";
 import type { Basket, Holdings } from "@/lib/types";
 import { Button, Notice, Spinner } from "@/components/ui";
+import { IconStack } from "@/components/invest/BasketCard";
+import { Flash } from "@/components/motion";
 import { ClientRunProgress, useClientTrade } from "@/components/ClientTrade";
 import { ExecutionProgress } from "@/components/Execution";
 import { actionBtn, balanceOf, pill, Row, SidePicker, Slippage, useDebounced } from "@/components/trade/MarketPanel";
@@ -33,6 +36,7 @@ export function BasketTrade({
   const [err, setErr] = useState<string | null>(null);
   const [execId, setExecId] = useState<string | null>(null);
   const busy = signing || sending;
+  const legSyms = basket.legs.map((l) => MARKETS.find((m) => m.symbol === l.market)?.token.symbol ?? l.market);
 
   const raw = parseAmount(amount, USDC.decimals);
   const debounced = useDebounced(side === "buy" && raw && raw > BigInt(0) ? raw : null);
@@ -106,52 +110,81 @@ export function BasketTrade({
         <Slippage value={slippage} onChange={setSlippage} />
       </div>
 
-      {side === "buy" ? (
-        <div className="rounded-2xl bg-card p-4">
+      <div className="relative rounded-2xl bg-card">
+        <div className="p-4">
           <div className="flex items-center justify-between text-sm text-muted-foreground">
-            Spend
-            {usdc !== null && (
-              <button type="button" onClick={() => setAmount(formatUnits(usdc, 6))} className="tnum text-xs hover:text-foreground">
+            {side === "buy" ? "Spend" : "Sell"}
+            {side === "buy" && usdc !== null && (
+              <button type="button" onClick={() => setAmount(formatUnits(usdc, 6))} className="tnum text-xs transition-colors hover:text-foreground">
                 Max {fmtUnits(usdc, 6, 2)}
               </button>
             )}
+            {side === "sell" && <span className="tnum text-foreground">{pct}% of holding</span>}
           </div>
+          {side === "buy" ? (
+            <div className="mt-2 flex items-center gap-3">
+              <input
+                value={amount}
+                onChange={(e) => setAmount(e.target.value)}
+                inputMode="decimal"
+                aria-label="Amount in USDC"
+                placeholder="0"
+                className="tnum w-full min-w-0 bg-transparent text-3xl font-medium tracking-tight outline-none placeholder:text-muted-foreground/50"
+              />
+              {pill("USDC")}
+            </div>
+          ) : (
+            <div className="mt-3 space-y-2">
+              <input
+                type="range"
+                min={1}
+                max={100}
+                value={pct}
+                onChange={(e) => setPct(Number(e.target.value))}
+                aria-label="Share of holding to sell"
+                className="range w-full"
+                style={{ "--pct": `${pct}%` } as React.CSSProperties}
+              />
+              <div className="tnum text-xs text-muted-foreground">≈ {heldUsd !== null ? fmtUsd((heldUsd * pct) / 100) : "-"} before slippage</div>
+            </div>
+          )}
+        </div>
+        <div className="relative h-px bg-border">
+          <span className="absolute left-1/2 top-1/2 grid size-8 -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full border border-border bg-card">
+            <ArrowDown className="size-4" />
+          </span>
+        </div>
+        <div className="p-4">
+          <div className="text-sm text-muted-foreground">Receive (est.)</div>
           <div className="mt-2 flex items-center gap-3">
-            <input
-              value={amount}
-              onChange={(e) => setAmount(e.target.value)}
-              inputMode="decimal"
-              aria-label="Amount in USDC"
-              placeholder="0"
-              className="tnum w-full min-w-0 bg-transparent text-3xl font-medium tracking-tight outline-none placeholder:text-muted-foreground/50"
-            />
-            {pill("USDC")}
+            <div className="tnum w-full min-w-0 truncate text-3xl font-medium tracking-tight">
+              {quote.loading && !q && (side === "sell" || debounced !== null) ? (
+                <Spinner />
+              ) : side === "sell" && q?.expectedOutUsdc ? (
+                <Flash value={Number(q.expectedOutUsdc)}>{fmtUnits(q.expectedOutUsdc, USDC.decimals, 2)}</Flash>
+              ) : side === "buy" && q ? (
+                `${basket.legs.length} tokens`
+              ) : (
+                <span className="text-muted-foreground/50">0</span>
+              )}
+            </div>
+            {side === "sell" ? (
+              pill("USDC")
+            ) : (
+              <span className="inline-flex shrink-0 items-center gap-2 rounded-full bg-secondary/70 py-1.5 pl-2 pr-3 text-sm font-medium">
+                <IconStack symbols={legSyms} size={20} ring="ring-card" />
+                Basket
+              </span>
+            )}
           </div>
         </div>
-      ) : (
-        <div className="space-y-2 rounded-2xl bg-card p-4">
-          <div className="flex items-center justify-between text-sm text-muted-foreground">
-            Sell <span className="tnum text-foreground">{pct}% of holding</span>
-          </div>
-          <input
-            type="range"
-            min={1}
-            max={100}
-            value={pct}
-            onChange={(e) => setPct(Number(e.target.value))}
-            className="range w-full"
-            style={{ "--pct": `${pct}%` } as React.CSSProperties}
-          />
-          <div className="tnum text-sm text-muted-foreground">≈ {heldUsd !== null ? fmtUsd((heldUsd * pct) / 100) : "-"} before slippage</div>
-        </div>
-      )}
+      </div>
 
-      {quote.loading && !q && (side === "sell" || debounced !== null) && <Spinner label="Quoting legs…" />}
       {q && (
         <dl className="space-y-1.5 px-1 text-xs">
           {q.legs.map((l) => {
             const m = MARKETS.find((x) => x.orderbook === l.market.toLowerCase());
-            const sym = m?.symbol ?? l.market;
+            const sym = m?.token.symbol ?? l.market;
             return (
               <Row key={l.market} label={side === "buy" ? `${sym} · ${(l.weightBps ?? 0) / 100}%` : `${m ? fmtUnits(l.amount ?? "0", m.token.decimals) : "-"} ${sym}`}>
                 {l.quote && m ? (
@@ -166,10 +199,7 @@ export function BasketTrade({
             );
           })}
           {side === "sell" && q.expectedOutUsdc && (
-            <Row label="You receive">
-              ≈ {fmtUnits(q.expectedOutUsdc, USDC.decimals, 2)} USDC
-              <span className="text-muted-foreground"> · min {fmtUnits(q.minOutUsdc ?? "0", USDC.decimals, 2)}</span>
-            </Row>
+            <Row label="Minimum received">{`${fmtUnits(q.minOutUsdc ?? "0", USDC.decimals, 2)} USDC`}</Row>
           )}
         </dl>
       )}

@@ -80,6 +80,24 @@
         "sizePrecision": 1000000,
         "tickSize": 100,
         "minSize": 2000
+      },
+      "MON_AUSD": {
+        "orderbook": "0x131A2e70A5b31a517A74b8c567149bc294470Da9",
+        "base": "MON",
+        "quote": "AUSD",
+        "pricePrecision": 100000000,
+        "sizePrecision": 10000000000,
+        "tickSize": 1,
+        "minSize": 2000000000000
+      },
+      "AUSD_USDC": {
+        "orderbook": "0x699AbC15308156E9a3AB89Ec7387e9CfE1c86A3b",
+        "base": "AUSD",
+        "quote": "USDC",
+        "pricePrecision": 100000000,
+        "sizePrecision": 1000000,
+        "tickSize": 1,
+        "minSize": 10000000
       }
     }
   },

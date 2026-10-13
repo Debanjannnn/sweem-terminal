@@ -216,7 +216,7 @@ func (s *Scheduler) trigger(ctx context.Context, c schedule, e exec) error {
 		if err != nil {
 			return err
 		}
-		if c.targetID == "MON" {
+		if s.Dep.Kuru.Markets[c.targetID].Base == "MON" {
 			bal = bal.Sub(gasReserve) // native MON pays the executor's gas
 		}
 		amt := bpsOf(bal, c.sellBps)

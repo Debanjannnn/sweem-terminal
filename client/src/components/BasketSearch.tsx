@@ -5,7 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { Search } from "lucide-react";
 import { getBaskets, getStrategies } from "@/lib/api";
 import { useAsync } from "@/lib/session";
-import { MARKETS } from "@/lib/tokens";
+import { LISTED, pairsOf } from "@/lib/tokens";
 import { cn } from "@/lib/utils";
 import { IconStack } from "@/components/invest/BasketCard";
 import { parts } from "@/components/earn/sources";
@@ -115,7 +115,7 @@ function SearchDialog({ onClose }: { onClose: () => void }) {
 
   const s = q.trim().toLowerCase();
   const all = [
-    ...MARKETS.map((m) => ({ key: m.symbol, href: `/trade/${m.symbol}`, title: m.token.name, tag: `$${m.symbol}`, sub: "Token · Kuru / USDC", icons: [m.symbol] })),
+    ...LISTED.map((m) => ({ key: m.symbol, href: `/trade/${m.symbol}`, title: m.token.name, tag: `$${m.token.symbol}`, sub: `Token · Kuru / ${pairsOf(m).map((p) => p.quote.symbol).join(", ")}`, icons: [m.token.symbol] })),
     ...(baskets.data ?? []).map((b) => ({
       key: b.id,
       href: `/baskets/${b.id}`,

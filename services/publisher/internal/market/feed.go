@@ -21,10 +21,13 @@ import (
 )
 
 const (
-	depth    = 20
-	idleMax  = 30 * time.Second // depth arrives ~3/s per market; silence this long = dead socket
-	dedupTTL = time.Hour
-	priceExp = 18 // Kuru WS/REST prices are 1e18 fixed point
+	depth   = 20
+	idleMax = 30 * time.Second // depth arrives ~3/s per busy market; silence this long on the socket = dead
+	// quiet books (AUSD pairs) get no depth diffs; while the socket is live their book is still current,
+	// so republish it before market-data's 30s bookMaxAge marks it stale and refuses quotes
+	bookRefresh = 10 * time.Second
+	dedupTTL    = time.Hour
+	priceExp    = 18 // Kuru WS/REST prices are 1e18 fixed point
 )
 
 // Feed keeps one Kuru mainnet WS connection subscribed to every market and publishes books, trades, refs and candles.
@@ -48,6 +51,7 @@ type mstate struct {
 	lastTrade  float64
 	booted     bool
 	seq        uint64
+	pubAt      time.Time
 }
 
 func (f *Feed) Connected() bool { return f.connected.Load() }
@@ -185,6 +189,11 @@ func (f *Feed) session(ctx context.Context) error {
 				return errors.New("idle")
 			}
 			f.publishRefs(ctx)
+			for _, st := range f.state {
+				if len(st.bids)+len(st.asks) > 0 && time.Since(st.pubAt) > bookRefresh {
+					f.publishBook(ctx, st)
+				}
+			}
 		}
 	}
 }
@@ -339,6 +348,7 @@ func (f *Feed) restBook(ctx context.Context, st *mstate) error {
 }
 
 func (f *Feed) publishBook(ctx context.Context, st *mstate) {
+	st.pubAt = time.Now()
 	st.seq++ // ponytail: seeded from unix ms so it stays monotonic across restarts at < 1000 publishes/s
 	snap := streams.BookSnapshot{Market: st.info.Market, Seq: st.seq, Ts: time.Now().UnixMilli(), Bids: st.bids, Asks: st.asks}
 	if err := streams.Publish(ctx, f.RDB, streams.Book(string(st.info.Market)), streams.BookLatest(string(st.info.Market)), snap); err != nil {

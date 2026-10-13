@@ -27,17 +27,25 @@ const list: Token[] = Object.entries(DEPLOYMENTS.tokens).map(([symbol, t]) => ({
 export const tokenBySymbol = (symbol: string) => list.find((t) => t.symbol === symbol);
 export const tokenOf = (address: string) => list.find((t) => t.address === address.toLowerCase());
 
-export type MarketDef = { symbol: string; orderbook: string; token: Token; minSize: number; sizePrecision: number };
+// symbol = 143.json key (api market id); token = base, quote = what you pay/receive
+export type MarketDef = { symbol: string; orderbook: string; token: Token; quote: Token; minSize: number; sizePrecision: number };
 
-// Kuru markets from 143.json, all quoted in USDC; orderbook lowercased (market-data paths/topics use it)
+// Kuru markets from 143.json; base-symbol keys are the USDC books, BASE_QUOTE keys the rest. orderbook lowercased (market-data paths/topics use it)
 export const MARKETS: MarketDef[] = Object.entries(DEPLOYMENTS.kuru.markets).map(([symbol, m]) => ({
   symbol,
   orderbook: m.orderbook.toLowerCase(),
   token: tokenBySymbol(m.base)!,
+  quote: tokenBySymbol(m.quote)!,
   minSize: m.minSize / m.sizePrecision,
   sizePrecision: m.sizePrecision,
 }));
 export const marketOf = (symbol: string) => MARKETS.find((m) => m.symbol.toLowerCase() === symbol.toLowerCase());
+// every book for the same base token (quote selector on the trade page)
+export const pairsOf = (m: MarketDef) => MARKETS.filter((x) => x.token.symbol === m.token.symbol);
+// one row per base token for lists/search: the first (USDC) book
+export const LISTED = MARKETS.filter((m, i) => MARKETS.findIndex((x) => x.token.symbol === m.token.symbol) === i);
+// baskets/strategies settle in USDC
+export const USDC_MARKETS = MARKETS.filter((m) => m.quote.symbol === "USDC");
 export const USDC = tokenBySymbol("USDC")!;
 
 // bigint-safe: rounds down to maxFrac digits, groups thousands

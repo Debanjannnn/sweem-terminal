@@ -150,6 +150,10 @@ func stableSpend(d *config.Deployments143, s Step) decimal.Decimal {
 		return a(s.Amount)
 	case "kuru.marketBuy":
 		return a(s.Quote)
+	case "kuru.marketSell":
+		if stables[d.Kuru.Markets[s.Market].Base] {
+			return a(s.Size)
+		}
 	case "activeVault.deposit":
 		return a(s.Quote)
 	case "kuru.marginDeposit":
@@ -197,14 +201,14 @@ type Leg struct {
 	WeightBps int    `json:"weightBps"`
 }
 
-// ValidateLegs: 1..10 unique known markets, positive weights summing to 10000.
+// ValidateLegs: 1..10 unique known USDC-quoted markets, positive weights summing to 10000.
 func (p *Planner) ValidateLegs(legs []Leg) error {
 	if len(legs) == 0 || len(legs) > 10 {
 		return fail("invalid_legs", "need 1..10 legs")
 	}
 	sum, seen := 0, map[string]bool{}
 	for _, l := range legs {
-		if _, err := p.market(l.Market); err != nil || seen[l.Market] || l.WeightBps <= 0 {
+		if m, err := p.market(l.Market); err != nil || m.Quote != "USDC" || seen[l.Market] || l.WeightBps <= 0 {
 			return fail("invalid_legs", "bad leg %s", l.Market)
 		}
 		seen[l.Market], sum = true, sum+l.WeightBps

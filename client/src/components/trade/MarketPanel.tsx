@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { ArrowDown } from "lucide-react";
 import { errText, fmtUsd, getQuote } from "@/lib/api";
 import { useAsync, useSession } from "@/lib/session";
-import { fmtUnits, parseAmount, USDC, type MarketDef } from "@/lib/tokens";
+import { fmtUnits, parseAmount, type MarketDef } from "@/lib/tokens";
 import type { Holdings } from "@/lib/types";
 import { Button, Notice, Spinner } from "@/components/ui";
 import { TokenIcon } from "@/components/TokenIcon";
@@ -92,10 +92,10 @@ export function MarketPanel({ market, holdings, onDone }: { market: MarketDef; h
   const [amount, setAmount] = useState("");
   const [slippage, setSlippage] = useState(100);
 
-  const sym = market.symbol;
+  const sym = market.token.symbol;
   const { run, start, busy } = useClientTrade(`${side === "buy" ? "Buy" : "Sell"} ${sym}`);
-  const inTok = side === "buy" ? USDC : market.token;
-  const outTok = side === "buy" ? market.token : USDC;
+  const inTok = side === "buy" ? market.quote : market.token;
+  const outTok = side === "buy" ? market.token : market.quote;
   const raw = parseAmount(amount, inTok.decimals);
   const debounced = useDebounced(raw && raw > BigInt(0) ? raw : null);
   const balance = balanceOf(holdings, inTok.symbol);
@@ -126,7 +126,7 @@ export function MarketPanel({ market, holdings, onDone }: { market: MarketDef; h
                   : null;
 
   async function submit() {
-    const ex = await start({ kind: "trade", market: sym, side, amount: amount.trim(), slippageBps: slippage });
+    const ex = await start({ kind: "trade", market: market.symbol, side, amount: amount.trim(), slippageBps: slippage });
     if (ex?.status === "confirmed") setAmount("");
     onDone();
   }
@@ -217,7 +217,7 @@ export function MarketPanel({ market, holdings, onDone }: { market: MarketDef; h
       )}
       {run && <ClientRunProgress run={run} />}
       <p className="text-[11px] leading-4 text-muted-foreground">
-        Monad mainnet, real funds. Market order on the Kuru {sym}/USDC book, signed by you from your Privy wallet (an approve first when
+        Monad mainnet, real funds. Market order on the Kuru {sym}/{market.quote.symbol} book, signed by you from your Privy wallet (an approve first when
         needed). Reverts if you&apos;d receive less than the minimum at your slippage. Gas is paid in MON.
       </p>
     </div>

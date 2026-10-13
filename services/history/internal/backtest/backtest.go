@@ -24,7 +24,7 @@ var (
 )
 
 type Leg struct {
-	Kind   string // lending | staking | lp | basis
+	Kind   string // lending | staking | lp | basis | hold (spot, no yield: basket legs)
 	Venue  string // lending/staking venue; lp: kuru-activevault
 	PerpID int    // basis
 	Weight float64
@@ -143,6 +143,7 @@ func validate(in Input) error {
 			if l.Kind == "lp" && l.Venue != "kuru-activevault" {
 				return bad("unknown lp venue %q", l.Venue)
 			}
+		case "hold":
 		case "basis":
 			max, ok := MaxLeverage[l.PerpID]
 			if !ok {

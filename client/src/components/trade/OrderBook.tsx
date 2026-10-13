@@ -8,7 +8,7 @@ import { Panel, Skeleton } from "@/components/ui";
 const N = 8;
 
 // live top-of-book ladder; depth bars scaled to the largest level shown
-export function OrderBook({ book, symbol, stale, error }: { book: Book | null | undefined; symbol: string; stale: boolean; error: string | null }) {
+export function OrderBook({ book, symbol, quote = "USDC", stale, error }: { book: Book | null | undefined; symbol: string; quote?: string; stale: boolean; error: string | null }) {
   const asks = book?.asks.slice(0, N).reverse() ?? [];
   const bids = book?.bids.slice(0, N) ?? [];
   const max = Math.max(...[...asks, ...bids].map((l) => Number(l[1])), 0);
@@ -31,7 +31,7 @@ export function OrderBook({ book, symbol, stale, error }: { book: Book | null | 
         {stale && <span className="rounded-full bg-warning/10 px-2 py-0.5 text-[11px] font-medium text-warning">Stale</span>}
       </div>
       <div className="grid grid-cols-2 border-y border-border px-6 py-2 text-[11px] text-muted-foreground">
-        <span>Price (USDC)</span>
+        <span>Price ({quote})</span>
         <span className="text-right">Size ({symbol})</span>
       </div>
       {error && !book ? (

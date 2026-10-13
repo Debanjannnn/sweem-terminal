@@ -8,7 +8,7 @@ import { motion } from "motion/react";
 import { fmtUsd, fmtUsdCompact, getBaskets, shortHash } from "@/lib/api";
 import { useTickers, type Ticker } from "@/lib/hooks";
 import { useAsync } from "@/lib/session";
-import { MARKETS } from "@/lib/tokens";
+import { LISTED, MARKETS } from "@/lib/tokens";
 import { cn } from "@/lib/utils";
 import type { Basket } from "@/lib/types";
 import { ErrorBox, Notice, Skeleton } from "@/components/ui";
@@ -56,14 +56,14 @@ export function HomePage() {
   const baskets = useAsync("baskets", () => getBaskets());
   const [sort, setSort] = useState<{ key: SortKey; desc: boolean } | null>(null);
 
-  const tokenRows: Row[] = MARKETS.map((m) => {
+  const tokenRows: Row[] = LISTED.map((m) => {
     const t = tickers[m.symbol];
     return {
       key: m.symbol,
       href: `/trade/${m.symbol}`,
       name: m.token.name,
-      sub: `$${m.symbol}`,
-      icons: [m.symbol],
+      sub: `$${m.token.symbol}`,
+      icons: [m.token.symbol],
       series: t.series,
       price: t.price,
       chgUsd: t.chgUsd,

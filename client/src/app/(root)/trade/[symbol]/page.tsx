@@ -1,14 +1,14 @@
 "use client";
 
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { useState } from "react";
 import { motion } from "motion/react";
 import { fmtUsd, fmtUsdCompact } from "@/lib/api";
 import { addressUrl } from "@/lib/config";
 import { mid, useBook, useCandles, useHoldings } from "@/lib/hooks";
-import { marketOf } from "@/lib/tokens";
-import { Button, Card, Detail, Panel, PanelTabs, Stat } from "@/components/ui";
+import { marketOf, pairsOf } from "@/lib/tokens";
+import { Button, Card, Detail, Notice, Panel, PanelTabs, Stat } from "@/components/ui";
 import { TokenIcon } from "@/components/TokenIcon";
 import { PriceChart, RANGES, type Range } from "@/components/chart/PriceChart";
 import { OrderBook } from "@/components/trade/OrderBook";
@@ -16,11 +16,12 @@ import { MarketPanel } from "@/components/trade/MarketPanel";
 import { LimitPanel } from "@/components/trade/LimitPanel";
 import { ScheduleForm } from "@/components/automation/ScheduleForm";
 import { ScheduleList } from "@/components/automation/ScheduleList";
-import { AutoHeight } from "@/components/motion";
+import { AutoHeight, Segmented } from "@/components/motion";
 
 type Tab = "market" | "limit" | "auto";
 
 export default function TradePage() {
+  const router = useRouter();
   const market = marketOf(decodeURIComponent(useParams<{ symbol: string }>().symbol));
   const [range, setRange] = useState<Range>("1D");
   const [mode, setMode] = useState<"line" | "candle">("candle");
@@ -52,6 +53,8 @@ export default function TradePage() {
   const ls = day24.candles.map((c) => Number(c.l));
   const vol = day24.candles.reduce((s, c) => s + Number(c.q), 0);
   const held = holdings.data?.tokens.find((x) => x.symbol === t.symbol);
+  const pairs = pairsOf(market);
+  const q = market.quote.symbol;
 
   return (
     <main className="w-full px-4 pb-24 pt-10 md:px-6">
@@ -64,6 +67,15 @@ export default function TradePage() {
                 {t.name} <span className="text-muted-foreground">{t.symbol}</span>
               </h1>
             </div>
+            {pairs.length > 1 && (
+              <Segmented
+                id="quote"
+                className="w-auto shrink-0"
+                value={market.symbol}
+                onChange={(s) => router.replace(`/trade/${s}`)}
+                options={pairs.map((p) => ({ value: p.symbol, label: p.quote.symbol }))}
+              />
+            )}
             {stale && <span className="rounded-full bg-warning/10 px-2 py-0.5 text-[11px] font-medium text-warning">Stale price</span>}
           </div>
 
@@ -76,7 +88,7 @@ export default function TradePage() {
             onMode={setMode}
             loading={chart.loading}
             error={chart.error}
-            caption={`${t.symbol} / USDC`}
+            caption={`${t.symbol} / ${q}`}
             dataKey={`${market.orderbook}:${range}`}
           />
 
@@ -89,7 +101,7 @@ export default function TradePage() {
             </dl>
           </Card>
 
-          <OrderBook book={book} symbol={t.symbol} stale={stale} error={bookErr} />
+          <OrderBook book={book} symbol={t.symbol} quote={q} stale={stale} error={bookErr} />
 
           <Card title="About">
             <dl className="grid gap-x-10 md:grid-cols-2">
@@ -120,6 +132,9 @@ export default function TradePage() {
               { value: "auto", label: "Automate" },
             ]}
           />
+          {q !== "USDC" && pairs.length > 1 && (
+            <Notice>Thin {t.symbol}/{q} book: wider spread and less depth than {t.symbol}/USDC. Check the quote before trading size.</Notice>
+          )}
           <AutoHeight className="rounded-[28px] border border-border bg-secondary/60">
             <motion.div key={tab} initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.2 }}>
               {tab === "market" ? (
@@ -128,7 +143,7 @@ export default function TradePage() {
                 <LimitPanel market={market} mid={price} />
               ) : (
                 <div className="space-y-4 p-5">
-                  <ScheduleForm target={{ type: "market", id: market.symbol }} current={price} onCreated={() => setKey((n) => n + 1)} />
+                  <ScheduleForm target={{ type: "market", id: market.symbol }} current={price} quote={q} onCreated={() => setKey((n) => n + 1)} />
                   <ScheduleList key={key} target={{ type: "market", id: market.symbol }} />
                 </div>
               )}

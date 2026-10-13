@@ -39,7 +39,7 @@ export function LimitPanel({ market, mid }: { market: MarketDef; mid: number | n
         : !DEC.test(size.trim()) || Number(size) <= 0
           ? "Enter a size"
           : Number(size) < market.minSize
-            ? `Min size ${market.minSize} ${market.symbol}`
+            ? `Min size ${market.minSize} ${market.token.symbol}`
             : null;
 
   async function submit() {
@@ -61,10 +61,10 @@ export function LimitPanel({ market, mid }: { market: MarketDef; mid: number | n
     <div className="space-y-4 p-5">
       <SidePicker id="lim-side" value={side} onChange={setSide} options={[["buy", "Buy"], ["sell", "Sell"]]} />
       <div className="grid grid-cols-2 gap-3">
-        <Field label="Price (USDC)" hint={mid !== null ? <button onClick={() => setPrice(mid.toFixed(4))}>mid {fmtUsd(mid)}</button> : undefined}>
+        <Field label={`Price (${market.quote.symbol})`} hint={mid !== null ? <button onClick={() => setPrice(mid.toFixed(4))}>mid {fmtUsd(mid)}</button> : undefined}>
           <input className={inputCls} inputMode="decimal" placeholder="0.00" value={price} onChange={(e) => setPrice(e.target.value)} />
         </Field>
-        <Field label={`Size (${market.symbol})`}>
+        <Field label={`Size (${market.token.symbol})`}>
           <input className={inputCls} inputMode="decimal" placeholder="0" value={size} onChange={(e) => setSize(e.target.value)} />
         </Field>
       </div>
@@ -75,12 +75,12 @@ export function LimitPanel({ market, mid }: { market: MarketDef; mid: number | n
         </label>
         <label className="flex items-center gap-2">
           <input type="checkbox" checked={fund} onChange={(e) => setFund(e.target.checked)} className="accent-[var(--primary)]" />
-          Fund trading balance first ({side === "buy" ? "price × size USDC" : `size ${market.symbol}`})
+          Fund trading balance first ({side === "buy" ? `price × size ${market.quote.symbol}` : `size ${market.token.symbol}`})
         </label>
       </div>
       <dl className="space-y-1.5 px-1 text-xs">
         <Row label="Notional">{notional !== null ? fmtUsd(notional) : "-"}</Row>
-        <Row label="Min size">{`${market.minSize} ${market.symbol}`}</Row>
+        <Row label="Min size">{`${market.minSize} ${market.token.symbol}`}</Row>
       </dl>
       {crosses && postOnly && <Notice>Price crosses the mid; a post-only order may be rejected.</Notice>}
       {authenticated && !delegated && <DelegationCard compact />}

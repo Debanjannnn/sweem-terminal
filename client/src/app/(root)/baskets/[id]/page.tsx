@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useState } from "react";
 import { motion } from "motion/react";
-import { ApiError, fmtTime, fmtUsd, getBasket, getBook, getCandles, getMyBaskets, shortHash } from "@/lib/api";
+import { ApiError, fmtTime, fmtUsd, getBasket, getBook, getCandles, getMyBaskets, runBacktest, shortHash, type BacktestBody } from "@/lib/api";
 import { mid, useHoldings } from "@/lib/hooks";
 import { useAsync, useSession } from "@/lib/session";
 import { marketOf } from "@/lib/tokens";
@@ -17,7 +17,22 @@ import { basketIndex } from "@/components/basket/index";
 import { BasketTrade } from "@/components/basket/BasketTrade";
 import { ScheduleForm } from "@/components/automation/ScheduleForm";
 import { ScheduleList } from "@/components/automation/ScheduleList";
+import { BacktestView } from "@/components/earn/Backtest";
 import { AutoHeight } from "@/components/motion";
+
+const BT_USD = 1000;
+const baseOf = (market: string) => marketOf(market)?.token.symbol ?? market;
+
+// buy-and-hold of the leg tokens at their weights (history "hold" legs); multi-token runs take 2..5 sleeves
+function basketBacktest(legs: Basket["legs"], px: Record<string, number | null>): BacktestBody | null {
+  const hold = [{ kind: "hold", weight: "1" }];
+  if (legs.length === 1) {
+    const p = px[legs[0].market];
+    return p ? { asset: baseOf(legs[0].market), amount: String(BT_USD / p), legs: hold } : null;
+  }
+  if (legs.length > 5) return null;
+  return { amount: String(BT_USD), sleeves: legs.map((l) => ({ asset: baseOf(l.market), amount: "1", legs: hold, weight: String(l.weightBps / 10000) })) };
+}
 
 // public first; private baskets resolve through /me/baskets for their owner
 async function loadBasket(id: string, authed: boolean): Promise<Basket> {
@@ -52,6 +67,8 @@ export default function BasketPage() {
     return Object.fromEntries(legs.map((l, i) => [l.market, books[i].status === "fulfilled" ? mid(books[i].value) : null]));
   });
   const holdings = useHoldings();
+  const btBody = b && prices.data ? basketBacktest(legs, prices.data) : null;
+  const bt = useAsync(btBody ? `bbt:${legKey}` : null, () => runBacktest(btBody!));
 
   if (basket.error === "not_found")
     return (
@@ -67,7 +84,7 @@ export default function BasketPage() {
 
   const held = holdings.data?.baskets.find((h) => h.basketId === id);
   const heldUsd = held && prices.data ? held.legs.reduce((s, l) => s + Number(l.amount) * (prices.data![l.market] ?? 0), 0) : null;
-  const symbols = legs.map((l) => l.market);
+  const symbols = legs.map((l) => baseOf(l.market));
   const pts = series.data ?? [];
 
   return (
@@ -87,7 +104,7 @@ export default function BasketPage() {
 
           <PriceChart
             points={pts}
-            price={null}
+            price={pts.at(-1)?.v ?? null}
             range={range}
             onRange={setRange}
             loading={!b || series.loading}
@@ -114,8 +131,8 @@ export default function BasketPage() {
                     <tr key={l.market} className="[&>td]:py-3">
                       <td>
                         <Link href={`/trade/${l.market}`} className="inline-flex items-center gap-2 font-medium hover:underline">
-                          <TokenIcon symbol={l.market} size={20} />
-                          {l.market}
+                          <TokenIcon symbol={baseOf(l.market)} size={20} />
+                          {baseOf(l.market)}
                         </Link>
                       </td>
                       <td className="tnum text-right">{l.weightBps / 100}%</td>
@@ -140,6 +157,17 @@ export default function BasketPage() {
               <Detail label="Created at">{b ? fmtTime(b.createdAt) : "-"}</Detail>
             </dl>
           </Card>
+
+          <Card title="Backtest">
+            <p className="-mt-1 mb-4 text-xs text-muted-foreground">
+              {fmtUsd(BT_USD)} split by weight and held, on mainnet history. No rebalancing.
+            </p>
+            {legs.length > 5 ? (
+              <p className="text-sm text-muted-foreground">Backtests support up to 5 tokens.</p>
+            ) : (
+              <BacktestView bt={bt.data ?? null} loading={!btBody || bt.loading} error={bt.error} />
+            )}
+          </Card>
         </div>
 
         <aside className="space-y-3 lg:sticky lg:top-24 lg:self-start">
@@ -148,7 +176,7 @@ export default function BasketPage() {
             value={tab}
             onChange={setTab}
             options={[
-              { value: "trade", label: "Trade" },
+              { value: "trade", label: "Market" },
               { value: "auto", label: "Automate" },
             ]}
           />

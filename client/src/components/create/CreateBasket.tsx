@@ -5,7 +5,7 @@ import { useState } from "react";
 import { Check, Plus, X } from "lucide-react";
 import { createBasket, errText, fmtBps, getBook } from "@/lib/api";
 import { useAsync, useSession } from "@/lib/session";
-import { MARKETS } from "@/lib/tokens";
+import { USDC_MARKETS as MARKETS } from "@/lib/tokens";
 import { Button, Divider, ErrorBox, Label, Panel, Tooltip } from "@/components/ui";
 import { TokenIcon } from "@/components/TokenIcon";
 import { IconStack } from "@/components/invest/BasketCard";

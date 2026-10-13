@@ -50,7 +50,8 @@ export function Field({ label, hint, children }: { label: string; hint?: React.R
 }
 
 // current = live price (market, USDC/unit) or value (basket/position, USDC) for TP/SL hints
-export function ScheduleForm({ target, current, onCreated }: { target: Target; current: number | null; onCreated: () => void }) {
+// quote: what a market target is priced/paid in (AUSD books); baskets/positions are USDC
+export function ScheduleForm({ target, current, onCreated, quote = "USDC" }: { target: Target; current: number | null; onCreated: () => void; quote?: string }) {
   const { authenticated, login, delegated } = useSession();
   const kinds = KINDS[target.type];
   const [kind, setKind] = useState<ScheduleKind>(kinds[0]);
@@ -66,7 +67,7 @@ export function ScheduleForm({ target, current, onCreated }: { target: Target; c
   const [error, setError] = useState<string | null>(null);
 
   const tp = kind === "take_profit";
-  const triggerLabel = target.type === "market" ? "Trigger price (USDC)" : "Trigger value (USDC)";
+  const triggerLabel = target.type === "market" ? `Trigger price (${quote})` : `Trigger value (${quote})`;
   const dist = current && pos(trigger) ? ((Number(trigger) - current) / current) * 100 : null;
   const intervalSeconds = every === "custom" ? Math.round(Number(customMin) * 60) : Number(every);
   const cap = maxPerRun.trim() || (kind === "dca" ? amount.trim() : "1000");
@@ -75,10 +76,10 @@ export function ScheduleForm({ target, current, onCreated }: { target: Target; c
 
   function build(): ScheduleInput | string {
     if (!DEC.test(slippage.trim()) || slippageBps < 1 || slippageBps > 1000) return "Max slippage must be 0.01%–10%.";
-    if (!pos(cap)) return "Max per run must be a positive USDC amount.";
+    if (!pos(cap)) return `Max per run must be a positive ${quote} amount.`;
     const base = { kind, target, maxSlippageBps: slippageBps, maxPerRunUsdc: cap };
     if (kind === "dca") {
-      if (!pos(amount)) return "Amount must be a positive USDC amount.";
+      if (!pos(amount)) return `Amount must be a positive ${quote} amount.`;
       if (!(intervalSeconds >= 60)) return "Interval must be at least 1 minute.";
       if (Number(cap) < Number(amount)) return "Max per run must be at least the amount.";
       return { ...base, amountUsdc: amount.trim(), intervalSeconds };
@@ -156,7 +157,7 @@ export function ScheduleForm({ target, current, onCreated }: { target: Target; c
 
       {kind === "dca" && (
         <>
-          <Field label="Buy per run (USDC)">
+          <Field label={`Buy per run (${quote})`}>
             <input className={inputCls} inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} />
           </Field>
           {intervalPicker("Every")}
@@ -217,7 +218,7 @@ export function ScheduleForm({ target, current, onCreated }: { target: Target; c
       )}
 
       <div className="grid grid-cols-2 gap-3">
-        <Field label="Max per run (USDC)">
+        <Field label={`Max per run (${quote})`}>
           <input className={inputCls} inputMode="decimal" placeholder={cap} value={maxPerRun} onChange={(e) => setMaxPerRun(e.target.value)} />
         </Field>
         <Field label="Max slippage (%)">

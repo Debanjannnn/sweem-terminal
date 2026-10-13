@@ -18,7 +18,7 @@ import (
 type Live struct {
 	Bals     []Balance                  // per source, as Balances
 	Wallet   map[string]decimal.Decimal // wallet atoms by token symbol (asset, WMON, AUSD, USDC)
-	PerpLot  decimal.Decimal            // open short lots on the strategy's perp
+	PerpLot  map[string]decimal.Decimal // open short lots by perp name (ETH, BTC, MON)
 	PerpFree decimal.Decimal            // free Perpl account collateral (AUSD atoms)
 }
 
@@ -73,27 +73,48 @@ func ReadLive(ctx context.Context, c Chain, dep *config.Deployments143, wallet s
 	if l.Bals, err = Balances(ctx, c, dep, wallet, s, legs, peers); err != nil {
 		return l, err
 	}
-	l.Wallet = map[string]decimal.Decimal{}
-	for _, sym := range []string{s.Asset, "WMON", "AUSD", "USDC"} {
+	l.Wallet, l.PerpLot = map[string]decimal.Decimal{}, map[string]decimal.Decimal{}
+	var syms []string
+	for _, pt := range s.Parts() {
+		syms = append(syms, pt.Asset)
+	}
+	for _, sym := range append(syms, "WMON", "AUSD", "USDC") {
+		if _, ok := l.Wallet[sym]; ok {
+			continue
+		}
 		if l.Wallet[sym], err = WalletBalance(ctx, c, dep, wallet, sym); err != nil {
 			return l, err
 		}
 	}
-	if pp, ok := perps[s.Asset]; ok {
-		l.PerpLot, l.PerpFree, err = perplState(ctx, c, dep, wallet, dep.Perpl.PerpIds[pp.Name])
+	for _, sym := range syms {
+		if pp, ok := perps[sym]; ok {
+			if l.PerpLot[pp.Name], l.PerpFree, err = perplState(ctx, c, dep, wallet, dep.Perpl.PerpIds[pp.Name]); err != nil {
+				return l, err
+			}
+		}
 	}
-	return l, err
+	return l, nil
 }
 
 // ResumeWithdraw rebuilds the unfinished tail (steps[done:]) of a failed withdraw: each step is capped by what is still
 // on chain and dropped when nothing is left, so a retry never re-closes a short or withdraws twice. Sells get fresh quotes.
 func (p *Planner) ResumeWithdraw(ctx context.Context, s Strategy, steps []Step, done int, live Live, slip int) ([]Step, error) {
-	if done < 0 || done > len(steps) || len(live.Bals) != len(s.Sources) {
+	type held struct {
+		asset string
+		src   Source
+	}
+	var all []held // flattened over sleeves, same order as live.Bals
+	for _, pt := range s.Parts() {
+		for _, x := range pt.Sources {
+			all = append(all, held{pt.Asset, x})
+		}
+	}
+	if done < 0 || done > len(steps) || len(live.Bals) != len(all) {
 		return nil, fail("bad_request", "step_done or live state does not match the plan")
 	}
-	src := func(match func(Source) bool) (Balance, bool) {
-		for i, x := range s.Sources {
-			if match(x) {
+	src := func(match func(asset string, x Source) bool) (Balance, bool) {
+		for i, h := range all {
+			if match(h.asset, h.src) {
 				return live.Bals[i], true
 			}
 		}
@@ -124,11 +145,13 @@ func (p *Planner) ResumeWithdraw(ctx context.Context, s Strategy, steps []Step, 
 		switch st.Action {
 		case "lend.withdraw":
 			venue := map[string]string{"aaveV3": "aave", "neverland": "neverland"}[st.Venue]
-			b, _ := src(func(x Source) bool { return x.Kind == "lending" && x.Venue == venue })
+			b, _ := src(func(a string, x Source) bool {
+				return x.Kind == "lending" && x.Venue == venue && lendAsset(a) == st.Asset
+			})
 			have, credit = d(b.Value), func(v decimal.Decimal) { w[st.Asset] = w[st.Asset].Add(v) }
 		case "vault.redeem", "vault.withdraw":
 			var asset string
-			b, _ := src(func(x Source) bool {
+			b, _ := src(func(_ string, x Source) bool {
 				v, ok := p.vault(x.Venue)
 				if ok && strings.EqualFold(v.Vault, st.Vault) {
 					asset = v.Asset
@@ -143,7 +166,7 @@ func (p *Planner) ResumeWithdraw(ctx context.Context, s Strategy, steps []Step, 
 			}
 		case "shmonad.redeem", "activeVault.withdraw":
 			kind := map[string]string{"shmonad.redeem": "staking", "activeVault.withdraw": "lp"}[st.Action]
-			b, _ := src(func(x Source) bool { return x.Kind == kind })
+			b, _ := src(func(_ string, x Source) bool { return x.Kind == kind })
 			have, field = d(b.Shares), &st.Shares
 			credit = func(v decimal.Decimal) {
 				got := share(b, v)
@@ -159,7 +182,7 @@ func (p *Planner) ResumeWithdraw(ctx context.Context, s Strategy, steps []Step, 
 			if st.Kind != "closeShort" {
 				return nil, fail("bad_request", "withdraw plans only close shorts")
 			}
-			have, field = live.PerpLot, &st.Lot
+			have, field = live.PerpLot[st.Perp], &st.Lot
 			credit = func(decimal.Decimal) { closing = true }
 		case "perpl.withdraw":
 			// a close in this same plan releases the position's deposit, not yet visible as free collateral
@@ -175,7 +198,7 @@ func (p *Planner) ResumeWithdraw(ctx context.Context, s Strategy, steps []Step, 
 				w[st.From], w[st.To] = w[st.From].Sub(v), w[st.To].Add(d(st.MinOut))
 			}
 		case "kuru.marketSell":
-			v, ok := capAt(st.Size, w[s.Asset])
+			v, ok := capAt(st.Size, w[st.Market])
 			if !ok {
 				continue
 			}

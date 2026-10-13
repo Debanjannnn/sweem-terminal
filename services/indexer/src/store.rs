@@ -57,10 +57,26 @@ pub async fn cursor(db: &Client, name: &str) -> Result<Option<u64>> {
     Ok(r.map(|r| r.get::<_, i64>(0) as u64))
 }
 
-/// Our users' wallets. A wallet not yet in `indexed_wallets` rewinds `name` to startBlock so its
+/// Age in seconds of the oldest delegated wallet not yet in `indexed_wallets` (by its user's signup), if any.
+pub async fn new_wallet_age(db: &Client, name: &str) -> Result<Option<f64>> {
+    let r = db
+        .query_one(
+            "select extract(epoch from now() - min(coalesce(u.created_at, d.created_at)))::float8 from delegations d
+             left join users u on u.id = d.user_id
+             where lower(d.wallet_address) not in (select wallet from indexed_wallets where name = $1)",
+            &[&name],
+        )
+        .await?;
+    Ok(r.get(0))
+}
+
+/// Our users' wallets. Newly added wallets rewind `name` to `rewind` (or startBlock when None) so their
 /// history is picked up; replays are idempotent.
-// ponytail: full rescan per new wallet; per-wallet backfill cursor if startBlock drifts far behind head.
-pub async fn sync_wallets(db: &mut Client, name: &str) -> Result<BTreeSet<String>> {
+pub async fn sync_wallets(
+    db: &mut Client,
+    name: &str,
+    rewind: Option<u64>,
+) -> Result<BTreeSet<String>> {
     let tx = db.transaction().await?;
     let added = tx
         .execute(
@@ -69,8 +85,19 @@ pub async fn sync_wallets(db: &mut Client, name: &str) -> Result<BTreeSet<String
         )
         .await?;
     if added > 0 {
-        tx.execute("delete from indexer_cursor where name = $1", &[&name])
-            .await?;
+        match rewind {
+            Some(b) => {
+                tx.execute(
+                    "update indexer_cursor set block = least(block, $2) where name = $1",
+                    &[&name, &(b as i64)],
+                )
+                .await?
+            }
+            None => {
+                tx.execute("delete from indexer_cursor where name = $1", &[&name])
+                    .await?
+            }
+        };
     }
     let rows = tx
         .query(

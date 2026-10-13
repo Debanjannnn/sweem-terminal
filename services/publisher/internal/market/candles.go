@@ -46,7 +46,6 @@ func apply(c *streams.Candle, t streams.Trade, interval string, d time.Duration)
 }
 
 // Add folds one live trade into every interval. A candle opened before a restart is reloaded from Postgres first.
-// ponytail: a trade replayed by the socket after a reconnect is counted twice; dedupe by tx+index if Kuru ever replays.
 func (cs *Candles) Add(ctx context.Context, t streams.Trade) {
 	if cs.cur == nil {
 		cs.cur = map[string]*streams.Candle{}

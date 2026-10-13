@@ -43,7 +43,7 @@ func TestResumeWithdraw(t *testing.T) {
 	// still open (lot 4980) so it is closed once and its planned collateral withdrawn
 	live := Live{Bals: []Balance{{Value: "0"}, {Value: "6650000000000000000000", Shares: "6000000000000000000000"}, {Value: "3320000000000000000000", Shares: "777"}, {Value: "0"}},
 		Wallet:  map[string]decimal.Decimal{"MON": d("4980000000000000000000"), "WMON": d("13300000000000000000000"), "AUSD": decimal.Zero, "USDC": decimal.Zero},
-		PerpLot: d("4980"), PerpFree: d("40000000")}
+		PerpLot: map[string]decimal.Decimal{"MON": d("4980")}, PerpFree: d("40000000")}
 	got, err = p.ResumeWithdraw(ctx, monStrat, plan, 0, live, 0)
 	if err != nil {
 		t.Fatal(err)

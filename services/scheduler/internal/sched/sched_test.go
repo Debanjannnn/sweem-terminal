@@ -18,6 +18,7 @@ import (
 	"github.com/snehendu098/sweem-terminal/internal/config"
 	"github.com/snehendu098/sweem-terminal/internal/httpx"
 	"github.com/snehendu098/sweem-terminal/internal/planner"
+	"github.com/snehendu098/sweem-terminal/internal/streams"
 )
 
 var d = decimal.RequireFromString
@@ -89,7 +90,7 @@ func (f *fakeChain) Balances(context.Context, string, planner.Strategy, []planne
 func (f *fakeChain) Live(context.Context, string, planner.Strategy, []planner.LegState, []planner.Peer) (planner.Live, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return planner.Live{Bals: f.bals, Wallet: f.wallet, PerpLot: f.perp.Lot, PerpFree: f.perp.Free}, nil
+	return planner.Live{Bals: f.bals, Wallet: f.wallet, PerpLot: map[string]decimal.Decimal{"ETH": f.perp.Lot, "BTC": f.perp.Lot, "MON": f.perp.Lot}, PerpFree: f.perp.Free}, nil
 }
 
 func (f *fakeChain) Perp(context.Context, string, int) (Perp, error) {
@@ -223,6 +224,17 @@ func TestGateHysteresis(t *testing.T) {
 		if Gate(c.open, d(c.apr), th, band) != c.want {
 			t.Errorf("%+v", c)
 		}
+	}
+}
+
+func TestFundingAPRNoLookback(t *testing.T) { // days == 0 never touches the DB
+	snap := streams.RatesSnapshot{Funding: []streams.FundingInfo{{PerpID: 20, AprShort7d: d("0.2")}}}
+	s := &Scheduler{}
+	if apr, ok, err := s.fundingAPR(context.Background(), snap, 20, 0); err != nil || !ok || !apr.Equal(d("0.2")) {
+		t.Fatal(apr, ok, err)
+	}
+	if _, ok, _ := s.fundingAPR(context.Background(), snap, 30, 0); ok {
+		t.Fatal("unknown perp")
 	}
 }
 

@@ -3,6 +3,7 @@ package planner
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/shopspring/decimal"
@@ -37,14 +38,58 @@ type RateSwitch struct {
 	MinGain string `json:"minGain"`
 }
 
+// Strategy is one asset + sources, or (Sleeves set) several token parts sharing Rules. The token split applies at deposit
+// only; each part then lives on as its own single-asset strategy (Part).
 type Strategy struct {
-	Asset   string   `json:"asset"`
-	Sources []Source `json:"sources"`
+	Asset   string   `json:"asset,omitempty"`
+	Sources []Source `json:"sources,omitempty"`
+	Sleeves []Sleeve `json:"sleeves,omitempty"`
 	Rules   Rules    `json:"rules"`
+}
+
+// Sleeve is one token part of a multi-token strategy.
+type Sleeve struct {
+	Asset     string   `json:"asset"`
+	WeightBps int      `json:"weightBps"`
+	Sources   []Source `json:"sources"`
+}
+
+// Multi is the asset stored for multi-token strategies (sleeves column holds the parts).
+const Multi = "MULTI"
+
+// Parts is the strategy's sleeves; a single-asset strategy is one sleeve at 10000.
+func (s Strategy) Parts() []Sleeve {
+	if len(s.Sleeves) == 0 {
+		return []Sleeve{{s.Asset, 10_000, s.Sources}}
+	}
+	return s.Sleeves
+}
+
+// Part is sleeve sl as a single-asset strategy with the shared rules.
+func (s Strategy) Part(sl Sleeve) Strategy {
+	return Strategy{Asset: sl.Asset, Sources: sl.Sources, Rules: s.Rules}
+}
+
+// Split cuts a flat per-source list (legs, balances, targets) into one slice per part.
+func Split[T any](parts []Sleeve, xs []T) ([][]T, error) {
+	n := 0
+	for _, pt := range parts {
+		n += len(pt.Sources)
+	}
+	if n != len(xs) {
+		return nil, fail("bad_request", "%d entries do not match %d sources", len(xs), n)
+	}
+	out, i := make([][]T, len(parts)), 0
+	for k, pt := range parts {
+		j := i + len(pt.Sources)
+		out[k], i = xs[i:j:j], j
+	}
+	return out, nil
 }
 
 // LegState is what a source holds for one position (stored in strategy_positions.legs). Raw atoms; EntryPx display USDC/unit.
 type LegState struct {
+	Token      string `json:"token,omitempty"` // sleeve asset; "" = the strategy's asset (single-token rows)
 	Kind       string `json:"kind"`
 	Venue      string `json:"venue"`
 	Asset      string `json:"asset"`                // asset atoms supplied (basis: spot kept)
@@ -101,8 +146,42 @@ func d(s string) decimal.Decimal { v, _ := decimal.NewFromString(s); return v }
 
 func (s Source) leverage() decimal.Decimal { return d(s.Params.Leverage) }
 
+// TokenOr is the leg's token, def for legs written before sleeves.
+func (l LegState) TokenOr(def string) string {
+	if l.Token == "" {
+		return def
+	}
+	return l.Token
+}
+
 // Validate checks a strategy against what the executor can run.
 func (p *Planner) Validate(s Strategy) error {
+	if len(s.Sleeves) == 0 {
+		return p.validPart(s)
+	}
+	if (s.Asset != "" && s.Asset != Multi) || len(s.Sources) > 0 || len(s.Sleeves) < 2 || len(s.Sleeves) > 5 {
+		return fail("invalid_sleeves", "need 2..5 sleeves and no top-level asset/sources")
+	}
+	sum, n, seen := 0, 0, map[string]bool{}
+	for _, sl := range s.Sleeves {
+		if sl.WeightBps <= 0 || seen[sl.Asset] {
+			return fail("invalid_sleeves", "bad weight or duplicate %s", sl.Asset)
+		}
+		seen[sl.Asset], sum, n = true, sum+sl.WeightBps, n+len(sl.Sources)
+		if err := p.validPart(s.Part(sl)); err != nil {
+			return err
+		}
+	}
+	if sum != 10_000 {
+		return fail("invalid_sleeves", "weights sum %d, want 10000", sum)
+	}
+	if n > 10 { // executor MaxSteps 32
+		return fail("invalid_sleeves", "at most 10 sources in total")
+	}
+	return nil
+}
+
+func (p *Planner) validPart(s Strategy) error {
 	if !Assets[s.Asset] {
 		return fail("invalid_asset", "asset %q", s.Asset)
 	}
@@ -260,7 +339,7 @@ func (p *Planner) openBasis(asset string, src Source, spot, usdc decimal.Decimal
 	limit := px.Mul(decimal.NewFromInt(10_000 - perplSlipBps)).Div(bps).Shift(pp.PriceDec).Floor()
 	steps = append(steps, Step{Action: "perpl.order", Perp: pp.Name, Kind: "openShort", Price: limit.String(), Lot: lot.String(),
 		LeverageHdths: int(src.leverage().Mul(decimal.NewFromInt(100)).IntPart())})
-	return steps, LegState{Kind: src.Kind, Venue: src.Venue, Asset: spot.String(), Collateral: ausd.String(), Lot: lot.String(), EntryPx: px.String()}, nil
+	return steps, LegState{Token: asset, Kind: src.Kind, Venue: src.Venue, Asset: spot.String(), Collateral: ausd.String(), Lot: lot.String(), EntryPx: px.String()}, nil
 }
 
 // closeBasis closes part (bps) of the short and withdraws that share of the estimated collateral back to USDC.
@@ -283,7 +362,7 @@ func (p *Planner) closeBasis(asset string, leg LegState, px decimal.Decimal, par
 	left.Collateral = d(leg.Collateral).Sub(bpsOf(d(leg.Collateral), part)).String()
 	left.Asset = d(leg.Asset).Sub(bpsOf(d(leg.Asset), part)).String()
 	if part == 10_000 {
-		left = LegState{Kind: leg.Kind, Venue: leg.Venue, Asset: "0"}
+		left = LegState{Token: leg.Token, Kind: leg.Kind, Venue: leg.Venue, Asset: "0"}
 	}
 	if !est.IsPositive() {
 		return steps, decimal.Zero, left
@@ -294,7 +373,8 @@ func (p *Planner) closeBasis(asset string, leg LegState, px decimal.Decimal, par
 		Step{Action: "stable.swap", From: "AUSD", To: "USDC", Amount: est.String(), MinOut: out.String()}), out, left
 }
 
-// Deploy opens a position with usdc atoms: fee to treasury first, then per source (buy asset on Kuru once, supply/stake/LP/hedge).
+// Deploy opens a position with usdc atoms: fee to treasury first, then per sleeve (split by weight) and source
+// (buy the sleeve asset on Kuru once, supply/stake/LP/hedge).
 func (p *Planner) Deploy(ctx context.Context, s Strategy, usdc decimal.Decimal, hasPerplAccount bool, slip int) (Plan, error) {
 	if err := p.Validate(s); err != nil {
 		return Plan{}, err
@@ -306,8 +386,84 @@ func (p *Planner) Deploy(ctx context.Context, s Strategy, usdc decimal.Decimal, 
 	if !fee.IsPositive() {
 		return Plan{}, fail("below_min_size", "amount too small")
 	}
+	if err := p.minDeposit(ctx, s, usdc, hasPerplAccount, slip); err != nil {
+		return Plan{}, err
+	}
 	net := usdc.Sub(fee)
 	steps := []Step{{Action: "fee.transfer", Amount: fee.String()}}
+	var legs []LegState
+	parts, left := s.Parts(), net
+	for k, pt := range parts {
+		amt := bpsOf(net, pt.WeightBps)
+		if k == len(parts)-1 {
+			amt = left
+		}
+		left = left.Sub(amt)
+		ps, ls, err := p.deployPart(ctx, s.Part(pt), amt, hasPerplAccount, slip)
+		if err != nil {
+			return Plan{}, err
+		}
+		steps, legs = append(steps, ps...), append(legs, ls...)
+		for _, src := range pt.Sources {
+			hasPerplAccount = hasPerplAccount || src.Kind == "basis" // the first basis sleeve creates the account
+		}
+	}
+	steps, err := p.check(p.Dep, steps)
+	return Plan{Steps: steps, FeeUSDC: fee.String(), Legs: legs}, err
+}
+
+// minDeposit rejects usdc too small for a sleeve's Kuru buy (min order + 5% for price moves) or, without an account,
+// for the first basis leg's Perpl account. The error names the total deposit that clears it.
+func (p *Planner) minDeposit(ctx context.Context, s Strategy, usdc decimal.Decimal, hasAccount bool, slip int) error {
+	one := decimal.NewFromInt(1)
+	need, asset, why := decimal.Zero, "", ""
+	for _, pt := range s.Parts() {
+		w := decimal.NewFromInt(int64(pt.WeightBps)).Div(bps).Mul(decimal.NewFromInt(10_000 - FeeBps)).Div(bps)
+		buy, coll := decimal.Zero, decimal.Zero
+		for _, src := range pt.Sources {
+			ws, f := decimal.NewFromInt(int64(src.WeightBps)).Div(bps), one
+			switch src.Kind {
+			case "lp":
+				f = decimal.NewFromFloat(0.5)
+			case "basis":
+				l := src.leverage()
+				f = l.Div(l.Add(one))
+				if !hasAccount {
+					coll, hasAccount = ws.Div(l.Add(one)), true
+				}
+			}
+			buy = buy.Add(ws.Mul(f))
+		}
+		if pt.Asset != "USDC" && buy.IsPositive() {
+			m, err := p.market(pt.Asset)
+			if err != nil {
+				return err
+			}
+			q, err := p.quote(ctx, pt.Asset, "buy", decimal.New(100, 6), slip) // $100 probe for the spot price
+			if err != nil {
+				return err
+			}
+			base := decimal.NewFromInt(int64(m.MinSize)).Div(decimal.NewFromInt(int64(m.SizePrecision)))
+			if v := base.Mul(d(q.AvgPx)).Mul(decimal.NewFromFloat(1.05)).Div(buy.Mul(w)); v.GreaterThan(need) {
+				need, asset, why = v, pt.Asset, fmt.Sprintf("Kuru min %s %s", base, pt.Asset)
+			}
+		}
+		if coll.IsPositive() {
+			ausd := decimal.NewFromInt(int64(10_000 - slip - poolFeeBps)).Div(bps)
+			if v := decimal.New(perplMinOpen, -6).Div(coll.Mul(w).Mul(ausd)); v.GreaterThan(need) {
+				need, asset, why = v, pt.Asset, fmt.Sprintf("Perpl min %s AUSD collateral", decimal.New(perplMinOpen, -6))
+			}
+		}
+	}
+	if usdc.Shift(-6).LessThan(need) {
+		return fail("below_min_size", "%s part needs ≥ %s USDC total deposit (%s)", asset, need.RoundCeil(2).StringFixed(2), why)
+	}
+	return nil
+}
+
+// deployPart spends usdc atoms on one sleeve: one Kuru buy for all its sources, then supply/stake/LP/hedge.
+func (p *Planner) deployPart(ctx context.Context, s Strategy, net decimal.Decimal, hasPerplAccount bool, slip int) ([]Step, []LegState, error) {
+	var steps []Step
 	allocs, buys := make([]decimal.Decimal, len(s.Sources)), make([]decimal.Decimal, len(s.Sources))
 	total := decimal.Zero
 	for i, src := range s.Sources {
@@ -330,7 +486,7 @@ func (p *Planner) Deploy(ctx context.Context, s Strategy, usdc decimal.Decimal, 
 	if total.IsPositive() {
 		q, err := p.quote(ctx, s.Asset, "buy", total, slip)
 		if err != nil {
-			return Plan{}, err
+			return nil, nil, err
 		}
 		got, px = d(q.MinOut), d(q.AvgPx)
 		steps = append(steps, Step{Action: "kuru.marketBuy", Market: s.Asset, Quote: total.String(), MinOut: q.MinOut})
@@ -341,22 +497,21 @@ func (p *Planner) Deploy(ctx context.Context, s Strategy, usdc decimal.Decimal, 
 		if s.Asset != "USDC" {
 			amt = got.Mul(buys[i]).Div(total).Floor()
 		}
-		legs[i] = LegState{Kind: src.Kind, Venue: src.Venue, Asset: amt.String()}
+		legs[i] = LegState{Token: s.Asset, Kind: src.Kind, Venue: src.Venue, Asset: amt.String()}
 		switch src.Kind {
 		case "lp":
 			steps = append(steps, Step{Action: "activeVault.deposit", Base: amt.String(), Quote: allocs[i].Sub(buys[i]).String()})
 		case "basis":
 			bs, leg, err := p.openBasis(s.Asset, src, amt, allocs[i].Sub(buys[i]), px, hasPerplAccount, slip)
 			if err != nil {
-				return Plan{}, err
+				return nil, nil, err
 			}
 			steps, legs[i] = append(steps, bs...), leg
 		default:
 			steps = append(steps, p.supply(s.Asset, src, amt)...)
 		}
 	}
-	steps, err := p.check(p.Dep, steps)
-	return Plan{Steps: steps, FeeUSDC: fee.String(), Legs: legs}, err
+	return steps, legs, nil
 }
 
 // Withdraw unwinds every source and sells the asset to USDC. No fee.
@@ -364,11 +519,28 @@ func (p *Planner) Withdraw(ctx context.Context, s Strategy, legs []LegState, bal
 	return p.WithdrawBps(ctx, s, legs, bals, 10_000, slip)
 }
 
-// WithdrawBps unwinds part (bps) of every source pro rata and sells that asset to USDC (position TP/SL). Plan.Legs = what remains.
+// WithdrawBps unwinds part (bps) of every source pro rata and sells each sleeve asset to USDC (position TP/SL). Plan.Legs = what remains.
 func (p *Planner) WithdrawBps(ctx context.Context, s Strategy, legs []LegState, bals []Balance, part, slip int) (Plan, error) {
-	if len(legs) != len(s.Sources) || len(bals) != len(s.Sources) || part < 1 || part > 10_000 {
+	parts := s.Parts()
+	ls, err := Split(parts, legs)
+	bs, err2 := Split(parts, bals)
+	if err != nil || err2 != nil || part < 1 || part > 10_000 {
 		return Plan{}, fail("bad_request", "legs/balances do not match sources or bps out of 1..10000")
 	}
+	var steps []Step
+	var out []LegState
+	for k, pt := range parts {
+		st, l, err := p.withdrawPart(ctx, s.Part(pt), ls[k], bs[k], part, slip)
+		if err != nil {
+			return Plan{}, err
+		}
+		steps, out = append(steps, st...), append(out, l...)
+	}
+	steps, err = p.check(p.Dep, steps)
+	return Plan{Steps: steps, Legs: out}, err
+}
+
+func (p *Planner) withdrawPart(ctx context.Context, s Strategy, legs []LegState, bals []Balance, part, slip int) ([]Step, []LegState, error) {
 	all := part == 10_000
 	var steps []Step
 	sell := decimal.Zero
@@ -399,13 +571,13 @@ func (p *Planner) WithdrawBps(ctx context.Context, s Strategy, legs []LegState, 
 	if s.Asset != "USDC" && sell.IsPositive() {
 		q, err = p.quote(ctx, s.Asset, "sell", sell, slip)
 		if err != nil && !isCode(err, "below_min_size") {
-			return Plan{}, err
+			return nil, nil, err
 		}
 	}
 	if basis >= 0 && d(legs[basis].Lot).IsPositive() {
 		px := d(q.AvgPx)
 		if !px.IsPositive() {
-			return Plan{}, fail("quote_unavailable", "no %s price to close the hedge", s.Asset)
+			return nil, nil, fail("quote_unavailable", "no %s price to close the hedge", s.Asset)
 		}
 		var bs []Step
 		bs, _, out[basis] = p.closeBasis(s.Asset, legs[basis], px, part, slip)
@@ -414,8 +586,7 @@ func (p *Planner) WithdrawBps(ctx context.Context, s Strategy, legs []LegState, 
 	if err == nil && q.MinOut != "" {
 		steps = append(steps, Step{Action: "kuru.marketSell", Market: s.Asset, Size: sell.String(), MinOut: q.MinOut})
 	}
-	steps, err = p.check(p.Dep, steps)
-	return Plan{Steps: steps, Legs: out}, err
+	return steps, out, nil
 }
 
 // ResizeBasis changes the Perpl hedge of a basis leg without touching spot (liquidation guard / re-hedge).
@@ -530,7 +701,7 @@ func (p *Planner) Rebalance(ctx context.Context, s Strategy, legs []LegState, ba
 				}
 				steps, freed = append(steps, Step{Action: "kuru.marketBuy", Market: s.Asset, Quote: usdc.String(), MinOut: q.MinOut}), freed.Add(d(q.MinOut))
 			}
-			out[i] = LegState{Kind: src.Kind, Venue: src.Venue, Asset: "0"}
+			out[i] = LegState{Token: legs[i].Token, Kind: src.Kind, Venue: src.Venue, Asset: "0"}
 		default:
 			st, got := p.takeOut(s.Asset, src, deltas[i].Neg(), bals[i], false)
 			steps, freed = append(steps, st...), freed.Add(got)

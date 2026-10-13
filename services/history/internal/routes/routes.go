@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"strconv"
 	"time"
@@ -134,12 +136,15 @@ func (s *Server) prices(w http.ResponseWriter, r *http.Request) {
 }
 
 // BacktestRequest: decimals are strings; weights are fractions summing to 1.
+// Multi-token: Sleeves (2..5, each a single-asset request with Weight) replace Asset/Legs; Amount is then USD.
 type BacktestRequest struct {
-	Asset  string `json:"asset"`
-	Amount string `json:"amount"`
-	From   string `json:"from"`
-	To     string `json:"to"`
-	Legs   []struct {
+	Weight  string            `json:"weight,omitempty"`
+	Sleeves []BacktestRequest `json:"sleeves,omitempty"`
+	Asset   string            `json:"asset"`
+	Amount  string            `json:"amount"`
+	From    string            `json:"from"`
+	To      string            `json:"to"`
+	Legs    []struct {
 		Kind   string `json:"kind"`
 		Venue  string `json:"venue"`
 		PerpID int    `json:"perpId"`
@@ -271,6 +276,10 @@ func (s *Server) backtest(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "bad_request", err.Error())
 		return
 	}
+	if len(req.Sleeves) > 0 {
+		s.multi(w, r.Context(), req)
+		return
+	}
 	in, rewards, err := s.input(req)
 	if err != nil {
 		fail(w, 400, "bad_request", err.Error())
@@ -282,6 +291,14 @@ func (s *Server) backtest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res, err := backtest.Run(in, ser)
+	if runFailed(w, err) {
+		return
+	}
+	httpx.JSON(w, 200, encode(in, res))
+}
+
+// runFailed writes the response for a backtest.Run error; false when err is nil.
+func runFailed(w http.ResponseWriter, err error) bool {
 	var be *backtest.Error
 	if errors.As(err, &be) {
 		status := 400
@@ -289,13 +306,93 @@ func (s *Server) backtest(w http.ResponseWriter, r *http.Request) {
 			status = 422
 		}
 		fail(w, status, be.Code, be.Msg)
-		return
+		return true
 	}
 	if err != nil {
 		internal(w, "backtest", err)
+		return true
+	}
+	return false
+}
+
+// multi runs each sleeve at amount 1 over the parent window, aligns them to their common window, then combines in USD.
+func (s *Server) multi(w http.ResponseWriter, ctx context.Context, req BacktestRequest) {
+	bad := func(msg string) { fail(w, 400, "bad_request", msg) }
+	n := len(req.Sleeves)
+	if req.Asset != "" || len(req.Legs) > 0 || req.Weight != "" {
+		bad("sleeves excludes asset, legs and weight")
 		return
 	}
-	httpx.JSON(w, 200, encode(in, res))
+	if n < 2 || n > 5 {
+		bad("sleeves must have 2..5 entries")
+		return
+	}
+	var errs []string
+	usd := num(req.Amount, "1000", "amount", &errs)
+	if len(errs) > 0 || !(usd > 0) {
+		bad("amount must be a USD number > 0")
+		return
+	}
+	from, to, err := s.window(req.From, req.To)
+	if err != nil {
+		bad(err.Error())
+		return
+	}
+	ins, rewards, ws, sum := make([]backtest.Input, n), make([]bool, n), make([]float64, n), 0.0
+	for i, sr := range req.Sleeves {
+		if len(sr.Sleeves) > 0 {
+			bad("nested sleeves")
+			return
+		}
+		ws[i] = num(sr.Weight, "", "weight", &errs)
+		if len(errs) > 0 || !(ws[i] > 0) {
+			bad(fmt.Sprintf("sleeves[%d].weight must be > 0", i))
+			return
+		}
+		sum += ws[i]
+		sr.Amount, sr.From, sr.To = "1", req.From, req.To
+		if ins[i], rewards[i], err = s.input(sr); err != nil {
+			bad(fmt.Sprintf("sleeves[%d]: %v", i, err))
+			return
+		}
+	}
+	if math.Abs(sum-1) > 1e-9 {
+		bad(fmt.Sprintf("sleeve weights sum to %g, want 1", sum))
+		return
+	}
+	sers := make([]backtest.Series, n)
+	for i := range ins {
+		if sers[i], err = s.series(ctx, ins[i], rewards[i]); err != nil {
+			internal(w, "load series", err)
+			return
+		}
+	}
+	rs := make([]*backtest.Result, n)
+	var lo, hi string
+	for i := range ins {
+		if rs[i], err = backtest.Run(ins[i], sers[i]); runFailed(w, err) {
+			return
+		}
+		if i == 0 {
+			lo, hi = rs[i].From, rs[i].To
+		}
+		lo, hi = max(lo, rs[i].From), min(hi, rs[i].To)
+	}
+	if lo > hi {
+		fail(w, 422, "no_data", "sleeves' series do not overlap the requested window")
+		return
+	}
+	// re-run sleeves clamped wider than the common window so all start (and are scaled) on the same day
+	for i, r := range rs {
+		if r.From != lo || r.To != hi {
+			ins[i].From, _ = time.Parse(day, lo)
+			ins[i].To, _ = time.Parse(day, hi)
+			if rs[i], err = backtest.Run(ins[i], sers[i]); runFailed(w, err) {
+				return
+			}
+		}
+	}
+	httpx.JSON(w, 200, encode(backtest.Input{Asset: "MULTI", Amount: usd, From: from, To: to}, backtest.Combine(rs, ws, usd)))
 }
 
 func f(v float64) string { return strconv.FormatFloat(v, 'f', 6, 64) }

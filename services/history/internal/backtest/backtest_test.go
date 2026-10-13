@@ -228,3 +228,38 @@ func TestValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestCombine(t *testing.T) {
+	pt := func(d string, usd, hodl float64) Point { return Point{Day: d, USD: usd, HodlUSD: hodl} }
+	// USDC sleeve, $1 start, one extra leading day not shared
+	a := &Result{Asset: "USDC", InitialUSD: 1, FinalUSD: 1.1, HodlFinalUSD: 1, CostsUSD: 0.01, Rebalances: 1,
+		Contributions: map[string]float64{"lending:aave": 0.11, "costs": -0.01},
+		Curve:         []Point{pt("2026-01-01", 1, 1), pt("2026-01-02", 1.05, 1), pt("2026-01-03", 1.1, 1)}}
+	// WETH sleeve at 1 unit, $2000 start, halves then recovers
+	b := &Result{Asset: "WETH", InitialUSD: 2000, FinalUSD: 2000, HodlFinalUSD: 2000, CostsUSD: 2, Rebalances: 2, Estimated: true,
+		Contributions: map[string]float64{"price": 0, "costs": -2},
+		Curve:         []Point{pt("2026-01-02", 1000, 1000), pt("2026-01-03", 2000, 2000)}}
+	r := Combine([]*Result{a, b}, []float64{0.4, 0.6}, 1000)
+	if r.Asset != "MULTI" || len(r.Curve) != 2 || r.From != "2026-01-02" || r.To != "2026-01-03" || r.Days != 1 || r.Rebalances != 3 || !r.Estimated {
+		t.Fatalf("%+v", r)
+	}
+	near(t, "day2 usd", r.Curve[0].USD, 400*1.05+600*0.5)
+	near(t, "day2 asset", r.Curve[0].Asset, r.Curve[0].USD)
+	near(t, "day2 hodl", r.Curve[0].HodlUSD, 400+300)
+	near(t, "final", r.FinalUSD, 440+600)
+	near(t, "finalAsset", r.FinalAsset, r.FinalUSD)
+	near(t, "costs", r.CostsUSD, 4+0.6)
+	near(t, "maxDD", r.MaxDrawdownUSD, 0)
+	near(t, "hodl maxDD", r.HodlMaxDrawdownUSD, 0)
+	near(t, "apy", r.APYUSD, math.Pow(1.04, 365)-1)
+	near(t, "USDC:lending", r.Contributions["USDC:lending:aave"], 44)
+	near(t, "WETH:costs", r.Contributions["WETH:costs"], -0.6)
+	if _, ok := r.Contributions["costs"]; ok {
+		t.Fatal("unprefixed key")
+	}
+	// drawdown across the summed curve: b falls 2000 -> 1000 after a shared peak
+	b.Curve = []Point{pt("2026-01-01", 2000, 2000), pt("2026-01-02", 1000, 1000), pt("2026-01-03", 2000, 2000)}
+	r = Combine([]*Result{a, b}, []float64{0.4, 0.6}, 1000)
+	near(t, "maxDD falling", r.MaxDrawdownUSD, 1-(420+300)/1000.0)
+	near(t, "hodl maxDD falling", r.HodlMaxDrawdownUSD, 1-700/1000.0)
+}

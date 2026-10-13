@@ -146,6 +146,7 @@ func WalletBalance(ctx context.Context, c Chain, dep *config.Deployments143, wal
 }
 
 // Peer is another open position of the same wallet; venues it shares with this one are split pro rata by LegState.Asset.
+// Asset is the strategy asset (Multi for sleeves: legs carry their Token).
 type Peer struct {
 	Asset string
 	Legs  []LegState
@@ -154,9 +155,23 @@ type Peer struct {
 // Balances reads each source's live Value/Shares for one position of wallet. lp and basis come from legs (no venue read):
 // lp Value = MON deposited, basis Value = spot + collateral/entryPx.
 func Balances(ctx context.Context, c Chain, dep *config.Deployments143, wallet string, s Strategy, legs []LegState, peers []Peer) ([]Balance, error) {
-	if len(legs) != len(s.Sources) {
+	parts := s.Parts()
+	ls, err := Split(parts, legs)
+	if err != nil {
 		return nil, fmt.Errorf("legs do not match sources")
 	}
+	var out []Balance
+	for k, pt := range parts {
+		b, err := balancesPart(ctx, c, dep, wallet, s.Part(pt), ls[k], peers)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, b...)
+	}
+	return out, nil
+}
+
+func balancesPart(ctx context.Context, c Chain, dep *config.Deployments143, wallet string, s Strategy, legs []LegState, peers []Peer) ([]Balance, error) {
 	w := common.HexToAddress(wallet).Bytes()
 	out := make([]Balance, len(s.Sources))
 	for i, src := range s.Sources {
@@ -202,7 +217,7 @@ func Balances(ctx context.Context, c Chain, dep *config.Deployments143, wallet s
 			mine, all := d(legs[i].Asset), d(legs[i].Asset)
 			for _, p := range peers {
 				for _, l := range p.Legs {
-					if lendAsset(p.Asset) == la && l.Kind == src.Kind && l.Venue == src.Venue {
+					if lendAsset(l.TokenOr(p.Asset)) == la && l.Kind == src.Kind && l.Venue == src.Venue {
 						all = all.Add(d(l.Asset))
 					}
 				}

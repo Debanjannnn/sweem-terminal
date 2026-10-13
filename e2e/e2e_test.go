@@ -1,6 +1,7 @@
 //go:build e2e
 
-// Package e2e drives a running `make up` stack on Monad testnet with real txs. Run via `make e2e`.
+// Package e2e drives a running `make up` stack on Monad mainnet (143) with REAL money through the v2 api.
+// Run via `make e2e` (E2E_REAL_MONEY=1). See tasks/real-money-test.md.
 package e2e
 
 import (
@@ -9,10 +10,10 @@ import (
 	"crypto/ecdsa"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/big"
 	"net/http"
 	"os"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -21,26 +22,20 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
-	"github.com/redis/go-redis/v9"
+	"github.com/shopspring/decimal"
 	"github.com/snehendu098/sweem-terminal/internal/chain"
-	"github.com/snehendu098/sweem-terminal/internal/chain/bindings/basket"
 	"github.com/snehendu098/sweem-terminal/internal/config"
-	"github.com/snehendu098/sweem-terminal/internal/streams"
 )
 
 const (
-	api      = "http://localhost:8080"
-	md       = "http://localhost:8082"
-	seeder   = "http://localhost:8086"
-	deployer = "0x6a8846d4c910911181a73cae3910cc981354ef74"
+	api = "http://localhost:8080/api/v1"
+	md  = "http://localhost:8082/api/v1"
+	mkt = "WETH" // ERC20 base (clean balance deltas); Kuru min 0.002 WETH ≈ $5
 )
 
 var erc20, _ = abi.JSON(strings.NewReader(`[
-{"name":"approve","type":"function","inputs":[{"type":"address"},{"type":"uint256"}],"outputs":[{"type":"bool"}]},
-{"name":"transfer","type":"function","inputs":[{"type":"address"},{"type":"uint256"}],"outputs":[{"type":"bool"}]},
 {"name":"balanceOf","type":"function","stateMutability":"view","inputs":[{"type":"address"}],"outputs":[{"type":"uint256"}]}]`))
 
 func env(t *testing.T, k string) string {
@@ -51,14 +46,20 @@ func env(t *testing.T, k string) string {
 	return v
 }
 
-func do(t *testing.T, method, url, token string, body, out any) int {
+func envOr(k, def string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return def
+}
+
+// do sends a JSON request, decodes a 2xx body into out, and returns the status and raw body.
+func do(t *testing.T, method, url, token string, body, out any) (int, string) {
 	t.Helper()
-	var rd *bytes.Reader
+	var rd io.Reader = http.NoBody
 	if body != nil {
 		b, _ := json.Marshal(body)
 		rd = bytes.NewReader(b)
-	} else {
-		rd = bytes.NewReader(nil)
 	}
 	req, _ := http.NewRequest(method, url, rd)
 	req.Header.Set("Content-Type", "application/json")
@@ -70,17 +71,26 @@ func do(t *testing.T, method, url, token string, body, out any) int {
 		t.Fatalf("%s %s: %v", method, url, err)
 	}
 	defer res.Body.Close()
-	if out != nil {
-		_ = json.NewDecoder(res.Body).Decode(out)
+	raw, _ := io.ReadAll(res.Body)
+	if out != nil && res.StatusCode < 300 {
+		if err := json.Unmarshal(raw, out); err != nil {
+			t.Fatalf("%s %s: decode %v: %s", method, url, err, raw)
+		}
 	}
-	return res.StatusCode
+	return res.StatusCode, string(raw)
+}
+
+// must is do + status check.
+func must(t *testing.T, method, url, token string, body any, want int, out any) {
+	t.Helper()
+	if c, raw := do(t, method, url, token, body, out); c != want {
+		t.Fatalf("%s %s: %d (want %d): %s", method, url, c, want, raw)
+	}
 }
 
 func get(t *testing.T, url string, out any) {
 	t.Helper()
-	if c := do(t, http.MethodGet, url, "", nil, out); c != http.StatusOK {
-		t.Fatalf("GET %s: %d", url, c)
-	}
+	must(t, http.MethodGet, url, "", nil, http.StatusOK, out)
 }
 
 // eventually polls f every 3s until it returns "" or timeout, failing with the last reason.
@@ -95,54 +105,23 @@ func eventually(t *testing.T, timeout time.Duration, f func() string) {
 	t.Fatalf("timed out after %s: %s", timeout, why)
 }
 
-type basketRow struct {
-	Address    string `json:"address"`
-	Symbol     string `json:"symbol"`
-	Creator    string `json:"creator"`
-	Components []struct {
-		Market string `json:"market"`
-	} `json:"components"`
-}
-
-type quote struct {
-	ExpectedOut string `json:"expectedOut"`
-	MinOut      string `json:"minOut"`
-	Stale       bool   `json:"stale"`
-}
-
 type execution struct {
-	ScheduleID string `json:"scheduleId"`
-	Slot       int64  `json:"slot"`
-	Status     string `json:"status"`
-	TxHash     string `json:"txHash"`
-	Error      string `json:"error"`
+	ID         string    `json:"id"`
+	Kind       string    `json:"kind"`
+	Status     string    `json:"status"`
+	TxHashes   []string  `json:"txHashes"`
+	Error      *string   `json:"error"`
+	ScheduleID *string   `json:"scheduleId"`
+	CreatedAt  time.Time `json:"createdAt"`
 }
 
-func big10(s string) *big.Int { v, _ := new(big.Int).SetString(s, 10); return v }
-
-type wallet struct {
-	eth *ethclient.Client
-	key *ecdsa.PrivateKey
-}
-
-func (w wallet) send(t *testing.T, ctx context.Context, f func(*bind.TransactOpts) (*types.Transaction, error)) *types.Receipt {
-	t.Helper()
-	opts, _ := bind.NewKeyedTransactorWithChainID(w.key, big.NewInt(int64(config.ChainID)))
-	opts.Context = ctx
-	tx, err := f(opts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	r, err := bind.WaitMined(ctx, w.eth, tx)
-	if err != nil || r.Status != types.ReceiptStatusSuccessful {
-		t.Fatalf("tx %s: %v status %v", tx.Hash(), err, r)
-	}
-	return r
-}
-
-func (w wallet) usdc(t *testing.T, ctx context.Context, token common.Address, method string, args ...any) *types.Receipt {
-	c := bind.NewBoundContract(token, erc20, w.eth, w.eth, w.eth)
-	return w.send(t, ctx, func(o *bind.TransactOpts) (*types.Transaction, error) { return c.Transact(o, method, args...) })
+// accepted is the 202 body of every execution-creating route.
+type accepted struct {
+	ExecutionID string `json:"executionId"`
+	Kind        string `json:"kind"`
+	OrderID     string `json:"orderId"`
+	PositionID  string `json:"positionId"`
+	Status      string `json:"status"` // withdraw: "closed" on 200 (nothing on chain)
 }
 
 func balanceOf(t *testing.T, ctx context.Context, eth *ethclient.Client, token, owner common.Address) *big.Int {
@@ -172,14 +151,14 @@ func siweLogin(t *testing.T, appID string, key *ecdsa.PrivateKey) string {
 	var init struct{ Nonce string }
 	post("init", map[string]string{"address": addr}, &init)
 	msg := fmt.Sprintf("localhost:3000 wants you to sign in with your Ethereum account:\n%s\n\nsweem e2e login\n\nURI: http://localhost:3000\nVersion: 1\nChain ID: %d\nNonce: %s\nIssued At: %s",
-		addr, config.ChainID, init.Nonce, time.Now().UTC().Format("2006-01-02T15:04:05.000Z"))
+		addr, config.MainnetChainID, init.Nonce, time.Now().UTC().Format("2006-01-02T15:04:05.000Z"))
 	sig, err := crypto.Sign(accounts.TextHash([]byte(msg)), key)
 	if err != nil {
 		t.Fatal(err)
 	}
 	sig[64] += 27
 	var auth struct{ Token string }
-	post("authenticate", map[string]any{"message": msg, "signature": "0x" + common.Bytes2Hex(sig), "chainId": fmt.Sprintf("eip155:%d", config.ChainID),
+	post("authenticate", map[string]any{"message": msg, "signature": "0x" + common.Bytes2Hex(sig), "chainId": fmt.Sprintf("eip155:%d", config.MainnetChainID),
 		"walletClientType": "metamask", "connectorType": "injected", "mode": "login-or-sign-up"}, &auth)
 	if auth.Token == "" {
 		t.Fatal("privy siwe: no token")
@@ -188,248 +167,327 @@ func siweLogin(t *testing.T, appID string, key *ecdsa.PrivateKey) string {
 }
 
 func TestE2E(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 14*time.Minute)
+	// E2E_DRY=1: config/auth/read-only checks only, stops before the first tx (no funds needed)
+	dry := os.Getenv("E2E_DRY") == "1"
+	if os.Getenv("E2E_REAL_MONEY") != "1" && !dry {
+		t.Skip("spends real mainnet funds: set E2E_REAL_MONEY=1 (make e2e), or E2E_DRY=1 for the no-spend checks")
+	}
+	start := time.Now().Add(-time.Minute) // clock skew slack for the executions check
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Minute)
 	defer cancel()
-	dep, err := config.LoadDeployments(env(t, "E2E_DEPLOYMENTS_PATH"))
+	dep, err := config.LoadDeployments143(envOr("E2E_DEPLOYMENTS_PATH", "../contracts/deployments/143.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	core := strings.ToLower(dep.Baskets["CORE"])
-	usdc := common.HexToAddress(dep.Kuru.USDC)
-	eth, err := chain.Dial(ctx, env(t, "RPC_URL"))
+	t.Setenv("CHAIN_ID", fmt.Sprint(config.MainnetChainID)) // chain.Dial refuses any other chain
+	eth, err := chain.Dial(ctx, envOr("MAINNET_RPC_URL", "https://rpc.monad.xyz"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	dkey, err := crypto.HexToECDSA(strings.TrimPrefix(env(t, "PRIVATE_KEY"), "0x"))
-	if err != nil {
-		t.Fatal(err)
+	usdc := common.HexToAddress(dep.Tokens["USDC"].Address)
+	weth := common.HexToAddress(dep.Tokens[mkt].Address)
+	m := dep.Kuru.Markets[mkt]
+	minSize := decimal.NewFromInt(int64(m.MinSize)).Div(decimal.NewFromInt(int64(m.SizePrecision)))
+	walletID, waddr := env(t, "E2E_PRIVY_WALLET_ID"), common.HexToAddress(env(t, "E2E_PRIVY_WALLET_ADDRESS"))
+
+	// stop at the first failing step: later steps spend money on top of a broken state
+	step := func(name string, f func(t *testing.T)) {
+		if !t.Run(name, f) {
+			t.FailNow()
+		}
 	}
-	dw := wallet{eth, dkey}
-	var coreRow basketRow
 
-	t.Run("health", func(t *testing.T) {
-		for _, p := range []int{8080, 8081, 8082, 8084, 8085, 8086} {
-			for _, h := range []string{"health", "healthz"} {
-				get(t, fmt.Sprintf("http://localhost:%d/%s", p, h), nil)
+	step("precheck funds", func(t *testing.T) {
+		mon, err := eth.BalanceAt(ctx, waddr, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		u := balanceOf(t, ctx, eth, usdc, waddr)
+		if mon.Cmp(big.NewInt(1e18)) < 0 || u.Cmp(big.NewInt(8_000_000)) < 0 {
+			if dry {
+				t.Logf("dry: wallet %s has %s MON, %s USDC (real run needs >= 1 MON, 8 USDC)", waddr.Hex(), decimal.NewFromBigInt(mon, -18), decimal.NewFromBigInt(u, -6))
+				return
 			}
-		}
-		var st struct{ AccountID string } // executor has no host port: seeder reads bot balances through it
-		get(t, seeder+"/api/v1/status", &st)
-		if st.AccountID != "108" {
-			t.Fatalf("seeder→executor bot account %q", st.AccountID)
-		}
-	})
-
-	t.Run("basket", func(t *testing.T) {
-		var bs []basketRow
-		get(t, api+"/api/v1/baskets", &bs)
-		i := slices.IndexFunc(bs, func(b basketRow) bool { return strings.EqualFold(b.Address, core) })
-		if i < 0 {
-			t.Fatalf("CORE %s not in api baskets", core)
-		}
-		coreRow = bs[i]
-		if coreRow.Symbol != "CORE" || !strings.EqualFold(coreRow.Creator, deployer) || len(coreRow.Components) != 3 {
-			t.Fatalf("CORE row %+v", coreRow)
+			t.Fatalf("fund wallet %s: has %s MON, %s USDC; need >= 1 MON and >= 8 USDC",
+				waddr.Hex(), decimal.NewFromBigInt(mon, -18), decimal.NewFromBigInt(u, -6))
 		}
 	})
 
-	t.Run("liquidity", func(t *testing.T) {
-		rdb := redis.NewClient(&redis.Options{Addr: "localhost:" + envOr("REDIS_HOST_PORT", "6380")})
-		defer rdb.Close()
-		var st struct {
-			Markets map[string]struct{ LiveOrders int }
-		}
-		get(t, seeder+"/api/v1/status", &st)
-		for _, c := range coreRow.Components {
-			var b struct {
-				Bids, Asks []streams.Level
-				Stale      bool
-			}
-			get(t, md+"/api/v1/books/"+c.Market, &b)
-			if len(b.Bids) == 0 || len(b.Asks) == 0 || b.Stale {
-				t.Fatalf("book %s: %d bids %d asks stale=%v", c.Market, len(b.Bids), len(b.Asks), b.Stale)
-			}
-			ref, err := streams.Get[streams.RefPrice](ctx, rdb, streams.Ref(c.Market))
-			if err != nil || time.Since(time.UnixMilli(ref.Ts)) > time.Minute || !ref.Ref.IsPositive() {
-				t.Fatalf("ref %s: %+v %v", c.Market, ref, err)
-			}
-			if st.Markets[c.Market].LiveOrders == 0 {
-				t.Fatalf("seeder has no resting orders on %s", c.Market)
-			}
+	step("health", func(t *testing.T) {
+		// api, publisher, market-data, scheduler, indexer, history
+		for _, p := range []int{8080, 8081, 8082, 8084, 8085, 8087} {
+			get(t, fmt.Sprintf("http://localhost:%d/healthz", p), nil)
 		}
 	})
 
-	t.Run("direct mint and redeem", func(t *testing.T) {
-		b, _ := basket.NewSweemBasket(common.HexToAddress(core), eth)
-		amt := big.NewInt(5_000_000)
-		var q quote
-		get(t, fmt.Sprintf("%s/api/v1/quote/%s?side=mint&amount=%s&slippageBps=100", md, core, amt), &q)
-		if q.Stale || q.MinOut == "" {
-			t.Fatalf("mint quote %+v", q)
-		}
-		dw.usdc(t, ctx, usdc, "approve", common.HexToAddress(core), amt)
-		before, _ := b.BalanceOf(&bind.CallOpts{Context: ctx}, common.HexToAddress(deployer))
-		deadline := big.NewInt(time.Now().Add(5 * time.Minute).Unix())
-		mr := dw.send(t, ctx, func(o *bind.TransactOpts) (*types.Transaction, error) {
-			return b.Mint(o, amt, big10(q.MinOut), deadline)
-		})
-		after, _ := b.BalanceOf(&bind.CallOpts{Context: ctx}, common.HexToAddress(deployer))
-		shares := new(big.Int).Sub(after, before)
-		t.Logf("mint %s: shares %s quoted %s (%s bps)", mr.TxHash, shares, q.ExpectedOut, diffBps(shares, big10(q.ExpectedOut)))
-
-		get(t, fmt.Sprintf("%s/api/v1/quote/%s?side=redeem&amount=%s&slippageBps=100", md, core, shares), &q)
-		u0 := balanceOf(t, ctx, eth, usdc, common.HexToAddress(deployer))
-		rr := dw.send(t, ctx, func(o *bind.TransactOpts) (*types.Transaction, error) {
-			return b.Redeem(o, shares, big10(q.MinOut), deadline)
-		})
-		out := new(big.Int).Sub(balanceOf(t, ctx, eth, usdc, common.HexToAddress(deployer)), u0)
-		t.Logf("redeem %s: usdc %s quoted %s (%s bps)", rr.TxHash, out, q.ExpectedOut, diffBps(out, big10(q.ExpectedOut)))
-
-		eventually(t, 2*time.Minute, func() string {
-			var n struct {
-				NavPerShare string
-				Stale       bool
-			}
-			get(t, md+"/api/v1/baskets/"+core+"/nav", &n)
-			if n.Stale {
-				return "nav stale"
-			}
-			var pts []json.RawMessage
-			from := time.Now().Add(-5 * time.Minute).UTC().Format(time.RFC3339)
-			get(t, fmt.Sprintf("%s/api/v1/baskets/%s/nav/history?from=%s", api, core, from), &pts)
-			if len(pts) == 0 {
-				return "no recent nav_points"
-			}
-			return ""
-		})
-	})
-
-	t.Run("privy scheduler", func(t *testing.T) {
+	var token string
+	step("siwe login", func(t *testing.T) {
 		lkey, err := crypto.HexToECDSA(strings.TrimPrefix(env(t, "E2E_LOGIN_PRIVATE_KEY"), "0x"))
 		if err != nil {
 			t.Fatal(err)
 		}
-		walletID, waddr := env(t, "E2E_PRIVY_WALLET_ID"), common.HexToAddress(env(t, "E2E_PRIVY_WALLET_ADDRESS"))
-		// two 10 USDC buys per run plus gas; the deployer tops the Privy wallet up
-		if balanceOf(t, ctx, eth, usdc, waddr).Cmp(big.NewInt(20_000_000)) < 0 {
-			dw.usdc(t, ctx, usdc, "transfer", waddr, big.NewInt(30_000_000))
-		}
-		if mon, _ := eth.BalanceAt(ctx, waddr, nil); mon.Cmp(big10("600000000000000000")) < 0 {
-			dw.send(t, ctx, func(o *bind.TransactOpts) (*types.Transaction, error) {
-				o.Value = big10("1000000000000000000")
-				return bind.NewBoundContract(waddr, abi.ABI{}, eth, eth, eth).Transfer(o)
-			})
-		}
-
-		token := siweLogin(t, env(t, "PRIVY_APP_ID"), lkey)
+		token = siweLogin(t, env(t, "PRIVY_APP_ID"), lkey)
 		var me struct{ ID string }
-		if do(t, http.MethodGet, api+"/api/v1/me", token, nil, &me); me.ID != env(t, "E2E_PRIVY_USER_ID") {
-			t.Fatalf("me %q", me.ID)
+		must(t, http.MethodGet, api+"/me", token, nil, http.StatusOK, &me)
+		if want := os.Getenv("E2E_PRIVY_USER_ID"); want != "" && me.ID != want {
+			t.Fatalf("me %q, want %q", me.ID, want)
 		}
-		if c := do(t, http.MethodPost, api+"/api/v1/me/delegation", token, map[string]string{"walletId": walletID, "walletAddress": waddr.Hex()}, nil); c != http.StatusOK {
-			t.Fatalf("delegation: %d", c)
-		}
-		create := func(body map[string]any) string {
-			body["basket"], body["maxSlippageBps"], body["maxPerRunUsdc"] = core, 100, "10"
-			var s struct{ ID string }
-			if c := do(t, http.MethodPost, api+"/api/v1/me/schedules", token, body, &s); c != http.StatusCreated {
-				t.Fatalf("schedule %v: %d", body, c)
-			}
-			return s.ID
-		}
-		execs := func(id string) (out []execution) {
-			var all []execution
-			do(t, http.MethodGet, api+"/api/v1/me/executions", token, nil, &all)
-			for _, e := range all {
-				if e.ScheduleID == id {
-					if e.Status == "failed" || e.Status == "rejected" {
-						t.Fatalf("execution %+v", e)
-					}
-					out = append(out, e)
-				}
-			}
-			return out
-		}
-		confirmed := func(es []execution) (txs []string) {
-			for _, e := range es {
-				if e.Status == "confirmed" {
-					txs = append(txs, e.TxHash)
-				}
-			}
-			return txs
-		}
+	})
 
-		rec := create(map[string]any{"kind": "recurring", "amountUsdc": "10", "intervalSeconds": 60})
-		var txs []string
-		eventually(t, 4*time.Minute, func() string {
-			if txs = confirmed(execs(rec)); len(txs) < 2 {
-				return fmt.Sprintf("%d/2 recurring buys confirmed", len(txs))
+	var schedules []string
+	t.Cleanup(func() {
+		for _, id := range schedules {
+			do(t, http.MethodDelete, api+"/me/schedules/"+id, token, nil, nil)
+		}
+		if c, raw := do(t, http.MethodDelete, api+"/me/delegation", token, nil, nil); c != http.StatusOK {
+			t.Errorf("revoke delegation: %d %s", c, raw)
+		}
+	})
+
+	// confirm polls an execution to confirmed, failing fast on failed/rejected.
+	confirm := func(t *testing.T, id string) execution {
+		t.Helper()
+		var e execution
+		eventually(t, 5*time.Minute, func() string {
+			must(t, http.MethodGet, api+"/me/executions/"+id, token, nil, http.StatusOK, &e)
+			switch e.Status {
+			case "confirmed":
+				return ""
+			case "failed", "rejected":
+				t.Fatalf("execution %s (%s) %s: %v txs %v", id, e.Kind, e.Status, deref(e.Error), e.TxHashes)
+			}
+			return fmt.Sprintf("execution %s (%s) %s", id, e.Kind, e.Status)
+		})
+		t.Logf("%s %s confirmed: %v", e.Kind, id, e.TxHashes)
+		return e
+	}
+	run := func(t *testing.T, method, path string, body any) accepted {
+		t.Helper()
+		var a accepted
+		must(t, method, api+path, token, body, http.StatusAccepted, &a)
+		confirm(t, a.ExecutionID)
+		return a
+	}
+	// sellAll market-sells the wallet's whole WETH balance (skips dust below Kuru min size).
+	sellAll := func(t *testing.T) {
+		bal := decimal.NewFromBigInt(balanceOf(t, ctx, eth, weth, waddr), -int32(dep.Tokens[mkt].Decimals))
+		if bal.LessThan(minSize) {
+			t.Logf("WETH %s below min %s, left in wallet", bal, minSize)
+			return
+		}
+		run(t, http.MethodPost, "/me/trade", map[string]any{"market": mkt, "side": "sell", "amount": bal.String(), "slippageBps": 100})
+	}
+
+	// smallest buy that clears Kuru min size: min × best ask + 15%, rounded up to the cent. Must be ≤ MAX_STEP_USD.
+	var buyUSDC string
+	step("delegation", func(t *testing.T) {
+		must(t, http.MethodPost, api+"/me/delegation", token, map[string]string{"walletId": walletID, "walletAddress": waddr.Hex()}, http.StatusOK, nil)
+		var b struct{ Asks [][2]string }
+		get(t, md+"/books/"+strings.ToLower(m.Orderbook), &b)
+		if len(b.Asks) == 0 {
+			t.Fatalf("%s book has no asks", mkt)
+		}
+		ask := decimal.RequireFromString(b.Asks[0][0])
+		buyUSDC = minSize.Mul(ask).Mul(decimal.NewFromFloat(1.15)).RoundUp(2).String()
+		t.Logf("%s ask %s, buy size %s USDC", mkt, ask, buyUSDC)
+	})
+
+	// orders left open by an earlier failed run (their funding stays in margin; the margin step withdraws it)
+	step("cancel stale orders", func(t *testing.T) {
+		var list []struct {
+			ID, Status  string
+			KuruOrderID *string
+		}
+		must(t, http.MethodGet, api+"/me/orders", token, nil, http.StatusOK, &list)
+		for _, o := range list {
+			if o.Status == "open" && o.KuruOrderID != nil && !dry {
+				t.Logf("cancelling stale order %s (kuru %s)", o.ID, *o.KuruOrderID)
+				run(t, http.MethodDelete, "/me/orders/"+o.ID, nil)
+			}
+		}
+	})
+
+	if dry {
+		step("dry read-only", func(t *testing.T) {
+			for _, p := range []string{"/me/holdings", "/me/executions", "/me/earnings", "/me/positions", "/me/orders", "/me/schedules", "/me/strategies"} {
+				must(t, http.MethodGet, api+p, token, nil, http.StatusOK, nil)
+			}
+			get(t, api+"/markets", nil)
+			get(t, api+"/strategies", nil)
+			get(t, md+"/rates", nil)
+			var q map[string]any
+			must(t, http.MethodPost, md+"/quote/basket", "", map[string]any{"side": "buy", "amountUsdc": "5000000",
+				"legs": []map[string]any{{"market": strings.ToLower(m.Orderbook), "weightBps": 10000}}}, http.StatusOK, &q)
+			t.Logf("basket quote 5 USDC -> %v", q)
+
+			// multi-token strategy: create, read back, and a below-min deploy is refused at planning (no tx)
+			var st struct {
+				ID      string
+				Asset   string
+				Sleeves []map[string]any
+				APY     map[string]any
+			}
+			must(t, http.MethodPost, api+"/strategies", token, map[string]any{"name": "e2e multi", "public": false, "rules": map[string]any{},
+				"sleeves": []map[string]any{
+					{"asset": "USDC", "weightBps": 4000, "sources": []map[string]any{{"kind": "lending", "venue": "aave", "weightBps": 10000}}},
+					{"asset": "WETH", "weightBps": 6000, "sources": []map[string]any{{"kind": "lending", "venue": "aave", "weightBps": 10000}}},
+				}}, http.StatusCreated, &st)
+			if st.Asset != "MULTI" || len(st.Sleeves) != 2 {
+				t.Fatalf("multi strategy: %+v", st)
+			}
+			must(t, http.MethodGet, api+"/strategies/"+st.ID, token, nil, http.StatusOK, &st)
+			c, raw := do(t, http.MethodPost, api+"/me/strategies/"+st.ID+"/deploy", token, map[string]any{"amountUsdc": "0.5"}, nil)
+			if c != http.StatusUnprocessableEntity || !strings.Contains(raw, "below_min_size") {
+				t.Fatalf("below-min deploy: %d %s", c, raw)
+			}
+			t.Logf("multi %s apy %v; below-min deploy -> %s", st.ID, st.APY, raw)
+		})
+		return // cleanup revokes delegation
+	}
+
+	step("market buy and sell", func(t *testing.T) {
+		run(t, http.MethodPost, "/me/trade", map[string]any{"market": mkt, "side": "buy", "amount": buyUSDC, "slippageBps": 100})
+		sellAll(t)
+	})
+
+	// 0.2 USDC resting buy far below mid; the funded USDC stays in the margin account (withdrawn by the margin step)
+	const limitPx, limitFund = "100", "0.2"
+	step("limit order and cancel", func(t *testing.T) {
+		a := run(t, http.MethodPost, "/me/orders", map[string]any{"market": mkt, "side": "buy", "price": limitPx, "size": minSize.String(), "postOnly": true, "fund": true})
+		type order struct {
+			ID, Status  string
+			KuruOrderID *string
+		}
+		find := func() (o order) {
+			var list []order
+			must(t, http.MethodGet, api+"/me/orders", token, nil, http.StatusOK, &list)
+			for _, x := range list {
+				if x.ID == a.OrderID {
+					return x
+				}
+			}
+			return
+		}
+		eventually(t, 3*time.Minute, func() string {
+			if o := find(); o.Status != "open" || o.KuruOrderID == nil {
+				return fmt.Sprintf("order %s not live yet: %+v", a.OrderID, o)
 			}
 			return ""
 		})
-		do(t, http.MethodDelete, api+"/api/v1/me/schedules/"+rec, token, nil, nil)
-		slots := map[int64]bool{}
-		for _, e := range execs(rec) {
-			if slots[e.Slot] {
-				t.Fatalf("slot %d executed twice", e.Slot)
-			}
-			slots[e.Slot] = true
-		}
-		t.Logf("recurring buys %v", txs)
-
-		sl := create(map[string]any{"kind": "stop_loss", "stopNavPerShare": "1000", "redeemBps": 5000})
-		eventually(t, 2*time.Minute, func() string {
-			if c := confirmed(execs(sl)); len(c) != 1 {
-				return "stop-loss redeem not confirmed"
-			} else {
-				txs = append(txs, c[0])
-			}
-			return ""
-		})
-		var ss []struct {
-			ID     string
-			Active bool
-		}
-		do(t, http.MethodGet, api+"/api/v1/me/schedules", token, nil, &ss)
-		if i := slices.IndexFunc(ss, func(s struct {
-			ID     string
-			Active bool
-		}) bool {
-			return s.ID == sl
-		}); i < 0 || ss[i].Active {
-			t.Fatal("stop-loss should be deactivated after firing")
-		}
-		t.Logf("stop-loss redeem %s", txs[len(txs)-1])
-
-		eventually(t, 2*time.Minute, func() string {
-			var h []struct{ TxHash string }
-			do(t, http.MethodGet, api+"/api/v1/me/history", token, nil, &h)
-			for _, tx := range txs {
-				if !slices.ContainsFunc(h, func(r struct{ TxHash string }) bool { return strings.EqualFold(r.TxHash, tx) }) {
-					return "indexer has not recorded " + tx
-				}
-			}
-			var p []struct{ Basket string }
-			do(t, http.MethodGet, api+"/api/v1/me/positions", token, nil, &p)
-			if !slices.ContainsFunc(p, func(r struct{ Basket string }) bool { return r.Basket == core }) {
-				return "no CORE position"
+		run(t, http.MethodDelete, "/me/orders/"+a.OrderID, nil)
+		eventually(t, 3*time.Minute, func() string {
+			if o := find(); o.Status != "cancelled" {
+				return "order status " + o.Status
 			}
 			return ""
 		})
 	})
+
+	step("margin deposit and withdraw", func(t *testing.T) {
+		run(t, http.MethodPost, "/me/margin/deposit", map[string]any{"token": "USDC", "amount": "1"})
+		out := decimal.RequireFromString("1").Add(decimal.RequireFromString(limitFund)).String()
+		run(t, http.MethodPost, "/me/margin/withdraw", map[string]any{"token": "USDC", "amount": out})
+	})
+
+	step("basket buy and sell", func(t *testing.T) {
+		var b struct{ ID string }
+		must(t, http.MethodPost, api+"/me/baskets", token, map[string]any{"name": "e2e " + time.Now().Format(time.DateTime),
+			"legs": []map[string]any{{"market": mkt, "weightBps": 10_000}}, "public": false}, http.StatusCreated, &b)
+		defer do(t, http.MethodDelete, api+"/me/baskets/"+b.ID, token, nil, nil)
+		run(t, http.MethodPost, "/me/baskets/"+b.ID+"/buy", map[string]any{"amountUsdc": buyUSDC, "slippageBps": 100})
+		run(t, http.MethodPost, "/me/baskets/"+b.ID+"/sell", map[string]any{"bps": 10_000, "slippageBps": 100})
+	})
+
+	step("strategy deploy and withdraw", func(t *testing.T) {
+		var s struct{ ID string }
+		must(t, http.MethodPost, api+"/strategies", token, map[string]any{"name": "e2e aave usdc", "asset": "USDC",
+			"sources": []map[string]any{{"kind": "lending", "venue": "aave", "weightBps": 10_000}}, "public": false}, http.StatusCreated, &s)
+		d := run(t, http.MethodPost, "/me/strategies/"+s.ID+"/deploy", map[string]any{"amountUsdc": "2"})
+		position := func() (status string) {
+			var ps []struct{ ID, Status string }
+			must(t, http.MethodGet, api+"/me/positions", token, nil, http.StatusOK, &ps)
+			for _, p := range ps {
+				if p.ID == d.PositionID {
+					return p.Status
+				}
+			}
+			return "missing"
+		}
+		eventually(t, time.Minute, func() string {
+			if st := position(); st != "open" {
+				return "position " + st
+			}
+			return ""
+		})
+		var w accepted
+		switch c, raw := do(t, http.MethodPost, api+"/me/positions/"+d.PositionID+"/withdraw", token, map[string]any{}, &w); c {
+		case http.StatusAccepted:
+			confirm(t, w.ExecutionID)
+		case http.StatusOK: // nothing on chain to unwind
+		default:
+			t.Fatalf("withdraw: %d %s", c, raw)
+		}
+		eventually(t, time.Minute, func() string {
+			if st := position(); st != "closed" {
+				return "position " + st
+			}
+			return ""
+		})
+	})
+
+	step("dca fires once", func(t *testing.T) {
+		var s struct{ ID string }
+		// interval 1 day: next_run_at = now, so exactly one run inside the test window
+		must(t, http.MethodPost, api+"/me/schedules", token, map[string]any{"kind": "dca", "target": map[string]string{"type": "market", "id": mkt},
+			"amountUsdc": buyUSDC, "intervalSeconds": 86_400, "maxSlippageBps": 100, "maxPerRunUsdc": buyUSDC}, http.StatusCreated, &s)
+		schedules = append(schedules, s.ID)
+		var id string
+		eventually(t, 3*time.Minute, func() string {
+			var es []execution
+			must(t, http.MethodGet, api+"/me/executions", token, nil, http.StatusOK, &es)
+			for _, e := range es {
+				if e.ScheduleID != nil && *e.ScheduleID == s.ID {
+					id = e.ID
+					return ""
+				}
+			}
+			return "scheduler has not run dca " + s.ID
+		})
+		confirm(t, id)
+		must(t, http.MethodDelete, api+"/me/schedules/"+s.ID, token, nil, http.StatusOK, nil)
+		sellAll(t)
+	})
+
+	step("executions terminal", func(t *testing.T) {
+		var es []execution
+		must(t, http.MethodGet, api+"/me/executions", token, nil, http.StatusOK, &es)
+		n := 0
+		for _, e := range es {
+			if e.CreatedAt.Before(start) {
+				continue
+			}
+			n++
+			if e.Status != "confirmed" {
+				t.Errorf("execution %s (%s) %s: %v", e.ID, e.Kind, e.Status, deref(e.Error))
+			}
+		}
+		t.Logf("%d executions this run", n)
+	})
+
+	step("earnings", func(t *testing.T) {
+		switch c, raw := do(t, http.MethodGet, api+"/me/earnings", token, nil, nil); c {
+		case http.StatusOK:
+		case http.StatusNotFound:
+			t.Logf("GET /me/earnings 404 (route not shipped yet): %s", raw)
+		default:
+			t.Fatalf("earnings: %d %s", c, raw)
+		}
+	})
 }
 
-func envOr(k, def string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
+func deref(s *string) string {
+	if s == nil {
+		return ""
 	}
-	return def
-}
-
-func diffBps(got, want *big.Int) string {
-	if want.Sign() == 0 {
-		return "n/a"
-	}
-	d := new(big.Int).Mul(new(big.Int).Sub(got, want), big.NewInt(10_000))
-	return new(big.Int).Quo(d, want).String()
+	return *s
 }

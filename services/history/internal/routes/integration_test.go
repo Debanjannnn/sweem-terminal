@@ -166,6 +166,12 @@ func TestIngestAndBacktest(t *testing.T) {
 	if c != 200 || !strings.Contains(toJSON(m["coverage"]), "clamped") {
 		t.Fatal(c, m["error"], m["detail"], m["coverage"])
 	}
+	// multi: USDC aave 40% + WETH aave 60%, $1000; WETH price coverage clamps both sleeves to a common window
+	c, m = post(`{"amount":"1000","sleeves":[{"asset":"USDC","weight":"0.4","legs":[{"kind":"lending","venue":"aave","weight":"1"}]},
+		{"asset":"WETH","weight":"0.6","legs":[{"kind":"lending","venue":"aave","weight":"1"}]}]}`)
+	if c != 200 || m["asset"] != "MULTI" || m["initialUsd"] != "1000.000000" || m["returnAsset"] != m["returnUsd"] {
+		t.Fatal(c, m["error"], m["detail"], m["asset"], m["initialUsd"])
+	}
 	if c, m = post(`{"asset":"USDC","amount":"1","legs":[{"kind":"lending","venue":"nope","weight":"1"}]}`); c != 422 || m["error"] != "no_data" {
 		t.Fatal(c, m)
 	}

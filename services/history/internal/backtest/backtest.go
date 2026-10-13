@@ -78,6 +78,7 @@ type Point struct {
 }
 
 type Result struct {
+	Asset              string
 	From, To           string // effective window after clamping to data coverage
 	Days               int
 	Coverage           []Coverage
@@ -214,7 +215,7 @@ func Run(in Input, s Series) (*Result, error) {
 		}
 	}
 	from, to := in.From.Format(Day), in.To.Format(Day)
-	res := &Result{Contributions: map[string]float64{"price": 0, "costs": 0}}
+	res := &Result{Asset: in.Asset, Contributions: map[string]float64{"price": 0, "costs": 0}}
 	for _, r := range reqs {
 		first, last, n := span(r.m)
 		if n == 0 {
@@ -425,4 +426,61 @@ func maxDD(c []Point, f func(Point) float64) float64 {
 		dd = math.Max(dd, 1-v/peak)
 	}
 	return dd
+}
+
+// Combine merges per-sleeve results into one USD portfolio: sleeve i is scaled to usd*w[i] at its start,
+// curves are summed over the days every sleeve has, and the asset view equals the USD view (asset "MULTI").
+// Sleeves should share one window (the caller aligns them); a misaligned start makes InitialUSD != usd.
+func Combine(rs []*Result, w []float64, usd float64) *Result {
+	out := &Result{Asset: "MULTI", InitialUSD: usd, Contributions: map[string]float64{}}
+	seen := map[string]int{}
+	for _, r := range rs {
+		for _, p := range r.Curve {
+			seen[p.Day]++
+		}
+	}
+	for i, r := range rs {
+		k := usd * w[i] / r.InitialUSD
+		out.FinalUSD += k * r.FinalUSD
+		out.HodlFinalUSD += k * r.HodlFinalUSD
+		out.CostsUSD += k * r.CostsUSD
+		out.ExitCostUSD += k * r.ExitCostUSD
+		out.Rebalances += r.Rebalances
+		out.Estimated = out.Estimated || r.Estimated
+		out.Coverage = append(out.Coverage, r.Coverage...)
+		for c, v := range r.Contributions {
+			out.Contributions[r.Asset+":"+c] += k * v
+		}
+		j := 0
+		for _, p := range r.Curve {
+			if seen[p.Day] != len(rs) {
+				continue
+			}
+			if i == 0 {
+				out.Curve = append(out.Curve, Point{Day: p.Day})
+			}
+			c := &out.Curve[j]
+			c.USD += k * p.USD
+			c.HodlUSD += k * p.HodlUSD
+			c.BasisActive = c.BasisActive || p.BasisActive
+			j++
+		}
+	}
+	for i := range out.Curve {
+		out.Curve[i].Asset = out.Curve[i].USD
+	}
+	if n := len(out.Curve); n > 0 {
+		out.From, out.To, out.Days = out.Curve[0].Day, out.Curve[n-1].Day, n-1
+	}
+	out.FinalAsset = out.FinalUSD
+	if out.Days > 0 {
+		yrs := float64(out.Days) / 365
+		out.APYUSD = math.Pow(out.FinalUSD/usd, 1/yrs) - 1
+		out.HodlAPYUSD = math.Pow(out.HodlFinalUSD/usd, 1/yrs) - 1
+	}
+	out.APYAsset = out.APYUSD
+	out.MaxDrawdownUSD = maxDD(out.Curve, func(p Point) float64 { return p.USD })
+	out.MaxDrawdownAsset = out.MaxDrawdownUSD
+	out.HodlMaxDrawdownUSD = maxDD(out.Curve, func(p Point) float64 { return p.HodlUSD })
+	return out
 }

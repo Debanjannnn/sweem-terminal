@@ -40,6 +40,7 @@ func (h History) Backtest(ctx context.Context, body []byte) (int, []byte, error)
 }
 
 type APYSource struct {
+	Asset string  `json:"asset"`
 	Kind  string  `json:"kind"`
 	Venue string  `json:"venue"`
 	APY   *string `json:"apy"`
@@ -50,12 +51,23 @@ type APY struct {
 	Sources  []APYSource `json:"sources"`
 }
 
-// liveAPY: Σ weight × current venue rate; basis earns short funding (7d) on the L/(L+1) spot notional. Missing rates count 0.
+// liveAPY: Σ sleeve weight × source weight × current venue rate; basis earns short funding (7d) on the L/(L+1) spot
+// notional. Missing rates count 0.
 func (s *Server) liveAPY(st planner.Strategy, r streams.RatesSnapshot) *APY {
 	out := &APY{Sources: []APYSource{}}
 	est := decimal.Zero
-	asset := st.Asset
-	for _, src := range st.Sources {
+	for _, pt := range st.Parts() {
+		e := s.partAPY(pt.Asset, pt.Sources, r, out)
+		est = est.Add(e.Mul(decimal.NewFromInt(int64(pt.WeightBps))).Div(decimal.NewFromInt(10_000)))
+	}
+	out.Estimate = est.StringFixed(6)
+	return out
+}
+
+// partAPY appends one sleeve's sources to out and returns its weighted APY.
+func (s *Server) partAPY(asset string, srcs []planner.Source, r streams.RatesSnapshot, out *APY) decimal.Decimal {
+	est := decimal.Zero
+	for _, src := range srcs {
 		var apy *decimal.Decimal
 		for _, x := range r.Rates {
 			a := asset
@@ -77,7 +89,7 @@ func (s *Server) liveAPY(st planner.Strategy, r streams.RatesSnapshot) *APY {
 				}
 			}
 		}
-		as := APYSource{Kind: src.Kind, Venue: src.Venue}
+		as := APYSource{Asset: asset, Kind: src.Kind, Venue: src.Venue}
 		if apy != nil {
 			str := apy.StringFixed(6)
 			as.APY = &str
@@ -85,8 +97,7 @@ func (s *Server) liveAPY(st planner.Strategy, r streams.RatesSnapshot) *APY {
 		}
 		out.Sources = append(out.Sources, as)
 	}
-	out.Estimate = est.StringFixed(6)
-	return out
+	return est
 }
 
 func (s *Server) withAPY(ctx context.Context, xs []Strategy) {
@@ -140,6 +151,9 @@ func (s *Server) createStrategy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	in.Name = strings.TrimSpace(in.Name)
+	if len(in.Sleeves) == 1 { // one token = the single-asset shape
+		in.Asset, in.Sources, in.Sleeves = in.Sleeves[0].Asset, in.Sleeves[0].Sources, nil
+	}
 	if in.Name == "" || len(in.Name) > 64 {
 		httpx.Error(w, http.StatusBadRequest, "invalid_name")
 		return
@@ -166,40 +180,19 @@ type BacktestInput struct {
 	Amount string `json:"amount,omitempty"`
 }
 
-// historyLeg maps a source to history's backtest leg (venue ids differ: history uses DefiLlama project names).
-func (s *Server) historyLeg(src planner.Source) map[string]any {
-	leg := map[string]any{"kind": src.Kind, "venue": src.Venue, "weight": decimal.NewFromInt(int64(src.WeightBps)).Div(decimal.NewFromInt(10_000)).String()}
-	switch {
-	case src.Kind == "lp":
-		leg["venue"] = "kuru_activevault"
-	case src.Kind == "basis":
-		leg["venue"] = ""
-	case src.Venue == "aave":
-		leg["venue"] = "aave-v3"
-	case src.Kind == "lending" && src.Venue != "neverland":
-		for _, v := range s.Plan.Dep.Lending.ERC4626 {
-			if planner.Slug(v.Name) == src.Venue {
-				leg["venue"] = map[string]string{"euler": "euler-earn", "morpho": "morpho"}[v.Protocol]
-			}
-		}
-	}
-	return leg
+func bpsFrac(w int) string {
+	return decimal.NewFromInt(int64(w)).Div(decimal.NewFromInt(10_000)).String()
 }
 
-// runBacktest calls history; on 200 it stores and returns the summary next to history's full response.
-func (s *Server) runBacktest(ctx context.Context, st Strategy, in BacktestInput) (status int, full []byte, summary json.RawMessage, err error) {
-	amount := in.Amount
-	if amount == "" {
-		amount = "1"
-		if st.Asset == "USDC" {
-			amount = "1000"
-		}
-	}
+// historyBody is one single-asset strategy as history's backtest request (asset, legs, rules); venues are the raw ids
+// history stores rates under (aave, neverland, 4626 slug, shmonad, kuru-activevault).
+func (s *Server) historyBody(st planner.Strategy) map[string]any {
 	legs := []map[string]any{}
 	rules := map[string]any{}
 	for _, src := range st.Sources {
-		leg := s.historyLeg(src)
+		leg := map[string]any{"kind": src.Kind, "venue": src.Venue, "weight": bpsFrac(src.WeightBps)}
 		if src.Kind == "basis" {
+			leg["venue"] = ""
 			leg["perpId"] = s.Plan.Dep.Perpl.PerpIds[map[string]string{"WETH": "ETH", "cbBTC": "BTC", "MON": "MON"}[st.Asset]]
 			rules["basisLeverage"] = src.Params.Leverage
 		}
@@ -214,7 +207,30 @@ func (s *Server) runBacktest(ctx context.Context, st Strategy, in BacktestInput)
 	if g := st.Rules.FundingGate; g != nil {
 		rules["fundingGate"] = map[string]any{"apr": g.APR, "lookbackDays": g.LookbackDays}
 	}
-	req := map[string]any{"asset": st.Asset, "amount": amount, "legs": legs, "rules": rules}
+	return map[string]any{"asset": st.Asset, "legs": legs, "rules": rules}
+}
+
+// runBacktest calls history; on 200 it stores and returns the summary next to history's full response.
+// Multi-token: {amount (USD), from, to, sleeves:[historyBody(part) + amount "1" + weight]}; history combines them.
+func (s *Server) runBacktest(ctx context.Context, st Strategy, in BacktestInput) (status int, full []byte, summary json.RawMessage, err error) {
+	amount := in.Amount
+	if amount == "" {
+		amount = "1"
+		if st.Asset == "USDC" || len(st.Sleeves) > 0 {
+			amount = "1000"
+		}
+	}
+	req := s.historyBody(st.Strategy)
+	if len(st.Sleeves) > 0 {
+		var sleeves []map[string]any
+		for _, pt := range st.Sleeves {
+			b := s.historyBody(st.Part(pt))
+			b["amount"], b["weight"] = "1", bpsFrac(pt.WeightBps)
+			sleeves = append(sleeves, b)
+		}
+		req = map[string]any{"sleeves": sleeves}
+	}
+	req["amount"] = amount
 	if in.From != "" {
 		req["from"] = in.From
 	}

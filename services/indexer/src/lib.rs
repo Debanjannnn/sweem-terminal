@@ -91,6 +91,13 @@ pub fn recs(e: Event, wallets: &BTreeSet<String>, perpl: &mut HashMap<String, St
     }
 }
 
+/// Cursor to rewind to for a wallet whose user signed up `age_secs` ago: our app only acts after signup.
+// ponytail: time→block estimate at Monad's 0.4s target, ×1.5 + 1h margin for drift; exact lookup (RPC bisection) if it ever undershoots.
+fn rewind_block(head: u64, age_secs: f64, start: u64) -> u64 {
+    let back = ((age_secs.max(0.0) + 3600.0) / 0.4 * 1.5) as u64;
+    head.saturating_sub(back).max(start).saturating_sub(1)
+}
+
 impl Indexer {
     /// `name` keys the row in `indexer_cursor`.
     pub async fn new(cfg: config::Config, name: &str) -> Result<Self> {
@@ -104,7 +111,15 @@ impl Indexer {
 
     /// Indexes one batch of finalized blocks. Returns true while more finalized blocks remain.
     pub async fn step(&mut self) -> Result<bool> {
-        let wallets = store::sync_wallets(&mut self.db, &self.name).await?;
+        let rewind = match store::new_wallet_age(&self.db, &self.name).await? {
+            Some(age) => Some(rewind_block(
+                self.src.height().await?,
+                age,
+                self.cfg.start_block,
+            )),
+            None => None,
+        };
+        let wallets = store::sync_wallets(&mut self.db, &self.name, rewind).await?;
         let mut perpl = store::perpl_accounts(&self.db).await?;
         let cursor = store::cursor(&self.db, &self.name).await?;
         let from = cursor.map_or(self.cfg.start_block, |c| c + 1);
@@ -149,6 +164,17 @@ impl Indexer {
 mod tests {
     use super::*;
     use decode::Venue;
+
+    #[test]
+    fn rewind_block_margin_and_clamp() {
+        // 1 day old at head 10M: (86400+3600)/0.4*1.5 = 337500 blocks back
+        assert_eq!(
+            rewind_block(10_000_000, 86_400.0, 0),
+            10_000_000 - 337_500 - 1
+        );
+        assert_eq!(rewind_block(10_000_000, 1e9, 5_000_000), 4_999_999);
+        assert_eq!(rewind_block(100, 86_400.0, 0), 0);
+    }
 
     #[test]
     fn recs_match_wallets() {

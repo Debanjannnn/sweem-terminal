@@ -216,7 +216,7 @@ func TestDeploy(t *testing.T) {
 		{"action":"fee.transfer","amount":"400000"},
 		{"action":"lend.supply","venue":"aaveV3","asset":"USDC","amount":"59760000"},
 		{"action":"vault.deposit","vault":"0x78999cc96d2Ba0341588C60CcB0E91c6C33CF371","amount":"39840000"}],
-		"feeUsdc":"400000","legs":[{"kind":"lending","venue":"aave","asset":"59760000"},{"kind":"lending","venue":"morpho-hyperusdca","asset":"39840000"}]}`)
+		"feeUsdc":"400000","legs":[{"token":"USDC","kind":"lending","venue":"aave","asset":"59760000"},{"token":"USDC","kind":"lending","venue":"morpho-hyperusdca","asset":"39840000"}]}`)
 	if len(q.calls) != 0 {
 		t.Errorf("usdc deploy quoted: %v", q.calls)
 	}
@@ -237,10 +237,10 @@ func TestDeploy(t *testing.T) {
 		{"action":"perpl.createAccount","amount":"49775100"},
 		{"action":"perpl.order","perp":"MON","kind":"openShort","price":"29700","lot":"4980","leverageHdths":300}],
 		"feeUsdc":"4000000","legs":[
-		{"kind":"lending","venue":"neverland","asset":"13280000000000000000000"},
-		{"kind":"staking","venue":"shmonad","asset":"6640000000000000000000"},
-		{"kind":"lp","venue":"kuru-activevault","asset":"3320000000000000000000"},
-		{"kind":"basis","venue":"perpl","asset":"4980000000000000000000","collateral":"49775100","lot":"4980","entryPx":"0.03"}]}`)
+		{"token":"MON","kind":"lending","venue":"neverland","asset":"13280000000000000000000"},
+		{"token":"MON","kind":"staking","venue":"shmonad","asset":"6640000000000000000000"},
+		{"token":"MON","kind":"lp","venue":"kuru-activevault","asset":"3320000000000000000000"},
+		{"token":"MON","kind":"basis","venue":"perpl","asset":"4980000000000000000000","collateral":"49775100","lot":"4980","entryPx":"0.03"}]}`)
 
 	plan, _ = p.Deploy(ctx, monStrat, decimal.NewFromInt(1_000_000_000), true, 0)
 	if plan.Steps[7].Action != "perpl.deposit" {
@@ -420,4 +420,136 @@ func TestWithdrawBpsAndResize(t *testing.T) {
 	if code(p.Validate(Strategy{Asset: "USDC", Sources: []Source{{"lending", "aave", 10000, SourceParams{}}}, Rules: Rules{RateSwitch: &RateSwitch{"0"}}})) != "invalid_rules" {
 		t.Error("rateSwitch minGain 0 accepted")
 	}
+}
+
+// 40% USDC aave, 30% WETH basis 2x, 30% MON half neverland / half basis 1x.
+var multiStrat = Strategy{Sleeves: []Sleeve{
+	{"USDC", 4000, []Source{{"lending", "aave", 10000, SourceParams{}}}},
+	{"WETH", 3000, []Source{{"basis", "perpl", 10000, SourceParams{"2"}}}},
+	{"MON", 3000, []Source{{"lending", "neverland", 5000, SourceParams{}}, {"basis", "perpl", 5000, SourceParams{"1"}}}},
+}}
+
+func TestValidateSleeves(t *testing.T) {
+	p, _ := planner()
+	sl := func(a string, w int, srcs ...Source) Sleeve { return Sleeve{a, w, srcs} }
+	aave := Source{"lending", "aave", 10000, SourceParams{}}
+	cases := []struct {
+		s    Strategy
+		want string
+	}{
+		{multiStrat, ""},
+		{Strategy{Asset: Multi, Sleeves: multiStrat.Sleeves}, ""},
+		{Strategy{Sleeves: []Sleeve{sl("USDC", 10000, aave)}}, "invalid_sleeves"},
+		{Strategy{Sleeves: []Sleeve{sl("USDC", 5000, aave), sl("USDC", 5000, aave)}}, "invalid_sleeves"},
+		{Strategy{Sleeves: []Sleeve{sl("USDC", 5000, aave), sl("WETH", 4000, aave)}}, "invalid_sleeves"},
+		{Strategy{Asset: "USDC", Sleeves: []Sleeve{sl("USDC", 5000, aave), sl("WETH", 5000, aave)}}, "invalid_sleeves"},
+		{Strategy{Sleeves: []Sleeve{sl("USDC", 5000, aave), sl("MON", 5000, aave)}}, "unsupported_source"},
+	}
+	for i, c := range cases {
+		if got := code(p.Validate(c.s)); got != c.want {
+			t.Errorf("case %d: got %q want %q", i, got, c.want)
+		}
+	}
+	if _, err := Split(multiStrat.Parts(), []int{1, 2, 3}); code(err) != "bad_request" {
+		t.Errorf("split mismatch: %v", err)
+	}
+	if xs, _ := Split(multiStrat.Parts(), []int{1, 2, 3, 4}); len(xs) != 3 || len(xs[2]) != 2 || xs[2][1] != 4 {
+		t.Errorf("split: %v", xs)
+	}
+}
+
+func TestDeployMulti(t *testing.T) {
+	p, _ := planner()
+	ctx := context.Background()
+	plan, err := p.Deploy(ctx, multiStrat, decimal.NewFromInt(1_000_000_000), false, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// $1000: fee 4, net 996 → USDC 398.4, WETH 298.8, MON 298.8 (remainder); only the first basis sleeve creates the Perpl account
+	golden(t, "multi deploy", plan, `{"steps":[
+		{"action":"fee.transfer","amount":"4000000"},
+		{"action":"lend.supply","venue":"aaveV3","asset":"USDC","amount":"398400000"},
+		{"action":"kuru.marketBuy","market":"WETH","quote":"199200000","minOut":"49800000000000000"},
+		{"action":"stable.swap","from":"USDC","to":"AUSD","amount":"99600000","minOut":"99550200"},
+		{"action":"perpl.createAccount","amount":"99550200"},
+		{"action":"perpl.order","perp":"ETH","kind":"openShort","price":"396000","lot":"49","leverageHdths":200},
+		{"action":"kuru.marketBuy","market":"MON","quote":"224100000","minOut":"7470000000000000000000"},
+		{"action":"wmon.wrap","amount":"4980000000000000000000"},
+		{"action":"lend.supply","venue":"neverland","asset":"WMON","amount":"4980000000000000000000"},
+		{"action":"stable.swap","from":"USDC","to":"AUSD","amount":"74700000","minOut":"74662650"},
+		{"action":"perpl.deposit","amount":"74662650"},
+		{"action":"perpl.order","perp":"MON","kind":"openShort","price":"29700","lot":"2490","leverageHdths":100}],
+		"feeUsdc":"4000000","legs":[
+		{"token":"USDC","kind":"lending","venue":"aave","asset":"398400000"},
+		{"token":"WETH","kind":"basis","venue":"perpl","asset":"49800000000000000","collateral":"99550200","lot":"49","entryPx":"4000"},
+		{"token":"MON","kind":"lending","venue":"neverland","asset":"4980000000000000000000"},
+		{"token":"MON","kind":"basis","venue":"perpl","asset":"2490000000000000000000","collateral":"74662650","lot":"2490","entryPx":"0.03"}]}`)
+
+	for name, c := range map[string]struct {
+		amt     int64
+		account bool
+		want    string
+	}{
+		"perpl":   {90_000_000, false, "WETH part needs ≥ 100.46 USDC total deposit (Perpl min 10 AUSD collateral)"},
+		"kuru":    {40_000_000, true, "WETH part needs ≥ 42.17 USDC total deposit (Kuru min 0.002 WETH)"},
+		"enough":  {42_170_000, true, ""},
+		"usdc ok": {1_000_000, false, ""},
+	} {
+		s := multiStrat
+		if name == "usdc ok" {
+			s = Strategy{Asset: "USDC", Sources: []Source{{"lending", "aave", 10000, SourceParams{}}}}
+		}
+		_, err := p.Deploy(ctx, s, decimal.NewFromInt(c.amt), c.account, 0)
+		if e, _ := err.(*Error); (c.want == "") != (err == nil) || (e != nil && (e.Code != "below_min_size" || e.Detail != c.want)) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
+func TestWithdrawMulti(t *testing.T) {
+	p, _ := planner()
+	ctx := context.Background()
+	dep, _ := p.Deploy(ctx, multiStrat, decimal.NewFromInt(1_000_000_000), false, 0)
+	bals := make([]Balance, len(dep.Legs))
+	for i, l := range dep.Legs {
+		bals[i] = Balance{Value: l.Asset}
+	}
+	plan, err := p.WithdrawBps(ctx, multiStrat, dep.Legs, bals, 10_000, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	golden(t, "multi withdraw", plan.Steps, `[
+		{"action":"lend.withdraw","venue":"aaveV3","asset":"USDC","amount":"398400000"},
+		{"action":"perpl.order","perp":"ETH","kind":"closeShort","price":"404000","lot":"49","leverageHdths":100},
+		{"action":"perpl.withdraw","amount":"98502580"},
+		{"action":"stable.swap","from":"AUSD","to":"USDC","amount":"98502580","minOut":"98453328"},
+		{"action":"kuru.marketSell","market":"WETH","size":"49800000000000000","minOut":"199200000"},
+		{"action":"lend.withdraw","venue":"neverland","asset":"WMON","amount":"4980000000000000000000"},
+		{"action":"wmon.unwrap","amount":"4980000000000000000000"},
+		{"action":"perpl.order","perp":"MON","kind":"closeShort","price":"30300","lot":"2490","leverageHdths":100},
+		{"action":"perpl.withdraw","amount":"74263378"},
+		{"action":"stable.swap","from":"AUSD","to":"USDC","amount":"74263378","minOut":"74226246"},
+		{"action":"kuru.marketSell","market":"MON","size":"7470000000000000000000","minOut":"224100000"}]`)
+	if len(plan.Legs) != 4 || plan.Legs[1].Token != "WETH" || plan.Legs[1].Lot != "" || plan.Legs[3].Token != "MON" {
+		t.Errorf("legs %+v", plan.Legs)
+	}
+
+	// resume after the ETH close landed: only the MON short is still open; each sell is capped by its own wallet token
+	live := Live{Bals: []Balance{{Value: "0"}, {Value: "0"}, {Value: "4980000000000000000000"}, {Value: "0"}},
+		Wallet:  map[string]decimal.Decimal{"USDC": d("398400000"), "WETH": d("40000000000000000"), "MON": d("2490000000000000000000"), "WMON": decimal.Zero, "AUSD": decimal.Zero},
+		PerpLot: map[string]decimal.Decimal{"ETH": decimal.Zero, "MON": d("2490")}, PerpFree: d("98502410")}
+	got, err := p.ResumeWithdraw(ctx, multiStrat, plan.Steps, 1, live, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	golden(t, "multi resume", got, `[
+		{"action":"perpl.withdraw","amount":"98502410"},
+		{"action":"stable.swap","from":"AUSD","to":"USDC","amount":"98502410","minOut":"98453158"},
+		{"action":"kuru.marketSell","market":"WETH","size":"40000000000000000","minOut":"160000000"},
+		{"action":"lend.withdraw","venue":"neverland","asset":"WMON","amount":"4980000000000000000000"},
+		{"action":"wmon.unwrap","amount":"4980000000000000000000"},
+		{"action":"perpl.order","perp":"MON","kind":"closeShort","price":"30300","lot":"2490","leverageHdths":100},
+		{"action":"perpl.withdraw","amount":"74263378"},
+		{"action":"stable.swap","from":"AUSD","to":"USDC","amount":"74263378","minOut":"74226246"},
+		{"action":"kuru.marketSell","market":"MON","size":"7470000000000000000000","minOut":"224100000"}]`)
 }

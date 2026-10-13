@@ -7,8 +7,8 @@ use hypersync_client::{format::Hex, Client, RateLimitResponse};
 use std::collections::{BTreeSet, HashMap};
 use std::time::Duration;
 
-/// Requests left in the shared 30/min window below which we wait for the reset (history service shares the token).
-const RESERVE: u64 = 10;
+/// Fraction (1/n) of the per-window request limit kept in reserve for the history service, which shares the token.
+const RESERVE_DIV: u64 = 5;
 
 pub struct RawLog {
     pub block: u64,
@@ -103,6 +103,10 @@ impl Source {
         Ok(Source(Client::builder().url(url).api_token(token).build()?))
     }
 
+    pub async fn height(&self) -> Result<u64> {
+        self.0.get_height().await
+    }
+
     pub async fn fetch(&self, from: u64, filters: Vec<LogFilter>) -> Result<Page> {
         let mut q = Query::new()
             .from_block(from)
@@ -125,11 +129,12 @@ impl Source {
                     response,
                     rate_limit,
                 } => {
-                    // remaining is budget units; cost = units per request
-                    if rate_limit
-                        .remaining
-                        .is_some_and(|r| r / rate_limit.cost.unwrap_or(1).max(1) <= RESERVE)
-                    {
+                    // remaining/limit are budget units; cost = units per request
+                    let cost = rate_limit.cost.unwrap_or(1).max(1);
+                    let reserve = rate_limit
+                        .limit
+                        .map_or(1, |l| (l / cost / RESERVE_DIV).max(1));
+                    if rate_limit.remaining.is_some_and(|r| r / cost <= reserve) {
                         let secs = rate_limit.reset_secs.unwrap_or(5);
                         eprintln!("hypersync budget low ({rate_limit}), pausing {secs}s");
                         tokio::time::sleep(Duration::from_secs(secs)).await;

@@ -131,7 +131,8 @@ mod tests {
 
     #[test]
     fn every_rule_pins_chain_targets_and_function() {
-        let d = dep();
+        let mut d = dep();
+        d.treasury = String::new();
         let r = rules(&d);
         assert_eq!(r.len(), 25);
         for rule in &r {

@@ -96,6 +96,7 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/me/positions", s.me(s.positions))
 	mux.Handle("POST /api/v1/me/positions/{id}/withdraw", s.me(s.withdraw))
 	mux.Handle("GET /api/v1/me/executions", s.me(s.executions))
+	mux.Handle("GET /api/v1/me/earnings", s.me(s.earnings))
 	mux.Handle("GET /api/v1/me/executions/{id}", s.me(s.execution))
 	mux.Handle("GET /api/v1/me/schedules", s.me(s.schedules))
 	mux.Handle("POST /api/v1/me/schedules", s.me(s.createSchedule))
@@ -277,8 +278,22 @@ func (s *Server) deleteDelegation(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) executions(w http.ResponseWriter, r *http.Request) {
-	v, err := s.Store.Executions(r.Context(), did(r))
+	var before *time.Time
+	if b := r.URL.Query().Get("before"); b != "" {
+		t, err := time.Parse(time.RFC3339Nano, b)
+		if err != nil {
+			httpx.Error(w, http.StatusBadRequest, "bad_request")
+			return
+		}
+		before = &t
+	}
+	v, err := s.Store.Executions(r.Context(), did(r), before)
 	reply(w, "executions", v, err)
+}
+
+func (s *Server) earnings(w http.ResponseWriter, r *http.Request) {
+	v, err := s.Store.Earnings(r.Context(), did(r))
+	reply(w, "earnings", v, err)
 }
 
 func (s *Server) execution(w http.ResponseWriter, r *http.Request) {

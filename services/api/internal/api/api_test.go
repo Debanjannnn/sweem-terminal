@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
@@ -151,6 +152,15 @@ func (f *fakeStore) Strategy(_ context.Context, id, _ string) (Strategy, error) 
 func (f *fakeStore) Strategies(context.Context, string, bool) ([]Strategy, error) {
 	return []Strategy{f.strat}, f.err
 }
+func (f *fakeStore) Executions(_ context.Context, _ string, before *time.Time) ([]Execution, error) {
+	if before != nil {
+		f.log("before " + before.UTC().Format(time.RFC3339Nano))
+	}
+	return []Execution{}, f.err
+}
+func (f *fakeStore) Earnings(context.Context, string) (Earnings, error) {
+	return Earnings{OwedUSDC: "1.5", PaidUSDC: "0", FeesPaidUSDC: "0.4", Rows: []Earning{{ExecutionID: "e1", StrategyID: "st1", FeeUSDC: "3", CreatorOwedUSDC: "1.5"}}}, f.err
+}
 func (f *fakeStore) HasPerplAccount(context.Context, string, string) (bool, error) { return false, nil }
 func (f *fakeStore) OpenPosition(_ context.Context, did, wallet string, st Strategy, principal string, plan planner.Plan, fee, owed string) (string, string, error) {
 	f.log(strings.Join([]string{"open", did, wallet, st.ID, principal, fee, owed}, " "))
@@ -288,6 +298,10 @@ func TestHandlers(t *testing.T) {
 		{"strategies apy", "GET", "/api/v1/strategies", "", "", nil, nil, "", "", 200, `"apy":{"estimate":"0.040000"`},
 		{"backtest proxy error", "POST", "/api/v1/strategies/" + uid + "/backtest", "", `{"from":"2026-01-01"}`, nil, nil, "", "", 422, `"no_data"`},
 		{"bad id", "GET", "/api/v1/me/executions/xyz", "good", "", nil, nil, "", "", 400, "bad_request"},
+		{"executions before", "GET", "/api/v1/me/executions?before=2026-10-01T12:00:00.123456%2B02:00", "good", "", nil, nil, "", "", 200, "[]"},
+		{"executions bad before", "GET", "/api/v1/me/executions?before=yesterday", "good", "", nil, nil, "", "", 400, "bad_request"},
+		{"earnings", "GET", "/api/v1/me/earnings", "good", "", nil, nil, "", "", 200,
+			`{"owedUsdc":"1.5","paidUsdc":"0","feesPaidUsdc":"0.4","rows":[{"executionId":"e1","strategyId":"st1","feeUsdc":"3","creatorOwedUsdc":"1.5","paid":false,"createdAt":"0001-01-01T00:00:00Z"}]}`},
 	}
 	for _, tc := range cases {
 		st := &fakeStore{err: tc.storeErr, wallet: strings.ToLower(tc.wallet), status: tc.posStatus, strat: usdcStrat}
@@ -309,6 +323,10 @@ func TestHandlers(t *testing.T) {
 			t.Errorf("%s: %d %s", tc.name, w.Code, body)
 		}
 		switch tc.name {
+		case "executions before":
+			if st.calls[1] != "before 2026-10-01T10:00:00.123456Z" {
+				t.Errorf("before: %v", st.calls)
+			}
 		case "delegation ok":
 			if st.calls[1] != "put did:privy:u1 w1 0x00000000000000000000000000000000000000bb q1" {
 				t.Errorf("put args: %v", st.calls)
@@ -327,7 +345,7 @@ func TestHandlers(t *testing.T) {
 				t.Errorf("withdraw: %v %+v", st.settled, st.execs)
 			}
 		case "backtest proxy error":
-			if !strings.Contains(string(hist.got), `"legs":[{"kind":"lending","venue":"aave-v3","weight":"1"}]`) || !strings.Contains(string(hist.got), `"from":"2026-01-01"`) {
+			if !strings.Contains(string(hist.got), `"legs":[{"kind":"lending","venue":"aave","weight":"1"}]`) || !strings.Contains(string(hist.got), `"from":"2026-01-01"`) {
 				t.Errorf("history request: %s", hist.got)
 			}
 		}
@@ -390,5 +408,55 @@ func TestWithdrawResume(t *testing.T) {
 		if (want == "") != (len(st.settled) == 0) || (want != "" && st.settled[0] != want) {
 			t.Errorf("%s: settled %v want %q", tc.name, st.settled, want)
 		}
+	}
+}
+
+func (f *fakeStore) CreateStrategy(_ context.Context, did string, in StrategyInput) (Strategy, error) {
+	f.strat = Strategy{ID: "st2", Creator: did, Name: in.Name, Strategy: in.Strategy}
+	return f.strat, f.err
+}
+
+// multi-token strategy: stored with sleeves, backtested as history's sleeves body, APY weighted per sleeve; 1 sleeve folds.
+func TestStrategySleeves(t *testing.T) {
+	multi := `{"name":"mix","sleeves":[{"asset":"USDC","weightBps":4000,"sources":[{"kind":"lending","venue":"aave","weightBps":10000}]},
+		{"asset":"WETH","weightBps":6000,"sources":[{"kind":"basis","venue":"perpl","weightBps":10000,"params":{"leverage":"2"}}]}],"rules":{"driftBps":300}}`
+	one := `{"name":"one","sleeves":[{"asset":"USDC","weightBps":10000,"sources":[{"kind":"lending","venue":"aave","weightBps":10000}]}],"rules":{}}`
+	run := func(method, path, body string) (*fakeStore, *fakeHistory, int, string) {
+		st := &fakeStore{strat: usdcStrat}
+		hist := &fakeHistory{status: 422, body: `{"error":"no_data"}`}
+		srv := &Server{Store: st, Auth: fakeAuth{}, Plan: &planner.Planner{Dep: testDep(t), Q: fakeQ{}, MaxStepUSD: 1000}, Rates: fakeRates{}, History: hist}
+		if method == "GET" {
+			st.strat.Strategy = planner.Strategy{}
+			json.Unmarshal([]byte(multi), &st.strat.Strategy)
+		}
+		mux := http.NewServeMux()
+		srv.Routes(mux)
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer good")
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		return st, hist, w.Code, w.Body.String()
+	}
+	st, hist, code, body := run("POST", "/api/v1/strategies", multi)
+	if code != 201 || len(st.strat.Sleeves) != 2 || !strings.Contains(body, `"sleeves":[{"asset":"USDC","weightBps":4000`) {
+		t.Fatalf("multi create: %d %s", code, body)
+	}
+	var got map[string]any
+	json.Unmarshal(hist.got, &got)
+	want := `{"amount":"1000","sleeves":[` +
+		`{"amount":"1","asset":"USDC","legs":[{"kind":"lending","venue":"aave","weight":"1"}],"rules":{"driftBps":"300"},"weight":"0.4"},` +
+		`{"amount":"1","asset":"WETH","legs":[{"kind":"basis","perpId":20,"venue":"","weight":"1"}],"rules":{"basisLeverage":"2","driftBps":"300"},"weight":"0.6"}]}`
+	if b, _ := json.Marshal(got); string(b) != want {
+		t.Errorf("history body:\n got %s\nwant %s", b, want)
+	}
+	if st, _, code, _ = run("POST", "/api/v1/strategies", one); code != 201 || st.strat.Asset != "USDC" || len(st.strat.Sources) != 1 || st.strat.Sleeves != nil {
+		t.Errorf("one sleeve must fold: %d %+v", code, st.strat)
+	}
+	if _, _, code, body = run("POST", "/api/v1/strategies", strings.Replace(multi, "4000", "3000", 1)); code != 400 || !strings.Contains(body, "invalid_sleeves") {
+		t.Errorf("bad weights: %d %s", code, body)
+	}
+	// aave 4% on the 40% USDC sleeve; no ETH funding rate → 0
+	if _, _, code, body = run("GET", "/api/v1/strategies", ""); code != 200 || !strings.Contains(body, `"apy":{"estimate":"0.016000","sources":[{"asset":"USDC","kind":"lending","venue":"aave","apy":"0.040000"},{"asset":"WETH","kind":"basis","venue":"perpl","apy":null}]}`) {
+		t.Errorf("multi apy: %d %s", code, body)
 	}
 }

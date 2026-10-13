@@ -255,17 +255,25 @@ func (s *Scheduler) trigger(ctx context.Context, c schedule, e exec) error {
 		if err != nil {
 			return err
 		}
-		px := decimal.NewFromInt(1)
-		if p.strat.Asset != "USDC" {
-			if px, err = s.price(ctx, p.strat.Asset); err != nil {
-				return err
+		parts := p.strat.Parts()
+		bs, err := planner.Split(parts, bals)
+		if err != nil {
+			return err
+		}
+		value := decimal.Zero // USDC: Σ sleeve value × its price
+		for k, pt := range parts {
+			px, v := decimal.NewFromInt(1), decimal.Zero
+			if pt.Asset != "USDC" {
+				if px, err = s.price(ctx, pt.Asset); err != nil {
+					return err
+				}
 			}
+			for _, b := range bs[k] {
+				v = v.Add(decimal.RequireFromString(b.Value))
+			}
+			value = value.Add(v.Shift(-s.decimals(pt.Asset)).Mul(px))
 		}
-		value := decimal.Zero
-		for _, b := range bals {
-			value = value.Add(decimal.RequireFromString(b.Value))
-		}
-		if !Hit(c.kind, value.Shift(-s.decimals(p.strat.Asset)).Mul(px), c.trigger) {
+		if !Hit(c.kind, value, c.trigger) {
 			return nil
 		}
 		e.positionID = &p.id

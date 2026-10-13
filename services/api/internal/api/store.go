@@ -22,7 +22,7 @@ type Store interface {
 
 	InsertExecution(ctx context.Context, did string, e NewExec) (string, error)
 	FailExecution(ctx context.Context, id, code string) error
-	Executions(ctx context.Context, did string) ([]Execution, error)
+	Executions(ctx context.Context, did string, before *time.Time) ([]Execution, error) // newest first, 200 per page
 	Execution(ctx context.Context, did, id string) (Execution, error)
 
 	BasketDefs(ctx context.Context, owner string) ([]Basket, error)                 // owner "" = public
@@ -58,6 +58,8 @@ type Store interface {
 	Schedules(ctx context.Context, did string) ([]Schedule, error)
 	CreateSchedule(ctx context.Context, did string, in ScheduleInput) (Schedule, error)
 	DeactivateSchedule(ctx context.Context, did, id string) error
+
+	Earnings(ctx context.Context, did string) (Earnings, error)
 }
 
 type User struct {
@@ -308,9 +310,11 @@ func scanExec(r pgx.CollectableRow) (Execution, error) {
 		&e.ScheduleID, &e.PositionID, &e.BasketID, &e.CreatedAt, &e.UpdatedAt)
 }
 
-func (p PG) Executions(ctx context.Context, did string) ([]Execution, error) {
-	// ponytail: last 200 only; add cursor pagination when needed
-	rows, _ := p.DB.Query(ctx, execSQL+` order by e.created_at desc limit 200`, did)
+func (p PG) Executions(ctx context.Context, did string, before *time.Time) ([]Execution, error) {
+	rows, err := p.DB.Query(ctx, execSQL+` and ($2::timestamptz is null or e.created_at < $2) order by e.created_at desc limit 200`, did, before)
+	if err != nil {
+		return nil, err
+	}
 	return collect(rows, scanExec)
 }
 
@@ -428,21 +432,26 @@ func (p PG) SetOrderStatus(ctx context.Context, id, status string) error {
 	return err
 }
 
-const strategyCols = `s.id::text, s.creator, u.wallet_address, s.name, s.asset, s.sources, s.rules, s.public, s.created_at, s.backtest
+const strategyCols = `s.id::text, s.creator, u.wallet_address, s.name, s.asset, s.sources, s.sleeves, s.rules, s.public, s.created_at, s.backtest
 from strategies s join users u on u.id=s.creator`
 
 func scanStrategy(r pgx.CollectableRow) (Strategy, error) {
 	var s Strategy
-	return s, r.Scan(&s.ID, &s.Creator, &s.CreatorWallet, &s.Name, &s.Asset, &s.Sources, &s.Rules, &s.Public, &s.CreatedAt, &s.Backtest)
+	return s, r.Scan(&s.ID, &s.Creator, &s.CreatorWallet, &s.Name, &s.Asset, &s.Sources, &s.Sleeves, &s.Rules, &s.Public, &s.CreatedAt, &s.Backtest)
 }
 
 func (p PG) CreateStrategy(ctx context.Context, did string, in StrategyInput) (Strategy, error) {
 	pub := in.Public == nil || *in.Public
 	src, _ := json.Marshal(in.Sources)
 	rules, _ := json.Marshal(in.Rules)
+	asset, sleeves := in.Asset, []byte(nil) // sleeves null = single-asset row
+	if len(in.Sleeves) > 0 {
+		asset, src = planner.Multi, []byte("[]")
+		sleeves, _ = json.Marshal(in.Sleeves)
+	}
 	var id string
-	if err := p.DB.QueryRow(ctx, `insert into strategies(creator, name, asset, sources, rules, public) values ($1,$2,$3,$4,$5,$6) returning id::text`,
-		did, in.Name, in.Asset, src, rules, pub).Scan(&id); err != nil {
+	if err := p.DB.QueryRow(ctx, `insert into strategies(creator, name, asset, sources, sleeves, rules, public) values ($1,$2,$3,$4,$5,$6,$7) returning id::text`,
+		did, in.Name, asset, src, sleeves, rules, pub).Scan(&id); err != nil {
 		return Strategy{}, err
 	}
 	return p.Strategy(ctx, id, did)
@@ -519,7 +528,7 @@ func (p PG) Position(ctx context.Context, did, id string) (Position, planner.Str
 	if err != nil {
 		return pos, st, notFound(err)
 	}
-	err = p.DB.QueryRow(ctx, `select asset, sources, rules from strategies where id=$1`, pos.StrategyID).Scan(&st.Asset, &st.Sources, &st.Rules)
+	err = p.DB.QueryRow(ctx, `select asset, sources, sleeves, rules from strategies where id=$1`, pos.StrategyID).Scan(&st.Asset, &st.Sources, &st.Sleeves, &st.Rules)
 	return pos, st, err
 }
 
@@ -624,6 +633,47 @@ func (p PG) DeactivateSchedule(ctx context.Context, did, id string) error {
 }
 
 // collect never returns a nil slice, so JSON lists are [] not null.
+type Earning struct {
+	ExecutionID     string    `json:"executionId"`
+	StrategyID      string    `json:"strategyId"`
+	FeeUSDC         string    `json:"feeUsdc"`
+	CreatorOwedUSDC string    `json:"creatorOwedUsdc"`
+	Paid            bool      `json:"paid"`
+	CreatedAt       time.Time `json:"createdAt"`
+}
+
+type Earnings struct {
+	OwedUSDC     string    `json:"owedUsdc"`
+	PaidUSDC     string    `json:"paidUsdc"`
+	FeesPaidUSDC string    `json:"feesPaidUsdc"`
+	Rows         []Earning `json:"rows"`
+}
+
+// FeeCollected: fee_ledger rows are written with the deploy run, so only count those whose fee.transfer step went through.
+const FeeCollected = `exists (select 1 from executions e where e.id = f.execution_id and e.step_done >
+  (select min(i) - 1 from jsonb_array_elements(e.steps) with ordinality a(s, i) where s->>'action' = 'fee.transfer'))`
+
+// Earnings: creator side (owed/paid + rows) and follower side (fees paid); human USDC strings.
+func (p PG) Earnings(ctx context.Context, did string) (Earnings, error) {
+	var e Earnings
+	err := p.DB.QueryRow(ctx, `select coalesce(sum(creator_owed_usdc) filter (where creator = $1 and not paid), 0)::text,
+  coalesce(sum(creator_owed_usdc) filter (where creator = $1 and paid), 0)::text,
+  coalesce(sum(fee_usdc) filter (where user_id = $1), 0)::text
+from fee_ledger f where (creator = $1 or user_id = $1) and `+FeeCollected, did).Scan(&e.OwedUSDC, &e.PaidUSDC, &e.FeesPaidUSDC)
+	if err != nil {
+		return e, err
+	}
+	rows, err := p.DB.Query(ctx, `select execution_id::text, strategy_id::text, fee_usdc::text, creator_owed_usdc::text, paid, created_at
+from fee_ledger f where creator = $1 and `+FeeCollected+` order by created_at desc limit 200`, did)
+	if err != nil {
+		return e, err
+	}
+	e.Rows, err = collect(rows, func(r pgx.CollectableRow) (x Earning, err error) {
+		return x, r.Scan(&x.ExecutionID, &x.StrategyID, &x.FeeUSDC, &x.CreatorOwedUSDC, &x.Paid, &x.CreatedAt)
+	})
+	return e, err
+}
+
 func collect[T any](rows pgx.Rows, fn pgx.RowToFunc[T]) ([]T, error) {
 	xs, err := pgx.CollectRows(rows, fn)
 	if xs == nil {

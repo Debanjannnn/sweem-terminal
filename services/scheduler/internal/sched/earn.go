@@ -27,7 +27,7 @@ type position struct {
 // perpOf maps a basis asset to its Perpl market name (planner's hedge table).
 var perpOf = map[string]string{"WETH": "ETH", "cbBTC": "BTC", "MON": "MON"}
 
-const positionQ = `select p.id, p.user_id, lower(p.wallet), st.asset, st.sources, st.rules, p.legs, p.last_rebalance_at,
+const positionQ = `select p.id, p.user_id, lower(p.wallet), st.asset, st.sources, st.sleeves, st.rules, p.legs, p.last_rebalance_at,
 	(select s.drift_bps from schedules s where s.active and s.kind = 'rebalance' and s.target_type = 'position' and s.target_id = p.id::text limit 1),
 	coalesce((select jsonb_agg(jsonb_build_object('asset', st2.asset, 'legs', p2.legs)) from strategy_positions p2 join strategies st2 on st2.id = p2.strategy_id
 		where p2.wallet = p.wallet and p2.id <> p.id and p2.status = 'open'), '[]')
@@ -36,7 +36,7 @@ const positionQ = `select p.id, p.user_id, lower(p.wallet), st.asset, st.sources
 
 func scanPosition(r pgx.CollectableRow) (p position, err error) {
 	var sources, rulesJSON, legs, peers []byte
-	if err = r.Scan(&p.id, &p.user, &p.wallet, &p.strat.Asset, &sources, &rulesJSON, &legs, &p.last, &p.driftOverride, &peers); err != nil {
+	if err = r.Scan(&p.id, &p.user, &p.wallet, &p.strat.Asset, &sources, &p.strat.Sleeves, &rulesJSON, &legs, &p.last, &p.driftOverride, &peers); err != nil {
 		return p, err
 	}
 	var raw []struct {
@@ -94,100 +94,135 @@ func (s *Scheduler) positions(ctx context.Context, now time.Time) {
 	}
 }
 
-// evaluate runs, in order: Perpl liquidation guard, funding gate, lending rate switch, drift rebalance. At most one execution.
+// evaluate runs per sleeve, in order: Perpl liquidation guard, funding gate, lending rate switch, drift rebalance.
+// A firing guard is submitted alone at once; sleeve rebalances are merged into one execution (within MaxSteps).
+// ponytail: one sleeve's rebalance resets the min interval for all (per-position clock); per-sleeve clocks if that bites.
 func (s *Scheduler) evaluate(ctx context.Context, p position, now time.Time) error {
-	if len(p.legs) != len(p.strat.Sources) {
+	parts := p.strat.Parts()
+	legs, err := planner.Split(parts, p.legs)
+	if err != nil {
 		return errors.New("legs do not match sources")
 	}
 	rates, err := streams.Get[streams.RatesSnapshot](ctx, s.RDB, streams.RatesLatest)
 	if err != nil || time.Since(time.UnixMilli(rates.Ts)) > s.MaxAge {
 		return fmt.Errorf("rates stale: %v", err) // gate + switch need fresh rates; never act without them
 	}
-	bals, err := s.Chain.Balances(ctx, p.wallet, p.strat, p.legs, p.peers)
+	all, err := s.Chain.Balances(ctx, p.wallet, p.strat, p.legs, p.peers)
 	if err != nil {
 		return err
 	}
-	basis, perpID := -1, 0
-	for i, src := range p.strat.Sources {
-		if src.Kind == "basis" {
-			basis, perpID = i, s.Dep.Perpl.PerpIds[perpOf[p.strat.Asset]]
-		}
-	}
-	on := make([]bool, len(p.legs))
-	var perp Perp
-	if basis >= 0 {
-		on[basis] = decimal.RequireFromString(orZero(p.legs[basis].Lot)).IsPositive()
-		if perp, err = s.Chain.Perp(ctx, p.wallet, perpID); err != nil {
-			return err
-		}
-	}
-	apy := make([]decimal.Decimal, len(p.legs))
-	for i, src := range p.strat.Sources {
-		apy[i] = rateOf(rates, src, p.strat.Asset)
+	bals, err := planner.Split(parts, all)
+	if err != nil {
+		return err
 	}
 	claim := []any{`update strategy_positions set last_rebalance_at = $2 where id = $1 and status = 'open'
 		and last_rebalance_at is not distinct from $3
 		and not exists (select 1 from executions e where e.position_id = $1 and (e.status in ('pending', 'submitted') or e.legs is not null))`,
 		p.id, now, p.last}
-	e := exec{positionID: &p.id, user: p.user}
+	e := exec{positionID: &p.id, user: p.user, kind: "rebalance", legs: append([]planner.LegState(nil), p.legs...)}
+	var errs []error
+	for k, off := 0, 0; k < len(parts); off, k = off+len(legs[k]), k+1 {
+		kind, plan, err := s.evalPart(ctx, p, p.strat.Part(parts[k]), legs[k], bals[k], rates, now)
+		switch {
+		case err != nil:
+			errs = append(errs, fmt.Errorf("%s: %w", parts[k].Asset, err))
+		case kind == "margin_guard":
+			e.kind, e.steps, e.legs = kind, plan.Steps, append([]planner.LegState(nil), p.legs...)
+			copy(e.legs[off:], plan.Legs)
+			return s.submit(ctx, claim, e)
+		case len(plan.Steps) > 0 && len(e.steps)+len(plan.Steps) <= planner.MaxSteps: // over the cap: next run
+			e.steps = append(e.steps, plan.Steps...)
+			copy(e.legs[off:], plan.Legs)
+		}
+	}
+	if len(e.steps) > 0 {
+		errs = append(errs, s.submit(ctx, claim, e))
+	}
+	return errors.Join(errs...)
+}
+
+// evalPart decides one sleeve (a single-asset strategy): "margin_guard" plan, rebalance plan, or nothing (empty Steps).
+// Plan.Legs = the sleeve's legs after it.
+func (s *Scheduler) evalPart(ctx context.Context, p position, st planner.Strategy, legs []planner.LegState, bals []planner.Balance,
+	rates streams.RatesSnapshot, now time.Time) (string, planner.Plan, error) {
+	var err error
+	basis, perpID := -1, 0
+	for i, src := range st.Sources {
+		if src.Kind == "basis" {
+			basis, perpID = i, s.Dep.Perpl.PerpIds[perpOf[st.Asset]]
+		}
+	}
+	on := make([]bool, len(legs))
+	var perp Perp
+	if basis >= 0 {
+		on[basis] = decimal.RequireFromString(orZero(legs[basis].Lot)).IsPositive()
+		if perp, err = s.Chain.Perp(ctx, p.wallet, perpID); err != nil {
+			return "", planner.Plan{}, err
+		}
+	}
+	apy := make([]decimal.Decimal, len(legs))
+	for i, src := range st.Sources {
+		apy[i] = rateOf(rates, src, st.Asset)
+	}
 
 	// (c) liquidation guard: top up margin, else cut the short; full close (spot parked in lending) only as a last resort
 	if basis >= 0 && on[basis] {
 		usdc, err := s.Chain.Wallet(ctx, p.wallet, "USDC")
 		if err != nil {
-			return err
+			return "", planner.Plan{}, err
 		}
 		if g := Guard(perp, s.GuardBuffer, usdc); g.Fire {
-			e.kind = "margin_guard"
-			lot := decimal.RequireFromString(p.legs[basis].Lot)
+			lot := decimal.RequireFromString(legs[basis].Lot)
 			var plan planner.Plan
 			switch {
 			case g.CloseAll || g.LotCut.GreaterThanOrEqual(lot):
 				off := append([]bool(nil), on...)
 				off[basis] = false
-				plan, err = s.P.Rebalance(ctx, p.strat, p.legs, bals, Targets(p.strat.Sources, off, apy, nil), perp.Account > 0, s.Slippage)
+				plan, err = s.P.Rebalance(ctx, st, legs, bals, Targets(st.Sources, off, apy, nil), perp.Account > 0, s.Slippage)
 			default: // isolated margin: free balance + wallet top-up + released collateral all go into the position via addMargin
 				var r planner.Plan
-				if r, err = s.P.ResizeBasis(ctx, p.strat, p.legs[basis], g.LotCut.Neg(), g.TopUp, perp.Free.Add(g.Released), s.Slippage); err == nil {
-					plan.Steps, plan.Legs = r.Steps, append([]planner.LegState(nil), p.legs...)
+				if r, err = s.P.ResizeBasis(ctx, st, legs[basis], g.LotCut.Neg(), g.TopUp, perp.Free.Add(g.Released), s.Slippage); err == nil {
+					plan.Steps, plan.Legs = r.Steps, append([]planner.LegState(nil), legs...)
 					plan.Legs[basis] = r.Legs[0]
 				}
 			}
 			if err != nil || len(plan.Steps) == 0 {
-				return errors.Join(err, errors.New("guard: nothing planned"))
+				return "", planner.Plan{}, errors.Join(err, errors.New("guard: nothing planned"))
 			}
-			e.steps, e.legs = plan.Steps, plan.Legs
-			return s.submit(ctx, claim, e)
+			return "margin_guard", plan, nil
 		}
 	}
 
 	// (a) funding gate
 	want := append([]bool(nil), on...)
-	if basis >= 0 && p.strat.Rules.FundingGate != nil {
-		apr, ok := fundingAPR(rates, perpID)
-		if !ok {
-			return fmt.Errorf("funding %d missing", perpID)
+	if basis >= 0 && st.Rules.FundingGate != nil {
+		apr, ok, err := s.fundingAPR(ctx, rates, perpID, st.Rules.FundingGate.LookbackDays)
+		if err != nil {
+			return "", planner.Plan{}, err
 		}
-		want[basis] = Gate(on[basis], apr, decimal.RequireFromString(orZero(p.strat.Rules.FundingGate.APR)), s.GateBand)
+		if !ok {
+			return "", planner.Plan{}, fmt.Errorf("funding %d missing", perpID)
+		}
+		want[basis] = Gate(on[basis], apr, decimal.RequireFromString(orZero(st.Rules.FundingGate.APR)), s.GateBand)
 	}
 	var minGain *decimal.Decimal
-	if r := p.strat.Rules.RateSwitch; r != nil {
+	if r := st.Rules.RateSwitch; r != nil {
 		g := decimal.RequireFromString(orZero(r.MinGain))
 		minGain = &g
 	}
-	target := Targets(p.strat.Sources, want, apy, minGain)
+	target := Targets(st.Sources, want, apy, minGain)
 	flip := basis >= 0 && on[basis] != (target[basis] > 0)
 
 	// (b)+(d) drift toward targets (gate flips skip the interval; hysteresis already prevents churn)
-	band := p.strat.Rules.DriftBps
+	band := st.Rules.DriftBps
 	if p.driftOverride != nil {
 		band = *p.driftOverride
 	}
 	if band == 0 {
 		band = 500
 	}
-	minIv := time.Duration(p.strat.Rules.MinRebalanceSeconds) * time.Second
-	if p.strat.Rules.MinRebalanceSeconds == 0 {
+	minIv := time.Duration(st.Rules.MinRebalanceSeconds) * time.Second
+	if st.Rules.MinRebalanceSeconds == 0 {
 		minIv = 24 * time.Hour
 	}
 	values := make([]decimal.Decimal, len(bals))
@@ -196,14 +231,10 @@ func (s *Scheduler) evaluate(ctx context.Context, p position, now time.Time) err
 	}
 	due := p.last == nil || now.Sub(*p.last) >= minIv
 	if !flip && (!due || Drift(values, target) <= band) {
-		return nil
+		return "", planner.Plan{}, nil
 	}
-	plan, err := s.P.Rebalance(ctx, p.strat, p.legs, bals, target, perp.Account > 0, s.Slippage)
-	if err != nil || len(plan.Steps) == 0 {
-		return err
-	}
-	e.kind, e.steps, e.legs = "rebalance", plan.Steps, plan.Legs
-	return s.submit(ctx, claim, e)
+	plan, err := s.P.Rebalance(ctx, st, legs, bals, target, perp.Account > 0, s.Slippage)
+	return "rebalance", plan, err
 }
 
 func orZero(s string) string {
@@ -256,12 +287,25 @@ func rateOf(r streams.RatesSnapshot, src planner.Source, asset string) decimal.D
 	return decimal.Zero
 }
 
-// ponytail: gate uses the publisher's 7d trailing APR regardless of fundingGate.lookbackDays; other windows need a history read.
-func fundingAPR(r streams.RatesSnapshot, perpID int) (decimal.Decimal, bool) {
-	for _, f := range r.Funding {
-		if f.PerpID == perpID {
-			return f.AprShort7d, true
+// fundingAPR is the mean daily funding over the last `days` full UTC days × 365 (backtest's gate formula; rates are fractions
+// like the publisher's AprShort7d). No history (or days == 0) falls back to the publisher's 7d trailing APR.
+func (s *Scheduler) fundingAPR(ctx context.Context, r streams.RatesSnapshot, perpID, days int) (decimal.Decimal, bool, error) {
+	if days > 0 {
+		var apr *string
+		err := s.DB.QueryRow(ctx, `select (avg(rate) * 365)::text from series_funding_daily
+			where perp_id = $1 and day >= (now() at time zone 'utc')::date - $2::int and day < (now() at time zone 'utc')::date`, perpID, days).Scan(&apr)
+		if err != nil {
+			return decimal.Zero, false, err
+		}
+		if apr != nil {
+			v, err := decimal.NewFromString(*apr)
+			return v, err == nil, err
 		}
 	}
-	return decimal.Zero, false
+	for _, f := range r.Funding {
+		if f.PerpID == perpID {
+			return f.AprShort7d, true, nil
+		}
+	}
+	return decimal.Zero, false, nil
 }

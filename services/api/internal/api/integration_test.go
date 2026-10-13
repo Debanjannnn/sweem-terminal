@@ -10,6 +10,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -196,7 +197,7 @@ func TestFlow(t *testing.T) {
 	// strategy: create (backtest stored), explore with apy, deploy, withdraw
 	var st Strategy
 	call("POST", "/api/v1/strategies", `{"name":"Safe USDC","asset":"USDC","sources":[{"kind":"lending","venue":"aave","weightBps":10000}],"rules":{"driftBps":300}}`, 201, &st)
-	if !strings.Contains(string(st.Backtest), `"apyUsd":"0.041000"`) || !strings.Contains(string(histReq), `"venue":"aave-v3"`) {
+	if !strings.Contains(string(st.Backtest), `"apyUsd":"0.041000"`) || !strings.Contains(string(histReq), `"venue":"aave"`) {
 		t.Fatalf("backtest: %s / req %s", st.Backtest, histReq)
 	}
 	var list []Strategy
@@ -273,6 +274,16 @@ func TestFlow(t *testing.T) {
 	call("GET", "/api/v1/me/executions", "", 200, &exs)
 	if len(exs) != 6 {
 		t.Fatalf("executions: %d", len(exs))
+	}
+	var older []Execution
+	call("GET", "/api/v1/me/executions?before="+url.QueryEscape(exs[1].CreatedAt.Format(time.RFC3339Nano)), "", 200, &older)
+	if len(older) != 4 || older[0].ID != exs[2].ID {
+		t.Fatalf("executions before: %+v", older)
+	}
+	var earn Earnings
+	call("GET", "/api/v1/me/earnings", "", 200, &earn) // own strategy: fee paid, nothing owed to self
+	if earn.FeesPaidUSDC != "0.4" || earn.OwedUSDC != "0" || earn.PaidUSDC != "0" || len(earn.Rows) != 0 {
+		t.Fatalf("earnings: %+v", earn)
 	}
 
 	p := PG{DB: db}
@@ -412,5 +423,34 @@ func TestClientSigned(t *testing.T) {
 	call("POST", "/api/v1/me/trade/record", rec([]string{h1, h2}), 200, &e)
 	if e.Status != "failed" || e.StepDone != 0 || e.Kind != "trade" {
 		t.Fatalf("reverted: %+v", e)
+	}
+}
+
+// multi-token strategy row: asset MULTI, sources [], sleeves jsonb; reads back valid for the planner.
+func TestStrategySleevesStore(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	p := PG{DB: db}
+	if _, err := db.Exec(ctx, `insert into users(id) values ('did:privy:m')`); err != nil {
+		t.Fatal(err)
+	}
+	var in StrategyInput
+	json.Unmarshal([]byte(`{"name":"mix","sleeves":[{"asset":"USDC","weightBps":4000,"sources":[{"kind":"lending","venue":"aave","weightBps":10000}]},
+		{"asset":"WETH","weightBps":6000,"sources":[{"kind":"lending","venue":"aave","weightBps":10000}]}],"rules":{"driftBps":300}}`), &in)
+	st, err := p.CreateStrategy(ctx, "did:privy:m", in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pl := &planner.Planner{Dep: testDep(t)}
+	if st.Asset != planner.Multi || len(st.Sources) != 0 || len(st.Sleeves) != 2 || st.Sleeves[1].Asset != "WETH" || pl.Validate(st.Strategy) != nil {
+		t.Fatalf("%+v %v", st, pl.Validate(st.Strategy))
+	}
+	b, _ := json.Marshal(st.Strategy)
+	if !strings.HasPrefix(string(b), `{"asset":"MULTI","sleeves":[{"asset":"USDC","weightBps":4000,`) {
+		t.Fatalf("json %s", b)
+	}
+	in = StrategyInput{Name: "one", Strategy: planner.Strategy{Asset: "USDC", Sources: in.Sleeves[0].Sources}}
+	if st, err = p.CreateStrategy(ctx, "did:privy:m", in); err != nil || st.Sleeves != nil || st.Asset != "USDC" {
+		t.Fatalf("single: %+v %v", st, err)
 	}
 }

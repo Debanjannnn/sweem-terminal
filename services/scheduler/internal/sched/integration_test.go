@@ -450,3 +450,61 @@ func TestPositionStopLossFullWithdraw(t *testing.T) {
 		t.Fatalf("status %s legs %s", status, legs)
 	}
 }
+
+func TestFundingAPRLookback(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	snap := streams.RatesSnapshot{Funding: []streams.FundingInfo{{PerpID: 20, AprShort7d: d("0.2")}}}
+	if apr, ok, err := e.a.fundingAPR(ctx, snap, 20, 7); err != nil || !ok || !apr.Equal(d("0.2")) {
+		t.Fatalf("no history ⇒ 7d fallback: %s %v %v", apr, ok, err)
+	}
+	day := time.Now().UTC().Truncate(24 * time.Hour)
+	for _, r := range []struct {
+		ago  int
+		h    int
+		rate string
+	}{{0, 1, "1"}, {1, 1, "0.0001"}, {1, 2, "0.0001"}, {2, 1, "0.0004"}, {10, 1, "1"}} { // today + 10d ago are out of a 7d window
+		e.exec(t, `insert into series_funding(perp_id, ts, rate) values (20, $1, $2)`, day.AddDate(0, 0, -r.ago).Add(time.Duration(r.h)*time.Hour), r.rate)
+	}
+	if apr, ok, err := e.a.fundingAPR(ctx, snap, 20, 7); err != nil || !ok || !apr.Equal(d("0.1095")) { // mean(0.0002, 0.0004) × 365
+		t.Fatalf("%s %v %v", apr, ok, err)
+	}
+}
+
+// two drifting sleeves (USDC aave/neverland, WETH aave/euler) ⇒ one rebalance execution, legs merged in flat order.
+func TestMultiSleeveRebalance(t *testing.T) {
+	e := setup(t)
+	sleeves := `[{"asset":"USDC","weightBps":5000,"sources":[{"kind":"lending","venue":"aave","weightBps":5000},{"kind":"lending","venue":"neverland","weightBps":5000}]},
+		{"asset":"WETH","weightBps":5000,"sources":[{"kind":"lending","venue":"aave","weightBps":5000},{"kind":"lending","venue":"euler-k3weth","weightBps":5000}]}]`
+	var stid string
+	e.db.QueryRow(context.Background(), `insert into strategies(creator,name,asset,sources,sleeves,rules) values ($1,'m','MULTI','[]',$2,'{"driftBps":500}') returning id`, user, sleeves).Scan(&stid)
+	legs := `[{"token":"USDC","kind":"lending","venue":"aave","asset":"70000000"},{"token":"USDC","kind":"lending","venue":"neverland","asset":"30000000"},
+		{"token":"WETH","kind":"lending","venue":"aave","asset":"70000000000000000"},{"token":"WETH","kind":"lending","venue":"euler-k3weth","asset":"30000000000000000"}]`
+	e.exec(t, `insert into strategy_positions(strategy_id,user_id,wallet,principal_usdc,status,legs) values ($1,$2,$3,200,'open',$4)`, stid, user, wallet, legs)
+	e.chain.bals = []planner.Balance{{Value: "70000000"}, {Value: "30000000"}, {Value: "70000000000000000"}, {Value: "30000000000000000", Shares: "30000000000000000"}}
+	e.rates(t, "0.1")
+	e.evaluate(t)
+	ids := e.calls(1)
+	if len(ids) != 1 {
+		t.Fatalf("calls %v", ids)
+	}
+	kind, steps := e.steps(t, ids[0])
+	want := []string{"lend.withdraw USDC 20000000", "lend.supply USDC 20000000", "lend.withdraw WETH 20000000000000000", "vault.deposit  20000000000000000"}
+	if kind != "rebalance" || len(steps) != len(want) {
+		t.Fatalf("%s %+v", kind, steps)
+	}
+	for i, st := range steps {
+		if got := st.Action + " " + st.Asset + " " + st.Amount; got != want[i] {
+			t.Errorf("step %d: %s want %s", i, got, want[i])
+		}
+	}
+	e.confirmAll(t)
+	if err := e.a.reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var got []planner.LegState
+	e.db.QueryRow(context.Background(), `select legs from strategy_positions`).Scan(&got)
+	if len(got) != 4 || got[1].Token != "USDC" || got[1].Asset != "50000000" || got[3].Token != "WETH" || got[3].Asset != "50000000000000000" {
+		t.Fatalf("legs %+v", got)
+	}
+}

@@ -9,12 +9,13 @@ import { useSession } from "@/lib/session";
 import { Button, Divider, ErrorBox, Label, Notice, Panel } from "@/components/ui";
 import { TokenIcon } from "@/components/TokenIcon";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { ProtocolIcon } from "@/components/ProtocolIcon";
 import { Field, inputCls } from "@/components/automation/ScheduleForm";
 import { evenSplit, setWeight, weightsError } from "@/components/create/weights";
 import { cn } from "@/lib/utils";
 import { BacktestView, pct } from "./Backtest";
 import { fmtAmt, StrategyFlow } from "./StrategyFlow";
-import { ASSETS, blendedApy, leverageOf, defaultVenue, KIND_LABEL, kindsFor, lendingVenues, MAX_TOKENS, minDeposit, PERP, sourceApy, toBacktest } from "./sources";
+import { ASSETS, blendedApy, leverageOf, defaultVenue, KIND_LABEL, kindsFor, lendingVenues, MAX_TOKENS, minDeposit, PERP, sourceApy, toBacktest, protocolOf, venueName } from "./sources";
 
 type Pick = { kind: SourceKind; venue: string; bps: number; leverage: string };
 
@@ -278,11 +279,19 @@ export function StrategyBuilder() {
                             onValueChange={(v) => v && update(i, { venue: v })}
                           >
                             <SelectTrigger aria-label="Lending venue" className="h-10! w-full rounded-xl border-border bg-card px-3 dark:bg-card">
-                              <SelectValue />
+                              <SelectValue>
+                                {(v: string) => (
+                                  <span className="flex items-center gap-2">
+                                    <ProtocolIcon protocol={protocolOf(v)} size={18} />
+                                    {venueName(v)}
+                                  </span>
+                                )}
+                              </SelectValue>
                             </SelectTrigger>
                             <SelectContent alignItemWithTrigger={false} sideOffset={6} className="rounded-xl p-1">
                               {lendingVenues(asset).map((v) => (
                                 <SelectItem key={v.venue} value={v.venue} className="rounded-lg px-2.5 py-2">
+                                  <ProtocolIcon protocol={protocolOf(v.venue)} size={18} />
                                   {v.name}
                                 </SelectItem>
                               ))}

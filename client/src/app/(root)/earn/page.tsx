@@ -13,7 +13,8 @@ import { ErrorBox, Skeleton } from "@/components/ui";
 import { IconStack } from "@/components/invest/BasketCard";
 import { TabPill } from "@/components/motion";
 import { pct } from "@/components/earn/Backtest";
-import { ASSETS, blendedApy, KIND_LABEL, parts, venueName } from "@/components/earn/sources";
+import { ASSETS, blendedApy, KIND_LABEL, parts, venueName, protocolOf } from "@/components/earn/sources";
+import { ProtocolIcon } from "@/components/ProtocolIcon";
 
 const live = (s: Strategy, rates: ReturnType<typeof useRates>["rates"]) =>
   s.apy?.estimate != null ? Number(s.apy.estimate) : blendedApy(parts(s), rates);
@@ -148,7 +149,8 @@ export default function EarnPage() {
                         <div className="flex flex-wrap gap-1.5">
                           {parts(s).flatMap((sl, _, all) =>
                             sl.sources.map((src) => (
-                              <span key={sl.asset + src.kind + src.venue} className="rounded-full bg-secondary px-2 py-0.5 text-[11px]">
+                              <span key={sl.asset + src.kind + src.venue} className="inline-flex items-center gap-1 rounded-full bg-secondary py-0.5 pl-1 pr-2 text-[11px]">
+                                <ProtocolIcon protocol={protocolOf(src.venue)} size={14} />
                                 {all.length > 1 && `${sl.asset} `}
                                 {KIND_LABEL[src.kind]} · {venueName(src.venue)} {+((sl.weightBps * src.weightBps) / 1e6).toFixed(2)}%
                               </span>

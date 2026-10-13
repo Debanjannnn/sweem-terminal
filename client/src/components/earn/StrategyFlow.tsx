@@ -6,15 +6,16 @@ import "@xyflow/react/dist/style.css";
 import { ArrowDownUp, Droplets, Landmark, Layers, type LucideIcon } from "lucide-react";
 import type { SourceKind } from "@/lib/types";
 import { TokenIcon } from "@/components/TokenIcon";
+import { ProtocolIcon } from "@/components/ProtocolIcon";
 import { cn } from "@/lib/utils";
 import { pct } from "./Backtest";
-import { KIND_LABEL, LP_ASSUMED_APR, PERP, venueName } from "./sources";
+import { KIND_LABEL, LP_ASSUMED_APR, PERP, protocolOf, venueName } from "./sources";
 
 export type FlowLeg = { kind: SourceKind; venue: string; weightBps: number; apy: number | null; leverage: number };
 
 const KIND_ICON: Record<SourceKind, LucideIcon> = { lending: Landmark, staking: Layers, lp: Droplets, basis: ArrowDownUp };
 
-type CardData = { [k: string]: unknown; title: string; sub?: string; positive?: boolean; symbol?: string; kind?: SourceKind; ends?: "left" | "right" };
+type CardData = { [k: string]: unknown; title: string; sub?: string; positive?: boolean; symbol?: string; protocol?: string; kind?: SourceKind; ends?: "left" | "right" };
 type CardNode = Node<CardData, "card">;
 
 function Card({ data }: NodeProps<CardNode>) {
@@ -23,6 +24,7 @@ function Card({ data }: NodeProps<CardNode>) {
     <div className={cn("flex h-full items-center gap-2.5 rounded-xl border px-3", data.ends === "left" ? "border-primary/40 bg-primary/5" : "border-border bg-card")}>
       {data.ends !== "left" && <Handle type="target" position={Position.Left} className="!opacity-0" />}
       {data.symbol && <TokenIcon symbol={data.symbol} size={22} />}
+      {data.protocol && <ProtocolIcon protocol={data.protocol} size={22} />}
       {Icon && (
         <span className="grid size-[22px] shrink-0 place-items-center rounded-full bg-secondary text-muted-foreground">
           <Icon className="size-3" />
@@ -59,12 +61,12 @@ function leaves(l: FlowLeg, asset: string, amt: number): CardData[] {
   if (l.kind === "basis") {
     const L = l.leverage;
     return [
-      { title: "Kuru spot", sub: `${fmtAmt((amt * L) / (L + 1))} ${asset} long` },
-      { title: `Perpl ${PERP[asset]?.name ?? ""} short`, sub: `${L}× · ${apy} funding`, positive: l.apy !== null },
+      { title: "Kuru spot", sub: `${fmtAmt((amt * L) / (L + 1))} ${asset} long`, protocol: "kuru" },
+      { title: `Perpl ${PERP[asset]?.name ?? ""} short`, sub: `${L}× · ${apy} funding`, positive: l.apy !== null, protocol: "perpl" },
     ];
   }
-  if (l.kind === "lp") return [{ title: "Kuru ActiveVault", sub: `~${pct(LP_ASSUMED_APR, 0)} est. · 4d lock`, positive: true }];
-  return [{ title: venueName(l.venue), sub: `${apy} APY`, positive: l.apy !== null }];
+  if (l.kind === "lp") return [{ title: "Kuru ActiveVault", sub: `~${pct(LP_ASSUMED_APR, 0)} est. · 4d lock`, positive: true, protocol: "kuru" }];
+  return [{ title: venueName(l.venue), sub: `${apy} APY`, positive: l.apy !== null, protocol: protocolOf(l.venue) }];
 }
 
 export function StrategyFlow({ asset, amount, legs }: { asset: string; amount: number; legs: FlowLeg[] }) {

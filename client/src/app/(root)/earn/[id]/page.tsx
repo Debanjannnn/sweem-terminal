@@ -11,7 +11,8 @@ import { TokenIcon } from "@/components/TokenIcon";
 import { IconStack } from "@/components/invest/BasketCard";
 import { AllocationDonut, BacktestView, pct } from "@/components/earn/Backtest";
 import { DeployPanel } from "@/components/earn/DeployPanel";
-import { blendedApy, KIND_LABEL, leverageOf, parts, sourceApy, toBacktest, venueName } from "@/components/earn/sources";
+import { blendedApy, KIND_LABEL, leverageOf, parts, sourceApy, toBacktest, venueName, protocolOf } from "@/components/earn/sources";
+import { ProtocolIcon } from "@/components/ProtocolIcon";
 
 export default function StrategyPage() {
   const id = useParams<{ id: string }>().id;
@@ -87,7 +88,10 @@ export default function StrategyPage() {
                       return (
                         <li key={`${src.kind}${src.venue}`} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-3">
                           <span className="rounded-md bg-secondary/60 px-2 py-0.5 text-[11px] text-muted-foreground">{KIND_LABEL[src.kind]}</span>
-                          <span className="font-medium">{venueName(src.venue)}</span>
+                          <span className="inline-flex items-center gap-2 font-medium">
+                            <ProtocolIcon protocol={protocolOf(src.venue)} size={18} />
+                            {venueName(src.venue)}
+                          </span>
                           {src.kind === "basis" && <span className="text-xs text-muted-foreground">{leverageOf(src)}× short</span>}
                           {src.kind === "lp" && <span className="text-xs text-warning">estimated · 4-day lock</span>}
                           <span className="tnum ml-auto text-muted-foreground">{src.weightBps / 100}%</span>

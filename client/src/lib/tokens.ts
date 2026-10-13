@@ -9,10 +9,10 @@ const META: Record<string, { name: string; icon?: string; color?: string }> = {
   WETH: { name: "Ether", icon: "/tokens/eth.svg" },
   cbBTC: { name: "Bitcoin", icon: "/tokens/cbbtc.png" },
   XAUt0: { name: "Gold", icon: "/tokens/xaut.png", color: "#D4AF37" },
-  AUSD: { name: "Agora USD", color: "#3b82f6" },
-  USDT0: { name: "Tether USD", color: "#26A17B" },
+  AUSD: { name: "Agora USD", icon: "/tokens/ausd.png", color: "#3b82f6" },
+  USDT0: { name: "Tether USD", icon: "/tokens/usdt0.png", color: "#26A17B" },
   WMON: { name: "Wrapped Monad", icon: "/tokens/mon.png" },
-  shMON: { name: "shMonad", color: "#836EF9" },
+  shMON: { name: "shMonad", icon: "/tokens/shmon.png", color: "#836EF9" },
 };
 
 const list: Token[] = Object.entries(DEPLOYMENTS.tokens).map(([symbol, t]) => ({

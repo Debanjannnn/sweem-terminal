@@ -21,7 +21,8 @@ import { ExecutionLog, ScheduleList } from "@/components/automation/ScheduleList
 import { ScheduleForm } from "@/components/automation/ScheduleForm";
 import { OrderList } from "@/components/trade/LimitPanel";
 import { ExecutionProgress } from "@/components/Execution";
-import { KIND_LABEL, venueName } from "@/components/earn/sources";
+import { KIND_LABEL, venueName, protocolOf } from "@/components/earn/sources";
+import { ProtocolIcon } from "@/components/ProtocolIcon";
 
 const STABLES = new Set(["USDC", "AUSD", "USDT0"]);
 const PRICE_OF: Record<string, string> = { WMON: "MON" };
@@ -219,6 +220,7 @@ function PositionCard({ p, priceOf, onChange }: { p: Position; priceOf: (sym: st
             <li key={`${g.token}${i}`} className="flex items-center gap-2">
               {groups.length > 1 && <TokenIcon symbol={g.token} size={14} />}
               <span className="rounded-md bg-secondary/60 px-1.5 py-0.5 text-[10px] text-muted-foreground">{KIND_LABEL[l.kind as keyof typeof KIND_LABEL] ?? l.kind}</span>
+              <ProtocolIcon protocol={protocolOf(l.venue)} size={14} />
               {venueName(l.venue)}
               <span className="tnum ml-auto text-muted-foreground">
                 {fmtUnits(l.asset || "0", g.dec)} {g.token}

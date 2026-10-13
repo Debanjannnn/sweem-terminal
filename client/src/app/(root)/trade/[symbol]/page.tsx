@@ -17,6 +17,7 @@ import { LimitPanel } from "@/components/trade/LimitPanel";
 import { ScheduleForm } from "@/components/automation/ScheduleForm";
 import { ScheduleList } from "@/components/automation/ScheduleList";
 import { AutoHeight, Segmented } from "@/components/motion";
+import { ProtocolIcon } from "@/components/ProtocolIcon";
 
 type Tab = "market" | "limit" | "auto";
 
@@ -111,7 +112,8 @@ export default function TradePage() {
                 </a>
               </Detail>
               <Detail label="Kuru order book">
-                <a href={addressUrl(market.orderbook)} target="_blank" rel="noreferrer" className="tnum hover:underline">
+                <a href={addressUrl(market.orderbook)} target="_blank" rel="noreferrer" className="tnum inline-flex items-center gap-1.5 hover:underline">
+                  <ProtocolIcon protocol="kuru" size={16} />
                   {market.orderbook.slice(0, 8)}…{market.orderbook.slice(-6)}
                 </a>
               </Detail>

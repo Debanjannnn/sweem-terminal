@@ -22,7 +22,13 @@ export const PERP: Record<string, { id: number; name: string; maxLev: number }> 
 };
 
 const slug = (name: string) => name.toLowerCase().replace(/ /g, "-");
-const VAULTS = DEPLOYMENTS.lending.erc4626.map((v) => ({ venue: slug(v.name), name: v.name, asset: v.asset }));
+const VAULTS = DEPLOYMENTS.lending.erc4626.map((v) => ({ venue: slug(v.name), name: v.name, asset: v.asset, protocol: v.protocol }));
+
+// venue id → protocol (ProtocolIcon key); "perpl" basis legs trade spot on Kuru and short on Perpl
+export const protocolOf = (venue: string) =>
+  ({ aave: "aave", neverland: "neverland", shmonad: "shmonad", "kuru-activevault": "kuru", perpl: "perpl" })[venue] ??
+  VAULTS.find((v) => v.venue === venue)?.protocol ??
+  venue;
 
 export function lendingVenues(asset: string): { venue: string; name: string }[] {
   const a = lendAsset(asset);

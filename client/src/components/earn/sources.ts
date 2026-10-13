@@ -121,15 +121,29 @@ const buyShare = (sl: Sleeve) =>
     return a + (s.weightBps / TOTAL_BPS) * (s.kind === "lp" ? 0.5 : s.kind === "basis" ? L / (L + 1) : 1);
   }, 0);
 
-// smallest USDC deposit whose per-token buy clears the Kuru min order (+5% buffer, after open fee).
-// Mirrors planner minDeposit; UI uses ticker mid, server check is authoritative. null = price unknown.
+const PERPL_MIN_COLLATERAL = 10; // AUSD, Perpl's min open (planner perplMinOpen)
+const AUSD_PER_USDC = 1 - (100 + 5) / TOTAL_BPS; // 1% slippage + 3pool fee, as the planner prices the swap
+
+// smallest USDC deposit that clears every floor, after the open fee: each token's Kuru min order (+5% buffer) and,
+// for the first basis hedge, Perpl's 10 AUSD min collateral. Mirrors planner minDeposit; UI uses ticker mid, server is
+// authoritative. null = price unknown.
+// ponytail: assumes no Perpl account yet (the planner skips that floor once one exists), so returning hedgers see a higher min
 export function minDeposit(sleeves: Sleeve[], prices: Record<string, number | null | undefined>) {
   const per: Record<string, number | null> = {};
+  let hedged = false;
   for (const sl of sleeves) {
     const m = marketOf(sl.asset);
-    const share = buyShare(sl) * (sl.weightBps / TOTAL_BPS) * (1 - FEE_BPS / TOTAL_BPS);
+    const w = (sl.weightBps / TOTAL_BPS) * (1 - FEE_BPS / TOTAL_BPS);
+    const share = buyShare(sl) * w;
     const px = prices[sl.asset];
-    per[sl.asset] = sl.asset === "USDC" || !m || share <= 0 ? 0 : px ? (m.minSize * px * 1.05) / share : null;
+    let need: number | null = sl.asset === "USDC" || !m || share <= 0 ? 0 : px ? (m.minSize * px * 1.05) / share : null;
+    const basis = sl.sources.find((s) => s.kind === "basis");
+    if (basis && !hedged) {
+      hedged = true;
+      const coll = (basis.weightBps / TOTAL_BPS / (leverageOf(basis) + 1)) * w * AUSD_PER_USDC;
+      if (need !== null) need = Math.max(need, PERPL_MIN_COLLATERAL / coll);
+    }
+    per[sl.asset] = need === null ? null : Math.ceil(need * 100) / 100; // cents, rounded up like the planner
   }
   const vals = Object.values(per);
   return { per, total: vals.some((v) => v === null) ? null : Math.max(0, ...(vals as number[])) };

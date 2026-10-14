@@ -15,7 +15,7 @@ import { EarningsCard } from "@/components/portfolio/Earnings";
 import { DelegationCard } from "@/components/automation/Delegation";
 import { ExecutionLog, ScheduleList } from "@/components/automation/ScheduleList";
 import { OrderList } from "@/components/trade/LimitPanel";
-import { PositionCard, PRICE_OF, STABLES } from "@/components/portfolio/PositionCard";
+import { PositionsTable, PRICE_OF, STABLES } from "@/components/portfolio/Positions";
 
 export default function PortfolioPage() {
   const { ready, authenticated, login, address } = useSession();
@@ -69,6 +69,7 @@ export default function PortfolioPage() {
     .filter((l) => l.amount > 0 && tickers[l.market]);
   const loading = !ready || holdings.loading || pxLoading;
   const mon = raw("MON");
+  const strats = new Map([...(baskets.data ?? []), ...(mine.data ?? [])].map((b) => [b.id, b]));
   const names = Object.fromEntries([...(baskets.data ?? []), ...(mine.data ?? [])].map((b) => [b.id, b.name]));
   const openOrders = (orders.data ?? []).filter((o) => o.status === "open" || o.status === "pending");
 
@@ -104,11 +105,7 @@ export default function PortfolioPage() {
           ) : (positions.data ?? []).length === 0 ? (
             <Panel className="p-5 text-sm text-muted-foreground">No baskets yet.</Panel>
           ) : (
-            <div className="grid gap-3 md:grid-cols-2">
-              {(positions.data ?? []).map((p) => (
-                <PositionCard key={p.id} p={p} priceOf={priceOf} onChange={positions.reload} />
-              ))}
-            </div>
+            <PositionsTable positions={positions.data ?? []} strategyOf={(id) => strats.get(id)} onChange={positions.reload} />
           )}
         </section>
 

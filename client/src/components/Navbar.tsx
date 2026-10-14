@@ -9,8 +9,6 @@ import { errMsg, fmtNum, shortHash } from "@/lib/api";
 import { addressUrl } from "@/lib/config";
 import { useCopy, useHoldings } from "@/lib/hooks";
 import { useSession } from "@/lib/session";
-import { USDC } from "@/lib/tokens";
-import { getAddress } from "viem";
 import { cn } from "@/lib/utils";
 import { BasketSearch } from "./BasketSearch";
 import { Row, Spinner, useDismissable } from "./ui";
@@ -135,10 +133,6 @@ function WalletMenu() {
                 <AddressRow label="Embedded wallet" address={address} />
               </dl>
               <Wallet />
-              <dl className="space-y-1 border-t border-border pt-3">
-                <AddressRow label="USDC contract" address={getAddress(USDC.address)} />
-                <Row label="MON">Native token, no contract</Row>
-              </dl>
               <AnyChainButton className="w-full justify-center rounded-lg border border-border bg-secondary/50 px-3 py-2 text-foreground hover:bg-secondary hover:no-underline" />
               <Automation />
               {err && <p className="text-xs break-words text-destructive">{err}</p>}

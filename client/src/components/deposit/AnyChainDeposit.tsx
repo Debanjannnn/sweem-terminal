@@ -4,12 +4,12 @@ import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useIsPresent } from "motion/react";
 import { Check, Copy, ExternalLink, Globe, X } from "lucide-react";
 import { isAddress } from "viem";
-import { AURORA_KEY, auroraQuote, auroraStatus, chainName, chainRank, EVM, getAuroraTokens, txHash, type AuroraQuote, type AuroraSwap, type AuroraToken } from "@/lib/aurora";
+import { AURORA_KEY, auroraQuote, auroraStatus, chainName, chainRank, EVM, getAuroraTokens, tokenLogos, txHash, type AuroraQuote, type AuroraSwap, type AuroraToken } from "@/lib/aurora";
 import { fmtUsd } from "@/lib/api";
 import { txUrl } from "@/lib/config";
 import { useCopy, useDebounced } from "@/lib/hooks";
 import { useAsync, useSession } from "@/lib/session";
-import { parseAmount } from "@/lib/tokens";
+import { parseAmount, tokenBySymbol } from "@/lib/tokens";
 import { cn } from "@/lib/utils";
 import { Button, ErrorBox, Row, Skeleton } from "@/components/ui";
 import { EASE } from "@/components/motion";
@@ -154,7 +154,7 @@ export function AnyChainDeposit({ need, onClose, onArrived }: { need?: number; o
         ) : (
           <>
             <Field label="From">
-              <More items={chains} keep={10} selected={chain}>
+              <More items={chains} keep={10} selected={chain} search={chainName} placeholder="Search chains">
                 {(c) => (
                   <Chip key={c} on={c === chain} onClick={() => (setChain(c), setAssetId(null))}>
                     {chainName(c)}
@@ -166,7 +166,7 @@ export function AnyChainDeposit({ need, onClose, onArrived }: { need?: number; o
               <More key={chain} items={onChain} keep={5} selected={token}>
                 {(t) => (
                   <Chip key={t.assetId} on={t.assetId === token?.assetId} onClick={() => setAssetId(t.assetId)}>
-                    <TokenIcon symbol={t.symbol === "ETH" ? "WETH" : t.symbol} size={16} />
+                    <AuroraIcon token={t} size={16} />
                     {t.symbol}
                   </Chip>
                 )}
@@ -340,19 +340,60 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   );
 }
 
-// first `keep` chips (plus the selected one), the rest behind a "+N more" toggle
-function More<T>({ items, keep, selected, children }: { items: T[]; keep: number; selected: T | undefined; children: (x: T) => React.ReactNode }) {
+// first `keep` chips (plus the selected one), the rest behind a "+N more" toggle; `search` adds a filter box over all items
+function More<T>({
+  items,
+  keep,
+  selected,
+  search,
+  placeholder,
+  children,
+}: {
+  items: T[];
+  keep: number;
+  selected: T | undefined;
+  search?: (x: T) => string;
+  placeholder?: string;
+  children: (x: T) => React.ReactNode;
+}) {
   const [all, setAll] = useState(false);
-  const shown = all ? items : items.filter((x, i) => i < keep || x === selected);
+  const [q, setQ] = useState("");
+  const needle = q.trim().toLowerCase();
+  const shown = needle && search ? items.filter((x) => search(x).toLowerCase().includes(needle)) : all ? items : items.filter((x, i) => i < keep || x === selected);
   return (
-    <div className="flex flex-wrap gap-1.5">
-      {shown.map(children)}
-      {items.length > shown.length && (
-        <button type="button" onClick={() => setAll(true)} className="rounded-full px-2 py-1 text-xs text-muted-foreground hover:text-foreground">
-          +{items.length - shown.length} more
-        </button>
+    <div className="space-y-2">
+      {search && (
+        <input
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder={placeholder}
+          aria-label={placeholder}
+          className="w-full rounded-full border border-border bg-transparent px-3 py-1.5 text-xs outline-none placeholder:text-muted-foreground/60 focus:border-primary/50"
+        />
       )}
+      <div className="flex flex-wrap gap-1.5">
+        {shown.map(children)}
+        {needle && shown.length === 0 && <span className="px-1 py-1 text-xs text-muted-foreground">No match</span>}
+        {!needle && items.length > shown.length && (
+          <button type="button" onClick={() => setAll(true)} className="rounded-full px-2 py-1 text-xs text-muted-foreground hover:text-foreground">
+            +{items.length - shown.length} more
+          </button>
+        )}
+      </div>
     </div>
+  );
+}
+
+// local icon if we ship one, else each remote logo in turn (onError → next), else nothing (no letter placeholder)
+function AuroraIcon({ token, size }: { token: AuroraToken; size: number }) {
+  const local = token.symbol === "ETH" ? "WETH" : token.symbol;
+  const [i, setI] = useState(0);
+  const urls = tokenLogos(token);
+  if (tokenBySymbol(local)?.icon) return <TokenIcon symbol={local} size={size} />;
+  if (i >= urls.length) return null;
+  return (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img src={urls[i]} alt={token.symbol} width={size} height={size} onError={() => setI(i + 1)} className="shrink-0 rounded-full" style={{ width: size, height: size }} />
   );
 }
 

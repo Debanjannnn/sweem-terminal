@@ -1,3 +1,5 @@
+import { getAddress } from "viem";
+
 // Aurora Intents (NEAR Intents 1Click): swap any asset on 30+ chains into USDC on Monad. The app key is public by design
 // (Aurora docs) and the API allows browser origins, so the client calls it directly.
 const BASE = "https://intents-api.aurora.dev/api";
@@ -103,3 +105,29 @@ export const chainName = (c: string) => CHAIN[c] ?? c.toUpperCase();
 // popular first, the rest alphabetical
 const ORDER = ["eth", "base", "arb", "sol", "btc", "op", "pol", "bsc", "avax", "tron", "near"];
 export const chainRank = (c: string) => (ORDER.includes(c) ? ORDER.indexOf(c) : ORDER.length);
+
+// Aurora tokens carry no logo: Trust Wallet's per-chain logo (native coin or contract), then coincap by symbol.
+// Callers try them in order and fall back to a letter. ponytail: public CDNs, no hosting; ~60% of the list has a logo.
+const TW: Record<string, string> = {
+  eth: "ethereum", base: "base", arb: "arbitrum", op: "optimism", pol: "polygon", bsc: "smartchain", avax: "avalanchec", gnosis: "xdai",
+  sol: "solana", tron: "tron", btc: "bitcoin", doge: "doge", xrp: "xrp", sui: "sui", cardano: "cardano", ltc: "litecoin",
+  bch: "bitcoincash", zec: "zcash", stellar: "stellar", aptos: "aptos", near: "near", ton: "ton", starknet: "starknet",
+};
+export function tokenLogos(t: AuroraToken): string[] {
+  const out: string[] = [];
+  const chain = TW[t.blockchain];
+  if (chain) {
+    const base = `https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/${chain}`;
+    const a = t.contractAddress;
+    if (!a) out.push(`${base}/info/logo.png`);
+    else if (a.startsWith("0x")) {
+      try {
+        out.push(`${base}/assets/${getAddress(a)}/logo.png`);
+      } catch {}
+    } else out.push(`${base}/assets/${a}/logo.png`);
+  }
+  // wrapped / staked tokens (wNEAR, stNEAR, wBTC) fall back to the underlying coin's logo
+  for (const sym of new Set([t.symbol, t.symbol.replace(/^(w|st)(?=[A-Z])/, "")]))
+    out.push(`https://assets.coincap.io/assets/icons/${sym.toLowerCase().replace(/[^a-z0-9]/g, "")}@2x.png`);
+  return out;
+}

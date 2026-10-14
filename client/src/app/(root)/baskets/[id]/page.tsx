@@ -20,7 +20,7 @@ import { cn } from "@/lib/utils";
 import { leverageOf, liveApy, parts, sourceApy, toBacktest } from "@/components/earn/sources";
 import { ScheduleForm } from "@/components/automation/ScheduleForm";
 import { ScheduleList } from "@/components/automation/ScheduleList";
-import { PositionCard, usePriceOf } from "@/components/portfolio/PositionCard";
+import { PositionsTable } from "@/components/portfolio/Positions";
 
 export default function BasketPage() {
   const id = useParams<{ id: string }>().id;
@@ -33,7 +33,6 @@ export default function BasketPage() {
   // the viewer's live positions in this basket (closed/failed stay on the portfolio page)
   const positions = useAsync(ready && authenticated ? `positions:${id}` : null, getPositions);
   const mine = (positions.data ?? []).filter((p) => p.strategyId === id && p.status !== "closed" && p.status !== "failed");
-  const priceOf = usePriceOf();
   const { rates } = useRates();
   // ponytail: backtest straight from history (no api write per view); api's stored summary shown when history is down
   const sleeves = s ? parts(s) : [];
@@ -130,11 +129,7 @@ export default function BasketPage() {
           {mine.length > 0 && (
             <section className="space-y-3">
               <h2 className="px-1 text-lg font-medium">Your positions</h2>
-              <div className="grid gap-3 xl:grid-cols-2">
-                {mine.map((p) => (
-                  <PositionCard key={p.id} p={p} priceOf={priceOf} onChange={positions.reload} />
-                ))}
-              </div>
+              <PositionsTable positions={mine} strategyOf={() => s ?? undefined} onChange={positions.reload} />
             </section>
           )}
 

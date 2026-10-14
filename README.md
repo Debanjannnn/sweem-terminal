@@ -283,3 +283,7 @@ make payout      # dry run creator payouts; ARGS=--send to pay
 ```
 
 Caddy terminates TLS on `api.$DOMAIN` and routes `/` to the api, `/data` to market-data and `/history` to history. The client deploys to Vercel.
+
+## License
+
+Apache License 2.0

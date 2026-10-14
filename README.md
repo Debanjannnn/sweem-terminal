@@ -183,56 +183,56 @@ After changing `deployments/143.json`, run `make client-abi` to copy it into the
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/v1/markets` | Tokens and Kuru markets |
-| GET | `/api/v1/strategies` | Public baskets with live APY |
-| GET | `/api/v1/strategies/{id}` | One basket (private ones for their creator) |
-| POST | `/api/v1/strategies/{id}/backtest` | Backtest a basket |
-| GET | `/api/v1/perpl/markets` | Perpl mark, open interest, margins and funding |
+| GET | [`/api/v1/markets`](services/api/internal/api/trade.go#L26) | Tokens and Kuru markets |
+| GET | [`/api/v1/strategies`](services/api/internal/api/earn.go#L114) | Public baskets with live APY |
+| GET | [`/api/v1/strategies/{id}`](services/api/internal/api/earn.go#L130) | One basket (private ones for their creator) |
+| POST | [`/api/v1/strategies/{id}/backtest`](services/api/internal/api/earn.go#L262) | Backtest a basket |
+| GET | [`/api/v1/perpl/markets`](services/api/internal/api/perpl.go#L51) | Perpl mark, open interest, margins and funding |
 
 ### User (Privy bearer token)
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/v1/me` | Profile and delegation |
-| POST, DELETE | `/api/v1/me/delegation` | Enable or revoke the delegated signer |
-| POST | `/api/v1/me/trade/prepare` | Unsigned transactions for a market trade |
-| POST | `/api/v1/me/trade/record` | Verify signed hashes and record the trade |
-| POST | `/api/v1/me/trade` | Market trade through the delegated signer |
-| POST | `/api/v1/me/margin/deposit` | Fund the Kuru margin account |
-| POST | `/api/v1/me/margin/withdraw` | Withdraw from the Kuru margin account |
-| GET, POST | `/api/v1/me/orders` | List or place limit orders |
-| DELETE | `/api/v1/me/orders/{id}` | Cancel a limit order |
-| GET | `/api/v1/me/holdings` | Wallet balances |
-| POST | `/api/v1/strategies` | Create a basket |
-| GET | `/api/v1/me/strategies` | Baskets the user created |
-| POST | `/api/v1/me/strategies/{id}/deploy` | Buy a basket |
-| GET | `/api/v1/me/positions` | Basket positions |
-| POST | `/api/v1/me/positions/{id}/withdraw` | Sell all or part of a position, or resume a failed sell |
-| GET | `/api/v1/me/positions/{id}/perpl` | Hedge risk as the scheduler sees it |
-| GET | `/api/v1/me/executions` | Execution history |
-| GET | `/api/v1/me/executions/{id}` | One execution with step progress |
-| GET, POST | `/api/v1/me/schedules` | List or create automations |
-| DELETE | `/api/v1/me/schedules/{id}` | Deactivate an automation |
-| GET | `/api/v1/me/earnings` | Creator earnings and fees paid |
+| GET | [`/api/v1/me`](services/api/internal/api/api.go#L240) | Profile and delegation |
+| POST, DELETE | [`/api/v1/me/delegation`](services/api/internal/api/api.go#L245) | Enable or revoke the delegated signer |
+| POST | [`/api/v1/me/trade/prepare`](services/api/internal/api/trade.go#L109) | Unsigned transactions for a market trade |
+| POST | [`/api/v1/me/trade/record`](services/api/internal/api/trade.go#L146) | Verify signed hashes and record the trade |
+| POST | [`/api/v1/me/trade`](services/api/internal/api/trade.go#L88) | Market trade through the delegated signer |
+| POST | [`/api/v1/me/margin/deposit`](services/api/internal/api/trade.go#L229) | Fund the Kuru margin account |
+| POST | [`/api/v1/me/margin/withdraw`](services/api/internal/api/trade.go#L229) | Withdraw from the Kuru margin account |
+| GET, POST | [`/api/v1/me/orders`](services/api/internal/api/trade.go#L258) | List or place limit orders |
+| DELETE | [`/api/v1/me/orders/{id}`](services/api/internal/api/trade.go#L308) | Cancel a limit order |
+| GET | [`/api/v1/me/holdings`](services/api/internal/api/trade.go#L341) | Wallet balances |
+| POST | [`/api/v1/strategies`](services/api/internal/api/earn.go#L148) | Create a basket |
+| GET | [`/api/v1/me/strategies`](services/api/internal/api/earn.go#L122) | Baskets the user created |
+| POST | [`/api/v1/me/strategies/{id}/deploy`](services/api/internal/api/earn.go#L284) | Buy a basket |
+| GET | [`/api/v1/me/positions`](services/api/internal/api/earn.go#L346) | Basket positions |
+| POST | [`/api/v1/me/positions/{id}/withdraw`](services/api/internal/api/earn.go#L353) | Sell all or part of a position, or resume a failed sell |
+| GET | [`/api/v1/me/positions/{id}/perpl`](services/api/internal/api/perpl.go#L117) | Hedge risk as the scheduler sees it |
+| GET | [`/api/v1/me/executions`](services/api/internal/api/api.go#L275) | Execution history |
+| GET | [`/api/v1/me/executions/{id}`](services/api/internal/api/api.go#L294) | One execution with step progress |
+| GET, POST | [`/api/v1/me/schedules`](services/api/internal/api/api.go#L306) | List or create automations |
+| DELETE | [`/api/v1/me/schedules/{id}`](services/api/internal/api/api.go#L327) | Deactivate an automation |
+| GET | [`/api/v1/me/earnings`](services/api/internal/api/api.go#L289) | Creator earnings and fees paid |
 
 ### Market Data
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/v1/books/{orderbook}` | Top 20 book snapshot |
-| GET | `/api/v1/quote/{orderbook}` | Market order quote with minimum out and max safe size |
-| GET | `/api/v1/candles/{orderbook}` | OHLCV candles (1m, 5m, 1h, 1d) |
-| GET | `/api/v1/rates` | Current venue yields and Perpl funding |
-| GET | `/api/v1/ws` | WebSocket topics `book.*`, `trades.*`, `candles.*`, `rates` |
+| GET | [`/api/v1/books/{orderbook}`](services/market-data/internal/routes/routes.go#L103) | Top 20 book snapshot |
+| GET | [`/api/v1/quote/{orderbook}`](services/market-data/internal/routes/routes.go#L166) | Market order quote with minimum out and max safe size |
+| GET | [`/api/v1/candles/{orderbook}`](services/market-data/internal/routes/routes.go#L197) | OHLCV candles (1m, 5m, 1h, 1d) |
+| GET | [`/api/v1/rates`](services/market-data/internal/routes/routes.go#L117) | Current venue yields and Perpl funding |
+| GET | [`/api/v1/ws`](services/market-data/internal/hub/hub.go#L143) | WebSocket topics `book.*`, `trades.*`, `candles.*`, `rates` |
 
 ### History
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/v1/series/rates` | Daily lending and staking APY |
-| GET | `/api/v1/series/funding` | Daily Perpl funding |
-| GET | `/api/v1/series/prices` | Daily Kuru prices |
-| POST | `/api/v1/backtest` | Simulate a single or multi token basket |
+| GET | [`/api/v1/series/rates`](services/history/internal/routes/routes.go#L78) | Daily lending and staking APY |
+| GET | [`/api/v1/series/funding`](services/history/internal/routes/routes.go#L95) | Daily Perpl funding |
+| GET | [`/api/v1/series/prices`](services/history/internal/routes/routes.go#L116) | Daily Kuru prices |
+| POST | [`/api/v1/backtest`](services/history/internal/routes/routes.go#L271) | Simulate a single or multi token basket |
 
 ## Automation
 

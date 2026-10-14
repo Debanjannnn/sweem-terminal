@@ -213,7 +213,7 @@ const NEXT: Record<PerplRisk["next"], (r: PerplRisk) => string> = {
 };
 
 export function PositionRisk({ positionId }: { positionId: string }) {
-  const r = useAsync(`perpl:${positionId}`, () => getPositionPerpl(positionId));
+  const r = useAsync(`perpl:${positionId}`, () => getPositionPerpl(positionId), 15_000); // live: exchange-contract reads
   if (r.error) return <ErrorBox message={`Perpl risk unavailable: ${r.error}`} />;
   if (!r.data) return <Skeleton className="h-40 w-full rounded-2xl" />;
   return (
@@ -279,5 +279,82 @@ function MarginGauge({ frac, maint, guardAt }: { frac: number; maint: number; gu
         <span className="text-warning">| guard {pct(guardAt, 0)}</span>
       </p>
     </div>
+  );
+}
+
+// ── 4. Risk page: every hedge market, protocol-level ─────────────────────────
+
+export function HedgeMarkets() {
+  const m = usePerplMarkets();
+  return (
+    <Panel className="space-y-4 p-5 sm:p-6">
+      <Head title="Hedge markets">
+        <Live />
+      </Head>
+      {m.error && <ErrorBox message={`Perpl unavailable: ${m.error}`} />}
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[800px] text-sm">
+          <thead className="text-left text-xs text-muted-foreground">
+            <tr className="border-b border-border">
+              <th className="py-3 font-normal">Market</th>
+              <th className="px-3 py-3 text-right font-normal">Mark</th>
+              <th className="px-3 py-3 text-right font-normal">Mark vs oracle</th>
+              <th className="px-3 py-3 text-right font-normal">Short funding (now)</th>
+              <th className="px-3 py-3 text-right font-normal">Short funding (7d)</th>
+              <th className="px-3 py-3 text-right font-normal">Open interest</th>
+              <th className="px-3 py-3 text-right font-normal">Max lev · maint</th>
+              <th className="py-3 pl-3 font-normal">30d funding</th>
+            </tr>
+          </thead>
+          <tbody className="tnum divide-y divide-border">
+            {m.data
+              ? m.data.markets.map((x) => <MarketRow key={x.perpId} m={x} />)
+              : !m.error &&
+                [0, 1, 2].map((i) => (
+                  <tr key={i}>
+                    <td colSpan={8} className="py-3">
+                      <Skeleton className="h-8 w-full" />
+                    </td>
+                  </tr>
+                ))}
+          </tbody>
+        </table>
+      </div>
+      {m.data && (
+        <p className="text-xs text-muted-foreground">
+          sweem guard tops up margin {pct(m.data.guardBuffer, 0)} above maintenance; the funding gate reopens a parked short once funding clears the
+          basket&apos;s threshold by {pct(m.data.gateBand, 0)}.
+        </p>
+      )}
+      <Source />
+    </Panel>
+  );
+}
+
+function MarketRow({ m }: { m: PerplMarket }) {
+  const f = useFunding30(m.perpId);
+  const mark = Number(m.mark);
+  const prem = Number(m.oracle) > 0 ? (mark - Number(m.oracle)) / Number(m.oracle) : null;
+  const oi = Number(m.shortOi) * mark; // every long has a short, so one side is the market's OI
+  return (
+    <tr>
+      <td className="py-3">
+        <span className="flex items-center gap-2">
+          <TokenIcon symbol={m.asset} size={20} />
+          <span className="font-medium">{m.name}-PERP</span>
+        </span>
+      </td>
+      <td className="px-3 py-3 text-right">{fmtUsd(mark)}</td>
+      <td className={cn("px-3 py-3 text-right", prem === null ? "" : prem >= 0 ? "text-positive" : "text-destructive")}>
+        {prem === null ? "-" : `${prem >= 0 ? "+" : ""}${(prem * 100).toFixed(3)}%`}
+      </td>
+      <td className={cn("px-3 py-3 text-right", signed(m.fundingApr))}>{m.fundingApr ? pct(m.fundingApr) : "-"}</td>
+      <td className={cn("px-3 py-3 text-right", signed(m.fundingApr7d))}>{m.fundingApr7d ? pct(m.fundingApr7d) : "-"}</td>
+      <td className="px-3 py-3 text-right">{fmtUsdCompact(oi)}</td>
+      <td className="px-3 py-3 text-right">
+        {Math.round(1 / Number(m.initMargin))}× · {pct(m.maintMargin, 1)}
+      </td>
+      <td className="w-36 py-3 pl-3">{f.data ? <Sparkline data={f.data.map((d) => Number(d.apr))} area className="h-8 w-32" /> : <Skeleton className="h-8 w-32" />}</td>
+    </tr>
   );
 }
